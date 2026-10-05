@@ -1,0 +1,620 @@
+//! The M12 shard: a bind group layout, its descriptor-set layout, its
+//! descriptor set, and the token that decides pipeline compatibility.
+//!
+//! **What this shard asserts.** The acceptance sentence
+//! (`docs/40-plan.md:475-480`) has two halves and they are two tests here. The
+//! first builds a layout with a sampled texture at binding 0 and a storage
+//! buffer at binding 1, creates the bind group from it, and asserts the
+//! `VkDescriptorSetLayout` handle is non-null and carries two bindings. The
+//! second creates a pipeline layout from that bind group layout and asserts the
+//! compatibility the `u64` token expresses.
+//!
+//! **Why the token is the second half.** Upstream refuses a deduced layout in
+//! a written pipeline layout at `PipelineLayout.cpp:122`-`:125`, and the token
+//! is the whole of that rule. So the observable is not "a pipeline layout was
+//! created" but "these two layouts are interchangeable and those two are not".
+//! The test therefore builds a second layout from the same descriptor with the
+//! same token and asserts it compares equal, then mints a token from
+//! `TokenCounter` and asserts the same descriptor with that token does not. A
+//! handle that merely existed would prove nothing, because upstream caches one
+//! `VkPipelineLayout` per specialization (`PipelineLayoutVk.cpp:116`-`:152`)
+//! and never asks the question twice.
+//!
+//! **Why the binding count is more than the handle.** A non-null handle is one
+//! bit, and a driver produces one for a layout it never checked. The count
+//! reaches the driver twice, and this shard asserts both paths: the per-type
+//! pool sizing `ComputeVulkanStaticBindings` produced
+//! (`BindGroupLayoutVk.cpp:56`-`:153`), and the number of sets the allocator
+//! cut from one pool of that sizing
+//! (`DescriptorSetAllocator.cpp:73`). Two bindings, two distinct descriptor
+//! types, one of each.
+//!
+//! **What this shard does not claim.** It does not claim a bind group with
+//! resources in it. `BindGroupVk.cpp` owns the descriptor write and no Zig file
+//! owns it yet — `layout_vk.zig`'s header names this — so the set here is
+//! allocated and non-null with nothing written into it, which is what
+//! `DescriptorSetAllocator` produces on its own. It claims no resource table
+//! and no static-sampler specialization, which `layout_vk.zig`'s header also
+//! names as not claimed.
+//!
+//! **The build wiring this shard needs.** The shard root is this file and the
+//! library is reached through `@import("dusk")`, so the shard module carries
+//! the `vulkan` module import alongside `dusk`: `src/pipeline/layout_vk.zig`
+//! resolves `@import("vulkan")` the same way `src/vk/dispatch.zig` does. That
+//! is the `addDispatchTestModule` shape at `build.zig:316`-`:331`.
+//!
+//! **The gate line runs this shard with `VK_LOADER_LAYERS_DISABLE=*`.** The
+//! assertion is `expectNoLayersForced` below, the helper
+//! `test/vulkan_device.zig:315`-`:339` carries, so both shards report which
+//! configuration they ran under.
+
+const std = @import("std");
+const vulkan = @import("vulkan");
+
+const dusk = @import("dusk");
+const bind_group_descriptor_set = dusk.pipeline.bind_group_descriptor_set;
+const bind_group_layout = dusk.pipeline.bind_group_layout;
+const layout_vk = dusk.pipeline.layout_vk;
+const vulkan_device = dusk.engine.vulkan_device;
+
+/// The queue serial `DescriptorSetAllocator.deallocate` takes. It comes through
+/// the published module rather than a relative path, because `src/vk` reached
+/// relatively is a different Zig module than the one `dusk` holds and the two
+/// sets would not be the same type.
+const serial = dusk.platform;
+
+/// The binding numbers the acceptance names.
+const sampled_texture_binding_number: u32 = 0;
+const storage_buffer_binding_number: u32 = 1;
+
+/// The binding count the acceptance asserts. It is also the divisor in the
+/// pool-sizing assertion below, which is what makes the two paths agree.
+const expected_binding_count: u32 = 2;
+
+/// The minimum binding size of the storage buffer. It is not zero on purpose:
+/// a zero-sized buffer counts towards `mUnverifiedBufferCount`
+/// (`BindGroupLayoutInternal.cpp:706`-`:708`), and a set whose only buffer
+/// cannot be checked against a size would make the pool-sizing assertion a
+/// claim about a layout no driver would accept.
+const storage_buffer_min_binding_size: u64 = 64;
+
+/// The index of the fragment stage inside a `BindingCounts` block.
+/// `stageIndex` (`layout_internal.zig:143`) returns 1 for `.fragment`, because
+/// `BindingTypeOrder`'s predecessors put vertex at 0. Dawn counts three stages
+/// at `Constants.h:42`.
+const fragment_stage_index: usize = 1;
+
+/// The per-stage storage-buffer ceilings this layout is validated against. One
+/// buffer in the fragment stage is inside both, so the layout builds.
+/// `ValidateBindingCounts` reads them off `CombinedLimits::compat`
+/// (`Limits.cpp:95`-`:96`).
+const validate_options: bind_group_layout.ValidateOptions = .{
+    .max_storage_buffers_in_vertex_stage = 0,
+    .max_storage_buffers_in_fragment_stage = 8,
+};
+
+/// The two descriptor types the acceptance's two bindings reach, named with
+/// the `VkDescriptorType` the pool-sizing switch and `descriptorTypeFor`
+/// (`layout_vk.zig:60`) both speak, not the `c_int` the generated constants
+/// carry (`src/vulkan.zig:3048`-`:3049`). One declaration per type is what
+/// lets each `expectEqual` below see a single `T`: it is generic over one type
+/// for both sides, and a `c_int` literal beside a `c_uint` result is a
+/// signedness the first cannot represent.
+const sampled_image_descriptor_type: vulkan.VkDescriptorType =
+    vulkan.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+const storage_buffer_descriptor_type: vulkan.VkDescriptorType =
+    vulkan.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+/// Everything this shard's own setup can report.
+///
+/// The library sets are merged in rather than listed, so a rule a new call site
+/// can report reaches the test's signature with the call. The three members at
+/// the end are this file's own.
+const TestError = vulkan_device.Backend.DiscoverError ||
+    vulkan_device.Device.CreateError ||
+    vulkan_device.AdapterList.FirstError ||
+    layout_vk.Error ||
+    bind_group_descriptor_set.Error ||
+    bind_group_layout.Error ||
+    // The failures a `std.testing` assertion can report: `expect` and
+    // `expectEqual` report `TestUnexpectedResult` and `TestExpectedEqual`,
+    // `expectError` reports `TestExpectedError` and `TestUnexpectedError`.
+    // A helper in this file asserts and cannot drop them, so naming them
+    // here beats a helper that silently stops asserting.
+    error{ TestUnexpectedResult, TestExpectedEqual, TestExpectedError, TestUnexpectedError } ||
+    error{
+        /// `findBindingByNumber` found nothing at the number the acceptance
+        /// names, which a sort that dropped an entry would produce.
+        NamedBindingMissing,
+        /// `vkCreateDescriptorSetLayout` returned success and a null handle.
+        DescriptorSetLayoutReturnedNull,
+        /// `vkCreatePipelineLayout` returned success and a null handle.
+        PipelineLayoutReturnedNull,
+        /// The pool sizing named a descriptor type this shard did not write,
+        /// which means the mapping in `layout_vk` produced a third kind for a
+        /// two-binding layout.
+        UnexpectedDescriptorType,
+    };
+
+/// Every teardown refusal one test body has not returned yet.
+///
+/// `defer` cannot fail in Zig 0.16, so a teardown that can refuse cannot
+/// return from the point where it refuses. It records the error here and the
+/// test returns it once the helpers below have unwound, which keeps every
+/// teardown a `defer` and still hands the shard the loader's own words instead
+/// of a trap carrying ours. `AGENTS.md` §3.1 makes a missing proc a typed
+/// error and forbids the panic, so recording is the shape that leaves both
+/// standing. `test/render_pipeline.zig:242`-`:269` is the same shape.
+const TeardownError = layout_vk.Error || bind_group_descriptor_set.Error;
+
+const TeardownErrors = struct {
+    first: ?TeardownError = null,
+
+    /// Records one refusal. The first is the one that matters: a teardown that
+    /// already failed left its handle in a state a later teardown cannot
+    /// describe, so a second report would bury the first.
+    fn record(self: *TeardownErrors, err: TeardownError) void {
+        if (self.first == null) self.first = err;
+    }
+
+    /// Returns the refusal the teardown recorded, or nothing when every
+    /// teardown ran. A body that already returned an error has failed the
+    /// shard, so a refusal from the teardown of that body adds no information
+    /// and is not reported twice.
+    fn report(self: *const TeardownErrors) TeardownError!void {
+        if (self.first) |err| return err;
+    }
+};
+
+test "test-bind-group" {
+    try expectNoLayersForced(std.testing.allocator);
+
+    var handles: vulkan_device.HandleSet = .{};
+    var teardowns: TeardownErrors = .{};
+
+    // The device, on the first physical device that survived M9's filters.
+    // `discoverPhysicalDevices` already refused anything below the Vulkan 1.1
+    // floor (`VulkanInfo.cpp:247`).
+    var backend = vulkan_device.Backend.init(std.testing.allocator, .{ .handles = &handles });
+
+    var adapters = try backend.discoverPhysicalDevices(.{});
+
+    const adapter = try adapters.first();
+    var device = try vulkan_device.Device.create(std.testing.allocator, .{
+        .instance = adapter.instance,
+        .physical = &adapter.physical,
+        .handles = &handles,
+    });
+
+    try testLayoutAndSet(std.testing.allocator, &device, &teardowns);
+    try testPipelineCompatibility(std.testing.allocator, &device, &teardowns);
+
+    // Teardown, in the order the handles were created, spelled out rather than
+    // left to a `defer`: the two assertions below read the device and the
+    // instance this releases (`Device::deinit` releases `.device`,
+    // `VulkanInstance::deinit` releases `.instance`), and a `defer` runs after
+    // them. The three calls in this order are what
+    // `test/vulkan_device.zig:196`-`:198` makes.
+    //
+    // `Device.deinit` and `Backend.deinit` resolve a dispatch proc they can be
+    // missing and report `error.MissingDeviceProc` rather than unwrapping it
+    // (`AGENTS.md` §3.1). These are plain statements in a teardown sequence and
+    // not a `defer`, so `try` is the whole fix.
+    try device.deinit(std.testing.allocator);
+    adapters.deinit();
+    try backend.deinit();
+    // The live-handle count is the assertion that no destroy was missed, and the
+    // same one `test/vulkan_device.zig:200`-`:202` makes.
+    try std.testing.expect(handles.isEmpty());
+    try std.testing.expectEqual(@as(?vulkan_device.HandleKind, null), handles.firstLeakedKind());
+    try std.testing.expectEqual(@as(u32, 0), handles.totalCount());
+    // Last, so a refusal the two helpers recorded cannot cut the teardown
+    // sequence above short and leave the device live.
+    try teardowns.report();
+}
+
+/// The first acceptance half: the layout, the `VkDescriptorSetLayout`, and the
+/// descriptor set cut from it.
+fn testLayoutAndSet(
+    gpa: std.mem.Allocator,
+    device: *const vulkan_device.Device,
+    teardowns: *TeardownErrors,
+) TestError!void {
+    var layout = try makeLayout(gpa);
+    defer layout.deinit(gpa);
+
+    // The packed layout holds both bindings, in Dawn's type order: the buffer
+    // at index 0 and the texture at index 1, because `regular_buffer` sorts
+    // before `sampled_texture` (`BindGroupLayoutInternal.cpp:481`-`:507`).
+    // The binding numbers are what the caller wrote, so the assertions read the
+    // numbers through `findBindingByNumber` and reach the indices only where
+    // the sort order is the thing under test.
+    try std.testing.expectEqual(expected_binding_count, layout.queryBindingCount());
+    try std.testing.expect(!layout.isEmpty());
+    try std.testing.expectEqual(
+        storage_buffer_binding_number,
+        layout.binding(bind_group_layout.BindingIndex.fromInt(0)).binding_number,
+    );
+    try std.testing.expectEqual(
+        sampled_texture_binding_number,
+        layout.binding(bind_group_layout.BindingIndex.fromInt(1)).binding_number,
+    );
+
+    const texture = layout.findBindingByNumber(sampled_texture_binding_number) orelse
+        return error.NamedBindingMissing;
+    try std.testing.expect(texture.layout == .sampled_texture);
+
+    const buffer = layout.findBindingByNumber(storage_buffer_binding_number) orelse
+        return error.NamedBindingMissing;
+    try std.testing.expect(buffer.layout == .buffer);
+    try std.testing.expectEqual(
+        storage_buffer_min_binding_size,
+        buffer.layout.buffer.min_binding_size,
+    );
+
+    // The counts `ValidatePipelineLayoutDescriptor` accumulates
+    // (`PipelineLayout.cpp:127`-`:128`), which is where the two kinds are told
+    // apart without touching Vulkan.
+    const counts = layout.validationCounts();
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        counts.sampled_textures_per_stage[fragment_stage_index],
+    );
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        counts.storage_buffers_per_stage[fragment_stage_index],
+    );
+    try std.testing.expectEqual(@as(u32, 0), layout.dynamicStorageBufferCount());
+    try std.testing.expectEqual(@as(u32, 0), layout.unverifiedBufferCount());
+
+    // The pool sizing `ComputeVulkanStaticBindings` produced, which is what the
+    // descriptor-set layout is built from one step later and what the set
+    // allocator sizes its pools from.
+    const pool_sizes = try layout_vk.descriptorCountsPerType(gpa, &layout.internal);
+    defer gpa.free(pool_sizes);
+    try expectOneDescriptorOfEachType(pool_sizes, &layout);
+
+    // The handle itself. `createDescriptorSetLayout` writes one binding per
+    // mapped stored entry, so the driver was handed two.
+    const set_layout = try layout_vk.createDescriptorSetLayout(
+        gpa,
+        device.procs,
+        device.vk_device,
+        &layout.internal,
+    );
+    if (set_layout == null) return error.DescriptorSetLayoutReturnedNull;
+    defer destroySetLayout(device, set_layout, teardowns);
+
+    // The bind group. The allocator sizes its pools from the same per-type
+    // counts, so a set cut from this pool is a set over this set layout
+    // (`DescriptorSetAllocator.h:70`-`:74`).
+    var allocator = try bind_group_descriptor_set.DescriptorSetAllocator.init(
+        gpa,
+        device.procs,
+        device.vk_device,
+        set_layout,
+        pool_sizes,
+    );
+    defer destroySetAllocator(&allocator, teardowns);
+
+    var first = try allocator.allocate();
+    try std.testing.expect(first.set != null);
+    try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
+
+    // One batch per pool. The pool was cut for
+    // `max_descriptors_per_pool` descriptors and this layout needs two, so one
+    // pool holds `512 / 2` sets, and `allocateDescriptorPool` cut all of them
+    // at once (`DescriptorSetAllocator.cpp:179`-`:192`).
+    try std.testing.expectEqual(
+        bind_group_descriptor_set.max_descriptors_per_pool / expected_binding_count,
+        allocator.queryMaxSetsPerPool(),
+    );
+
+    // The free list is a stack, `Allocate` pops its back
+    // (`DescriptorSetAllocator.cpp:106`-`:107`), and the port fills it
+    // descending (`src/pipeline/bind_group_descriptor_set.zig:376`-`:379`), so
+    // the first `Allocate` returns set zero. Upstream fills ascending at
+    // `DescriptorSetAllocator.cpp:212`-`:213` and its first `Allocate` returns
+    // the last index, so the order asserted here is the port's.
+    try std.testing.expectEqual(@as(u32, 0), first.pool_index);
+    try std.testing.expectEqual(@as(u16, 0), first.set_index);
+
+    // The set is not reusable at once. `vkCmdBindDescriptorSets` lets a driver
+    // consume the set any time between the host execution of the command and
+    // the end of the draw (`DescriptorSetAllocator.cpp:125`-`:129`), so the
+    // port queues the deallocation against the queue's pending serial and
+    // returns the set only once the timeline reports that serial completed.
+    //
+    // Nothing here submits, so the serial is the literal the queue is asked to
+    // drain at, not one a submit produced.
+    const pending_serial: serial.Serial = 1;
+    try allocator.deallocate(&first, pending_serial);
+
+    // The cleared allocation is the assertion: a bind group that outlives its
+    // deallocation must read a null set, not a recycled one
+    // (`DescriptorSetAllocator.cpp:140`).
+    try std.testing.expect(first.set == null);
+    try std.testing.expectEqual(@as(u16, 0), first.set_index);
+
+    // A second set before the serial completes comes from the same pool, which
+    // is the assertion that no pool was cut for a set the GPU still holds.
+    var second = try allocator.allocate();
+    try std.testing.expect(second.set != null);
+    try std.testing.expectEqual(@as(u16, 1), second.set_index);
+    try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
+
+    // Completing the serial puts set zero back on the free list and reopens the
+    // pool. The count stays at one because the pool never went away; what
+    // changed is that the next `Allocate` can reach set zero again.
+    try allocator.finishDeallocation(1);
+
+    // A serial below the last one enqueued is refused rather than corrupting a
+    // drain (`SerialQueue.h:69`, a release-build assume upstream). The guard
+    // reads the last entry the queue still holds and short-circuits on
+    // `Empty()`, so it says nothing at all while the queue is empty. The drain
+    // above emptied it, which is why `second` has to enqueue before any serial
+    // can be below what the queue holds.
+    try allocator.deallocate(&second, pending_serial);
+    try std.testing.expect(second.set == null);
+
+    // The free list took set zero back one step ago, so this allocation returns
+    // it and `third` is not the set the queue is now holding.
+    var third = try allocator.allocate();
+    try std.testing.expect(third.set != null);
+    try std.testing.expectEqual(@as(u16, 0), third.set_index);
+    try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
+
+    // One below `pending_serial` is `beginning_of_gpu_time`, the serial no submit
+    // hands out (`ExecutionQueue.h:193`, the counter's initial value, which the
+    // port names `Timeline.beginning_of_gpu_time`), so it is below the entry the
+    // queue holds and the enqueue is refused.
+    try std.testing.expectError(
+        error.SerialOrderViolation,
+        allocator.deallocate(&third, pending_serial - 1),
+    );
+
+    // The refused deallocation left the third set allocated, so the pool count
+    // and the free list are what they were before it.
+    try std.testing.expect(third.set != null);
+    try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
+
+    // Draining the pending serial returns set one and only set one, which is
+    // what says the refused entry never entered the queue: had it, set zero
+    // would have drained last and taken the top of the free list again.
+    try allocator.finishDeallocation(pending_serial);
+
+    const fourth = try allocator.allocate();
+    try std.testing.expect(fourth.set != null);
+    try std.testing.expectEqual(@as(u16, 1), fourth.set_index);
+    try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
+}
+
+/// The second acceptance half: the token, which is what makes two layouts
+/// interchangeable in a pipeline layout.
+fn testPipelineCompatibility(
+    gpa: std.mem.Allocator,
+    device: *const vulkan_device.Device,
+    teardowns: *TeardownErrors,
+) TestError!void {
+    var written = try makeLayout(gpa);
+    defer written.deinit(gpa);
+
+    // A caller-written layout carries `kExplicitPCT` (`Device.h:204`,
+    // `IntegerTypes.h:139`-`:140`).
+    try std.testing.expectEqual(
+        bind_group_layout.explicit_compatibility_token,
+        written.pipelineCompatibilityToken(),
+    );
+
+    // The same descriptor with the same token is the same layout, which is what
+    // `IsLayoutEqual` (`BindGroupLayout.cpp:67`) decides and what lets the
+    // pipeline layout cache one handle per layout.
+    var same = try makeLayout(gpa);
+    defer same.deinit(gpa);
+    try std.testing.expect(written.isLayoutEqual(&same, false));
+    try std.testing.expectEqual(written.contentHash(), same.contentHash());
+
+    // The pipeline layout itself, created from the bind group layout's
+    // `VkDescriptorSetLayout`. Upstream builds one per specialization
+    // (`PipelineLayoutVk.cpp:116`-`:152`); the port builds the handle and the
+    // caller decides where to keep it, so this asks only that the set layout
+    // the compatibility below is proved against is the one this layout was
+    // created from.
+    const set_layout = try layout_vk.createDescriptorSetLayout(
+        gpa,
+        device.procs,
+        device.vk_device,
+        &written.internal,
+    );
+    if (set_layout == null) return error.DescriptorSetLayoutReturnedNull;
+    defer destroySetLayout(device, set_layout, teardowns);
+
+    const pipeline_layout = try layout_vk.createPipelineLayout(
+        device.procs,
+        device.vk_device,
+        &.{set_layout},
+        // No immediate data, so Dawn's one all-stage push-constant range
+        // (`PipelineLayoutVk.cpp:93`-`:102`) is not requested.
+        0,
+    );
+    if (pipeline_layout == null) return error.PipelineLayoutReturnedNull;
+    defer destroyPipelineLayout(device, pipeline_layout, teardowns);
+
+    // A layout deduced from a pipeline's shader carries a non-zero token, and
+    // `ValidatePipelineLayoutDescriptor` refuses to mix the two
+    // (`PipelineLayout.cpp:122`-`:125`). The token is therefore the whole of the
+    // compatibility rule: same descriptor, different token, not interchangeable.
+    var counter: bind_group_layout.TokenCounter = .{};
+    const deduced_token = try counter.mint();
+    try std.testing.expect(deduced_token != bind_group_layout.explicit_compatibility_token);
+
+    var deduced = try makeLayoutWithToken(gpa, deduced_token);
+    defer deduced.deinit(gpa);
+    try std.testing.expectEqual(deduced_token, deduced.pipelineCompatibilityToken());
+    try std.testing.expect(!written.isLayoutEqual(&deduced, false));
+
+    // The implicit-layout cache is the one caller that must see through the
+    // token, because a pipeline may reach its own deduced layout through a
+    // different one (`Device.cpp:2152`).
+    try std.testing.expect(written.isLayoutEqual(&deduced, true));
+    try std.testing.expectEqual(written.contentHash(), deduced.contentHash());
+
+    // Two deduced tokens differ from each other too, which is what keeps one
+    // pipeline's layout out of another pipeline's pipeline layout. The counter
+    // starts at one so the first token is never the explicit one
+    // (`Device.cpp:283`), and a silent wrap is an error rather than a reuse.
+    const second_token = try counter.mint();
+    try std.testing.expect(second_token != deduced_token);
+    try std.testing.expectEqual(deduced_token + 1, second_token);
+    try std.testing.expectEqual(@as(u64, 3), counter.next_token);
+}
+
+/// Releases a descriptor set layout, recording a refused release for
+/// `teardowns`.
+///
+/// The destroy can only fail on a missing proc, which the create beside it
+/// already required, so a refusal here is a loader defect. `AGENTS.md` §3.1
+/// makes that a typed error and forbids the panic, so the error goes to
+/// `teardowns` and the test returns it.
+fn destroySetLayout(
+    device: *const vulkan_device.Device,
+    set_layout: vulkan.VkDescriptorSetLayout,
+    teardowns: *TeardownErrors,
+) void {
+    layout_vk.destroyDescriptorSetLayout(device.procs, device.vk_device, set_layout) catch |err|
+        teardowns.record(err);
+}
+
+/// Releases the set allocator, recording a refused release for `teardowns`. As
+/// `destroySetLayout`, the only member the release can report is a proc the
+/// allocations beside it already required.
+fn destroySetAllocator(
+    allocator: *bind_group_descriptor_set.DescriptorSetAllocator,
+    teardowns: *TeardownErrors,
+) void {
+    allocator.deinit() catch |err| teardowns.record(err);
+}
+
+/// Releases a pipeline layout, recording a refused release for `teardowns`. As
+/// `destroySetLayout`, the only member the destroy can report is the absent
+/// proc.
+fn destroyPipelineLayout(
+    device: *const vulkan_device.Device,
+    pipeline_layout: vulkan.VkPipelineLayout,
+    teardowns: *TeardownErrors,
+) void {
+    layout_vk.destroyPipelineLayout(device.procs, device.vk_device, pipeline_layout) catch |err|
+        teardowns.record(err);
+}
+
+/// The layout the acceptance names: a sampled texture at binding 0 and a
+/// storage buffer at binding 1.
+fn makeLayout(gpa: std.mem.Allocator) bind_group_layout.Error!bind_group_layout.BindGroupLayout {
+    return makeLayoutWithToken(gpa, bind_group_layout.explicit_compatibility_token);
+}
+
+fn makeLayoutWithToken(
+    gpa: std.mem.Allocator,
+    token: bind_group_layout.PipelineCompatibilityToken,
+) bind_group_layout.Error!bind_group_layout.BindGroupLayout {
+    // The fragment stage sees both. The storage buffer is a read-write one, so
+    // it must not be vertex-visible (`BindGroupLayoutInternal.cpp:129`-`:133`),
+    // which is why both entries name fragment and neither names vertex.
+    const fragment: bind_group_layout.ShaderStages = .{ .fragment = true };
+
+    const entries = [_]bind_group_layout.Entry{
+        .{
+            .binding_number = sampled_texture_binding_number,
+            .visibility = fragment,
+            .kind = .{ .sampled_texture = .{
+                .sample_type = .float_filterable,
+                .view_dimension = .two_d,
+                .multisampled = false,
+            } },
+        },
+        .{
+            .binding_number = storage_buffer_binding_number,
+            .visibility = fragment,
+            .kind = .{ .buffer = .{
+                .binding_type = .storage,
+                .has_dynamic_offset = false,
+                .min_binding_size = storage_buffer_min_binding_size,
+            } },
+        },
+    };
+
+    return bind_group_layout.BindGroupLayout.init(gpa, .{
+        .entries = &entries,
+        .label = "m12-bind-group",
+    }, token, validate_options);
+}
+
+/// Asserts the two bindings reached two distinct descriptor types, one each.
+///
+/// `descriptorCountsPerType` writes the array in ascending numeric type order,
+/// so the position of each entry is the port's and not the driver's. Each entry
+/// is therefore looked up by type rather than by position, and a reordering is
+/// not a failure.
+fn expectOneDescriptorOfEachType(
+    pool_sizes: []const vulkan.VkDescriptorPoolSize,
+    layout: *const bind_group_layout.BindGroupLayout,
+) TestError!void {
+    try std.testing.expectEqual(@as(usize, 2), pool_sizes.len);
+
+    var sampled_image_count: u32 = 0;
+    var storage_buffer_count: u32 = 0;
+    for (pool_sizes) |pool_size| {
+        switch (pool_size.type) {
+            sampled_image_descriptor_type => {
+                sampled_image_count = pool_size.descriptorCount;
+            },
+            storage_buffer_descriptor_type => {
+                storage_buffer_count = pool_size.descriptorCount;
+            },
+            else => return error.UnexpectedDescriptorType,
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 1), sampled_image_count);
+    try std.testing.expectEqual(@as(u32, 1), storage_buffer_count);
+
+    // The same two answers read back through the frontend, which is where a
+    // caller that never touches Vulkan reads them. Index 0 is the buffer and
+    // index 1 the texture, by the sort order above.
+    const buffer = layout.binding(bind_group_layout.BindingIndex.fromInt(0));
+    const texture = layout.binding(bind_group_layout.BindingIndex.fromInt(1));
+    try std.testing.expectEqual(
+        storage_buffer_descriptor_type,
+        layout_vk.descriptorTypeFor(buffer.layout),
+    );
+    try std.testing.expectEqual(
+        sampled_image_descriptor_type,
+        layout_vk.descriptorTypeFor(texture.layout),
+    );
+    try std.testing.expect(layout_vk.isMapped(buffer.layout));
+}
+
+/// Asserts the gate line's no-layer environment when the variable is present.
+///
+/// `docs/50-verification.md` §4.2 records that `VK_LOADER_LAYERS_DISABLE=*`
+/// makes the loader force every layer off, and §4.3 says the setting is
+/// per-process. A run without the variable still exercises the same code path,
+/// because the instance asks for no layer, so the absence is not a failure; a
+/// run with the variable set to anything else is a different configuration, and
+/// this says which one it was.
+fn expectNoLayersForced(gpa: std.mem.Allocator) !void {
+    // 0.16 removed `std.process.getEnvVarOwned`: the process environment now
+    // reaches a test through `std.testing.environ`, which the test runner
+    // fills from the environment the process was started with, and `getAlloc`
+    // is the owned read that replaced it. A variable that is not set reports
+    // `error.EnvironmentVariableMissing` rather than an empty optional, so
+    // the absence is still not a failure.
+    const value = std.testing.environ.getAlloc(
+        gpa,
+        "VK_LOADER_LAYERS_DISABLE",
+    ) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return,
+        else => |other| return other,
+    };
+    defer gpa.free(value);
+    try std.testing.expectEqualStrings("*", value);
+}

@@ -7,11 +7,10 @@
 //! genuinely the better tool.
 //!
 //! **What this file is.** The module root. Everything a consumer reaches must
-//! be re-exported here. Apart from the two values below it carries no
-//! declarations, because the port has not started: the module layout, the
-//! naming of each shard, and the order in which they land are fixed by
-//! `docs/10-architecture.md` and `docs/30-port-design.md`, and the milestones
-//! that add them are in `docs/40-plan.md`.
+//! be re-exported here, and nothing else: each line below names one module of
+//! `docs/10-architecture.md` and points at that module's own root. The module
+//! layout is fixed by `docs/10-architecture.md` and `docs/30-port-design.md`,
+//! and the milestones that fill each module in are in `docs/40-plan.md`.
 //!
 //! **Read first.** `docs/02-dawn-design.md` is the upstream surface being
 //! ported, mapped at a pinned Dawn revision. `docs/20-dependencies.md` is the
@@ -47,6 +46,56 @@ comptime {
     if (!std.mem.eql(u8, minimum_zig_version, builtin.zig_version_string)) {
         @compileError("the running compiler is not the one build.zig.zon declares: run through direnv");
     }
+}
+
+/// The nine modules, each a namespace only. A consumer reaches a name through
+/// the module that owns it: `dusk.pipeline.BindingCounts` and
+/// `dusk.command.commands.Tag`, never through this file. `api` is the one
+/// module whose root is a separate file from the generated tree it fronts,
+/// because `src/api/api.zig` is generated and a generated file carries no hand
+/// edit.
+pub const api = @import("api/root.zig");
+pub const command = @import("command/root.zig");
+pub const core = @import("core/root.zig");
+pub const engine = @import("engine/root.zig");
+pub const memory = @import("memory/root.zig");
+pub const pipeline = @import("pipeline/root.zig");
+pub const platform = @import("platform/root.zig");
+pub const spirv = @import("spirv/root.zig");
+pub const vk = @import("vk/root.zig");
+
+test "every published module is analysed, so its in-file tests run" {
+    // A `pub const` re-export is a name, not a reference. The compiler leaves
+    // the namespace unresolved, so it never imports the file behind it and
+    // never collects that file's test blocks. Measured on this tree: the two
+    // tests below were the only ones `zig test src/root.zig` ran, against 78
+    // `test` blocks under `src/`.
+    //
+    // `refAllDecls` on a module namespace references every name that module
+    // publishes. A file that is imported is in the compilation, and a file in
+    // the compilation carries its tests. Applying it to the nine namespaces
+    // rather than to this file is the part that matters: the module roots
+    // re-export their own files' contents, so a reference to any published
+    // name resolves the private imports those roots hold (`api/root.zig`'s
+    // `generated`, for one) and reaches the file behind them.
+    //
+    // Nothing new enters the published module's dependency graph. Every type
+    // referenced below is already a `pub const` above, so a non-test build of
+    // the package resolves nothing this block does not.
+    //
+    // `refAllDeclsRecursive` is not the mechanism and is not available:
+    // Zig 0.16.0's `lib/std/testing.zig` has no such function.
+    inline for (.{
+        api,
+        command,
+        core,
+        engine,
+        memory,
+        pipeline,
+        platform,
+        spirv,
+        vk,
+    }) |module| std.testing.refAllDecls(module);
 }
 
 test "the running compiler is at least the declared floor" {

@@ -92,8 +92,19 @@ in
   env.GATE_CACHE_DIR = "${cacheRoot}/build";
   env.GATE_CROSS_OUTPUT = "${cacheRoot}/cross-test";
 
-  # Keep all source checks enabled. Exclude generated caches at any depth.
-  env.GATE_EXCLUDE = "/[.]zig-cache/ /zig-out/ /zig-cache/ /.jj/ /devenv/ /.direnv/";
+  # Keep all source checks enabled. Exclude generated caches at any depth, and
+  # the two GENERATED source trees: `src/vulkan.zig` is `zig translate-c`
+  # output over the pinned header and `src/api/` comes from `tools/gen_api.zig`.
+  # Both carry a "do not edit" banner, so a finding in either is a finding in
+  # its generator, not in this tree, and a hand fix would be erased by the next
+  # `zig build generate`. `docs/50-verification.md` §8.1 records the scope.
+  env.GATE_EXCLUDE = "/[.]zig-cache/ /zig-out/ /zig-cache/ /.jj/ /devenv/ /.direnv/ /src/vulkan[.]zig /src/api/";
+
+  # The header tree `build.zig` translates. It is the nix package at 1.4.357,
+  # not the account pin at 1.4.365, so this comment must not claim otherwise.
+  # The pin moves here when the account package builds under Zig 0.16.0 again;
+  # `docs/20-dependencies.md` "Vulkan bindings" owns that decision.
+  env.DUSK_VULKAN_HEADERS = "${pkgs.vulkan-headers}/include";
 
   # Driver discovery is a SHELL-time concern, decided in `enterShell` below.
 
