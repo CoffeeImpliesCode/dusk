@@ -1,0 +1,29 @@
+# Jujutsu VCS
+.jj/
+
+# Zig caches. On this host both are symlinks to local disk (see AGENTS.md), so
+# the patterns must match the link itself, not a directory behind it.
+.zig-cache
+zig-pkg
+zig-out/
+
+# codedb index snapshot
+codedb.snapshot
+
+# coverage
+coverage/
+*.zcov
+
+# Devenv
+.devenv/
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# Local handoff (never commit)
+HANDOFF.md
+
+# scratch
+/tmp/

@@ -1,0 +1,24 @@
+.{
+    // Package name. Consumers depend on this project as `dusk`.
+    .name = .dusk,
+    .version = "0.0.0",
+    // Together with the name, this is the globally unique package identifier.
+    // Zig generates it once and it never changes afterwards.
+    .fingerprint = 0x19488716d2b9cbc7, // Changing this has security and trust implications.
+    // Zig 0.16.0 is the line this project targets, not merely a lower bound.
+    // `zig` on this host is an anyzig shim that reads this field, so it is also
+    // how the toolchain gets selected: every tool in the gate follows it.
+    .minimum_zig_version = "0.16.0",
+    // No dependency yet. `docs/20-dependencies.md` owns the first entry and the
+    // reason the Zig standard library does not cover the slot.
+    .dependencies = .{},
+    // Only these paths are packaged and hashed. Keep it to what a build needs.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+        "README.md",
+        "AGENTS.md",
+    },
+}
