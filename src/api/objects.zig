@@ -33,7 +33,7 @@ pub const Adapter = struct {
     pub const getFeatures = fn (self: Adapter, features: *descriptors.SupportedFeatures) void;
 
     /// Generated from dawn.json "adapter" method "request device" (src/dawn/dawn.json:159).
-    pub const requestDevice = fn (self: Adapter, descriptor: ?*const descriptors.DeviceDescriptorChain, request_device_callback: ?*const callbacks.RequestDeviceCallback) errors.Error!descriptors.Future;
+    pub const requestDevice = fn (self: Adapter, allocator: std.mem.Allocator, io: std.Io, descriptor: ?*const descriptors.DeviceDescriptorChain, callback_info: callbacks.RequestDeviceCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "adapter" method "create device" (src/dawn/dawn.json:167).
     pub const createDevice = fn (self: Adapter, descriptor: ?*const descriptors.DeviceDescriptorChain) errors.Error!Device;
@@ -83,7 +83,7 @@ pub const Buffer = struct {
         offset: usize,
         size: usize,
     };
-    pub const mapAsync = fn (self: Buffer, mode: bitmask.MapMode, offset_options: MapAsyncOffsetOptions, buffer_map_callback: ?*const callbacks.BufferMapCallback) errors.Error!descriptors.Future;
+    pub const mapAsync = fn (self: Buffer, allocator: std.mem.Allocator, io: std.Io, mode: bitmask.MapMode, offset_options: MapAsyncOffsetOptions, callback_info: callbacks.BufferMapCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "buffer" method "get mapped range" (src/dawn/dawn.json:664).
     /// dawn.json marks this method `no autolock`.
@@ -333,7 +333,7 @@ pub const Device = struct {
 
     /// Generated from dawn.json "device" method "create buffer" (src/dawn/dawn.json:1321).
     /// dawn.json marks this method `no autolock`.
-    pub const createBuffer = fn (self: Device, descriptor: *const descriptors.BufferDescriptorChain) errors.Error!Buffer;
+    pub const createBuffer = fn (self: Device, descriptor: *const descriptors.BufferDescriptorChain) errors.Error!?Buffer;
 
     /// Generated from dawn.json "device" method "create error buffer" (src/dawn/dawn.json:1329).
     pub const createErrorBuffer = fn (self: Device, descriptor: *const descriptors.BufferDescriptorChain) errors.Error!Buffer;
@@ -350,7 +350,7 @@ pub const Device = struct {
 
     /// Generated from dawn.json "device" method "create compute pipeline async" (src/dawn/dawn.json:1360).
     /// dawn.json marks this method `no autolock`.
-    pub const createComputePipelineAsync = fn (self: Device, descriptor: *const descriptors.ComputePipelineDescriptorChain, create_compute_pipeline_async_callback: ?*const callbacks.CreateComputePipelineAsyncCallback) errors.Error!descriptors.Future;
+    pub const createComputePipelineAsync = fn (self: Device, allocator: std.mem.Allocator, io: std.Io, descriptor: *const descriptors.ComputePipelineDescriptorChain, callback_info: callbacks.CreateComputePipelineAsyncCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "device" method "create external texture" (src/dawn/dawn.json:1369).
     pub const createExternalTexture = fn (self: Device, external_texture_descriptor: *const descriptors.ExternalTextureDescriptorChain) errors.Error!ExternalTexture;
@@ -366,7 +366,7 @@ pub const Device = struct {
 
     /// Generated from dawn.json "device" method "create render pipeline async" (src/dawn/dawn.json:1396).
     /// dawn.json marks this method `no autolock`.
-    pub const createRenderPipelineAsync = fn (self: Device, descriptor: *const descriptors.RenderPipelineDescriptorChain, create_render_pipeline_async_callback: ?*const callbacks.CreateRenderPipelineAsyncCallback) errors.Error!descriptors.Future;
+    pub const createRenderPipelineAsync = fn (self: Device, allocator: std.mem.Allocator, io: std.Io, descriptor: *const descriptors.RenderPipelineDescriptorChain, callback_info: callbacks.CreateRenderPipelineAsyncCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "device" method "create render bundle encoder" (src/dawn/dawn.json:1405).
     pub const createRenderBundleEncoder = fn (self: Device, descriptor: *const descriptors.RenderBundleEncoderDescriptorChain) errors.Error!RenderBundleEncoder;
@@ -419,7 +419,7 @@ pub const Device = struct {
     pub const getLimits = fn (self: Device, limits: *descriptors.Limits) errors.Error!enums.Status;
 
     /// Generated from dawn.json "device" method "get lost future" (src/dawn/dawn.json:1521).
-    pub const getLostFuture = fn (self: Device) errors.Error!descriptors.Future;
+    pub const getLostFuture = fn (self: Device, io: std.Io) errors.CallbackControlError!descriptors.Future;
 
     /// Generated from dawn.json "device" method "has feature" (src/dawn/dawn.json:1525).
     /// dawn.json marks this method `no autolock`.
@@ -453,14 +453,14 @@ pub const Device = struct {
 
     /// Generated from dawn.json "device" method "set logging callback" (src/dawn/dawn.json:1580).
     /// dawn.json marks this method `no autolock`.
-    pub const setLoggingCallback = fn (self: Device, logging_callback: ?*const callbacks.LoggingCallback) void;
+    pub const setLoggingCallback = fn (self: Device, io: std.Io, callback_info: callbacks.LoggingCallbackInfo) errors.CallbackControlError!void;
 
     /// Generated from dawn.json "device" method "push error scope" (src/dawn/dawn.json:1588).
     pub const pushErrorScope = fn (self: Device, filter: enums.ErrorFilter) void;
 
     /// Generated from dawn.json "device" method "pop error scope" (src/dawn/dawn.json:1594).
     /// dawn.json marks this method `no autolock`.
-    pub const popErrorScope = fn (self: Device, pop_error_scope_callback: ?*const callbacks.PopErrorScopeCallback) errors.Error!descriptors.Future;
+    pub const popErrorScope = fn (self: Device, allocator: std.mem.Allocator, io: std.Io, callback_info: callbacks.PopErrorScopeCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "device" method "set label" (src/dawn/dawn.json:1602).
     pub const setLabel = fn (self: Device, label: []const u8) void;
@@ -574,13 +574,13 @@ pub const Instance = struct {
     pub const createSurface = fn (self: Instance, descriptor: *const descriptors.SurfaceDescriptorChain) errors.Error!Surface;
 
     /// Generated from dawn.json "instance" method "process events" (src/dawn/dawn.json:2706).
-    pub const processEvents = fn (self: Instance) void;
+    pub const processEvents = fn (self: Instance, io: std.Io) errors.ProcessEventsError!void;
 
     /// Generated from dawn.json "instance" method "wait any" (src/dawn/dawn.json:2709).
-    pub const waitAny = fn (self: Instance, future_count: usize, futures: ?[]descriptors.FutureWaitInfo, timeout_ns: u64) errors.Error!enums.WaitStatus;
+    pub const waitAny = fn (self: Instance, io: std.Io, future_count: usize, futures: ?[]descriptors.FutureWaitInfo, timeout_ns: u64) errors.FutureWaitError!enums.WaitStatus;
 
     /// Generated from dawn.json "instance" method "request adapter" (src/dawn/dawn.json:2718).
-    pub const requestAdapter = fn (self: Instance, options: ?*const descriptors.RequestAdapterOptionsChain, request_adapter_callback: ?*const callbacks.RequestAdapterCallback) errors.Error!descriptors.Future;
+    pub const requestAdapter = fn (self: Instance, allocator: std.mem.Allocator, io: std.Io, options: ?*const descriptors.RequestAdapterOptionsChain, callback_info: callbacks.RequestAdapterCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "instance" method "has WGSL language feature" (src/dawn/dawn.json:2726).
     pub const hasWGSLLanguageFeature = fn (self: Instance, feature: enums.WGSLLanguageFeatureName) errors.Error!bool;
@@ -636,7 +636,7 @@ pub const Queue = struct {
     pub const submit = fn (self: Queue, command_count: usize, commands: ?[]const CommandBuffer) void;
 
     /// Generated from dawn.json "queue" method "on submitted work done" (src/dawn/dawn.json:3062).
-    pub const onSubmittedWorkDone = fn (self: Queue, queue_work_done_callback: ?*const callbacks.QueueWorkDoneCallback) errors.Error!descriptors.Future;
+    pub const onSubmittedWorkDone = fn (self: Queue, allocator: std.mem.Allocator, io: std.Io, callback_info: callbacks.QueueWorkDoneCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "queue" method "write buffer" (src/dawn/dawn.json:3069).
     pub const writeBuffer = fn (self: Queue, buffer: Buffer, buffer_offset: u64, data: ?[]const u8, size: usize) void;
@@ -955,7 +955,7 @@ pub const ShaderModule = struct {
     handle: ?*anyopaque = null,
 
     /// Generated from dawn.json "shader module" method "get compilation info" (src/dawn/dawn.json:3856).
-    pub const getCompilationInfo = fn (self: ShaderModule, compilation_info_callback: ?*const callbacks.CompilationInfoCallback) errors.Error!descriptors.Future;
+    pub const getCompilationInfo = fn (self: ShaderModule, allocator: std.mem.Allocator, io: std.Io, callback_info: callbacks.CompilationInfoCallbackInfo) errors.AsyncStartError!descriptors.Future;
 
     /// Generated from dawn.json "shader module" method "set label" (src/dawn/dawn.json:3863).
     /// dawn.json marks this method `no autolock`.

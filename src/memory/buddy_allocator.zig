@@ -381,6 +381,17 @@ pub const BuddyAllocator = struct {
             @panic("a level the free-block walk accepted holds no head");
         var level = start_level;
 
+        // Acquire the whole split path before removing any free-list entry.
+        // A failure at a deeper split must not strand earlier committed children.
+        var acquired: [126]*Node = undefined;
+        var acquired_count: usize = 0;
+        errdefer for (acquired[0..acquired_count]) |child| allocator.destroy(child);
+        const required_count = (allocation_level - start_level) * 2;
+        for (0..required_count) |index| {
+            acquired[index] = try allocator.create(Node);
+            acquired_count += 1;
+        }
+
         // The split loop at `.cpp:179-211`. At most one iteration per level, so
         // the bound is the depth.
         var step: usize = 0;
@@ -395,15 +406,14 @@ pub const BuddyAllocator = struct {
 
             const half_byte_count = node.size_byte_count / 2;
 
-            const left = try allocator.create(Node);
-            errdefer allocator.destroy(left);
+            const child_index = (level - start_level) * 2;
+            const left = acquired[child_index];
             left.* = .{
                 .offset_byte_count = node.offset_byte_count,
                 .size_byte_count = half_byte_count,
             };
 
-            const right = try allocator.create(Node);
-            errdefer allocator.destroy(right);
+            const right = acquired[child_index + 1];
             right.* = .{
                 .offset_byte_count = node.offset_byte_count + half_byte_count,
                 .size_byte_count = half_byte_count,
@@ -600,4 +610,20 @@ test "a region with no room left reports OutOfSpace rather than walking off leve
     _ = try tree.allocate(allocator, 32, 1);
     try std.testing.expectError(error.OutOfSpace, tree.allocate(allocator, 32, 1));
     try std.testing.expectError(error.OutOfSpace, tree.allocate(allocator, 1, 1));
+}
+
+test "failed split acquisition leaves the tree reusable at every allocation failure" {
+    const allocator = std.testing.allocator;
+    for (0..12) |fail_index| {
+        var tree = try BuddyAllocator.init(allocator, 64);
+        defer tree.deinit(allocator);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, tree.allocate(failing.allocator(), 1, 1));
+        try std.testing.expectEqual(@as(usize, 1), tree.totalFreeBlockCount());
+        try std.testing.expectEqual(tree.root.?, tree.free_lists.items[0]);
+        const offset = try tree.allocate(allocator, 1, 1);
+        try std.testing.expectEqual(@as(u64, 0), offset);
+        try tree.deallocate(allocator, offset);
+        try std.testing.expectEqual(@as(usize, 1), tree.totalFreeBlockCount());
+    }
 }

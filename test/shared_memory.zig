@@ -4,16 +4,16 @@
 //!
 //! 1. A `VkImage`'s memory is exported as an OpaqueFD on the first device, a
 //!    second `VkDevice` is opened on the same physical device, the descriptor
-//!    is imported into it through `memory.importMemory`, the image is sampled
+//!    is imported into it through `platform.Memory.importMemory`, the image is sampled
 //!    back out through the second device, and the value the second device
 //!    reads is the value the first device wrote.
 //!    A second descriptor out of that same allocation is imported into the
 //!    first device as the control that tells the two imports apart.
 //! 2. The descriptor that export produced is a real, readable file descriptor
 //!    and not a number that only cleared the negative check.
-//! 3. The semaphore round trip through the fd import reports already-signalled
-//!    for `fd = -1`, the value `kSemaphoreFdAlreadySignaledFd` names at
-//!    `UtilsVulkan.h:48`-`:51`.
+//! 3. Supported semaphore handle types complete a native fd round trip or
+//!    SYNC_FD `fd = -1` wait. Unsupported types reject legal requests with
+//!    `UnsupportedHandleType`, before creating a resource.
 //!
 //! **Why the shard opens the loader itself.** Every symbol below is reached
 //! through the published module, so the shard needs no import but `dusk`:
@@ -37,46 +37,20 @@
 //! disjoint. It does not claim that a duplicated descriptor is independent of
 //! the original, which `dup(2)` does not promise.
 //!
-//! It does not claim that every driver reaches the claims above, because two
-//! of them are facts a driver reports rather than rules the port can enforce: a
-//! descriptor exported by one `VkDevice` need not be importable by a second one
-//! on the same `VkPhysicalDevice`, and the already-signalled sentinel belongs
-//! to the sync handle type alone.
+//! Memory imports must succeed on both logical devices. The descriptor carries
+//! the original allocation's size and memory type index; both devices use one
+//! physical device and driver. `vkGetMemoryFdPropertiesKHR` forbids OPAQUE_FD,
+//! so this shard never uses it to choose an import memory type.
 //!
-//! **How a missing capability is skipped.** Only the part that needs it is
-//! given up, and it is given up by name: the predicate, the driver's own answer
-//! to it and what ran before it are printed, and the test returns
-//! `error.SkipZigTest`, the only skip the Zig test runner has — it counts the
-//! skip and reports the count (`docs/50-verification.md` §9.3).
+//! Semaphore support is handle-type-specific. A supported OPAQUE_FD service
+//! exports and imports a real semaphore, signals it on the first device, and
+//! waits on the second. A supported SYNC_FD service imports `-1` temporarily
+//! into a binary semaphore and completes a native wait. Unsupported services
+//! reject a legal request; they do not claim a successful native import.
+//! Negative opaque handles and sync handles below `-1` are always invalid.
 //!
-//! Both gates are the driver's answer and nothing else. The memory gate is one
-//! `VkResult`: the shard imports a descriptor out of the first device into
-//! that same device before it imports one into the second, so
-//! `VK_ERROR_OUT_OF_DEVICE_MEMORY` on the second device names a driver that
-//! will not share its own allocation rather than a defect in the shard. Every
-//! other refusal propagates. The semaphore gate is the two feature bits
-//! `semaphore.checkSupport` asks for, which the shard reads itself so the
-//! message can carry them, and which the service's own `isSupported` has to
-//! agree with; a missing
-//! `vkGetPhysicalDeviceExternalSemaphoreProperties` is a missing entry point in
-//! the port's dispatch table and fails.
-//!
-//! A refusal to name an importable memory type is not a capability gap at all.
-//! `vkGetMemoryFdPropertiesKHR` is a query, not a precondition of
-//! `vkImportMemoryFdKHR`, so where a driver refuses it the shard takes the
-//! importing device's own device-local types and lets the import itself be the
-//! answer. The NVIDIA driver on the host that wrote this shard refuses the
-//! query and still imports the descriptor into the second device, which the
-//! first test proves rather than assumes.
-//!
-//! A device that was never found is not a skip. `Fixture.init` refuses with
-//! `NoPhysicalDevice`, `NoPhysicalDeviceAtFloor` or
-//! `RequiredDeviceExtensionMissing` and the test fails, which is what
-//! `AGENTS.md` §4.1 asks for: a green run that found zero devices proves
-//! nothing. What a capability skip leaves intact is the coverage that needs no
-//! such capability — the first device's write-back probe, the descriptor's
-//! `stat`, `dup` and `fcntl`, the opaque-fd semaphore round trip and the opaque
-//! service's refusal of `fd = -1` — all of which runs and asserts first.
+//! Zero physical devices, unavailable required external-memory support, failed
+//! imports, and submission timeouts fail the shard. None become skipped tests.
 
 const std = @import("std");
 
@@ -87,32 +61,19 @@ const dispatch = dusk.vk.dispatch;
 const vulkan = platform.vulkan_bindings;
 
 /// The OpaqueFD memory service, reached the way a consumer reaches it.
-const memory_service = platform.memory;
+const MemoryService = platform.Memory;
 /// The fd external-semaphore service.
-const semaphore_service = platform.semaphore;
+const SemaphoreService = platform.Semaphore;
 
 /// The library the loader opens. The system loader resolves the ICD, so one
 /// name covers the hardware driver and a software fallback alike.
 const loader_path = "libvulkan.so.1";
 
-/// The two device extensions the services need. `memory.checkSupport` reads
-/// the first as one extension bit (`external_memory.zig:156`) and
-/// `semaphore.checkSupport` the second (`external_semaphore.zig:136`), so a
-/// device without them cannot serve either service.
+/// OPAQUE_FD memory is required; semaphore fds are enabled when advertised.
 const device_extension_names = [_][:0]const u8{
     "VK_KHR_external_memory_fd",
     "VK_KHR_external_semaphore_fd",
 };
-
-/// The two external-semaphore features the sync handle type needs, which is
-/// what `semaphore.checkSupport` asks the driver for
-/// (`external_semaphore.zig:149`-`:150`). The shard asks for the same two, so
-/// the skip it may print is the driver's own answer rather than the service's
-/// summary of it. Untyped, as the library writes it: the generated constants
-/// are `c_int` and the flags field is the peer type of that expression.
-const sync_fd_required_features =
-    vulkan.VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT_KHR |
-    vulkan.VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT_KHR;
 
 /// The fence-wait bound. `queue.fence_wait_timeout_ns`
 /// (`src/engine/queue.zig:40`) is the same number for the same reason: a wait
@@ -171,8 +132,7 @@ const TestError = std.mem.Allocator.Error ||
         /// Every physical device reported is below Vulkan 1.1, which is the
         /// floor `src/engine/vulkan_device.zig:39` sets.
         NoPhysicalDeviceAtFloor,
-        /// A physical device at the floor is missing one of
-        /// `device_extension_names`, so neither service has support to report.
+        /// A physical device at the floor lacks external-memory fd support.
         RequiredDeviceExtensionMissing,
         /// No family carries `universal_queue_flags`.
         NoUniversalQueueFamily,
@@ -184,18 +144,6 @@ const TestError = std.mem.Allocator.Error ||
         FenceWaitTimedOut,
         /// `fcntl(F_GETFL)` refused the exported descriptor.
         DescriptorFlagsUnreadable,
-        /// No memory type in the importing device's table serves the
-        /// descriptor: either the driver named types `shared_image` cannot be
-        /// allocated from, or the device offers no device-local type at all.
-        /// The type in the request is the shard's own choice, so this is a
-        /// failure and not one of the capability skips.
-        NoImportableMemoryType,
-        /// The instance tier holds no
-        /// `vkGetPhysicalDeviceExternalSemaphoreProperties`, so the shard
-        /// cannot ask the driver about the sync handle type at all. A missing
-        /// entry point in `loadDeviceProcs` is a defect in the port, so it
-        /// fails; the driver's own missing feature bits are the skip.
-        SyncFdSemaphoreQueryMissing,
     };
 
 /// The first teardown failure a test body saw, if any.
@@ -352,17 +300,7 @@ const Device = struct {
     /// it owns names.
     queue_family_index: u32,
 
-    /// The extension set this device is created with, which is what
-    /// `loadDeviceProcs` filled against and what both services answer
-    /// `Supported` from.
-    // The base literal names its type and is parenthesised, as
-    // `src/platform/external_memory.zig:453` does. A bare `.{}` is peer-resolved
-    // against an empty anonymous struct, which has no `with`
-    // (`src/vk/dispatch.zig:426`), and an unparenthesised `T{}.with(...)` does
-    // not parse as a chain.
-    const enabled_extensions: dispatch.EnabledDeviceExts = (dispatch.EnabledDeviceExts{})
-        .with(.external_memory_fd)
-        .with(.external_semaphore_fd);
+    enabled_extensions: dispatch.EnabledDeviceExts,
 };
 
 /// The loader, the instance, one physical device and the two devices the
@@ -375,6 +313,7 @@ const Fixture = struct {
     physical_device: vulkan.VkPhysicalDevice,
     memory_properties: vulkan.VkPhysicalDeviceMemoryProperties,
     queue_family_index: u32,
+    enabled_extensions: dispatch.EnabledDeviceExts,
     first: Device,
     second: Device,
 
@@ -445,8 +384,7 @@ const Fixture = struct {
         return fixture;
     }
 
-    /// Takes the first physical device that reports the floor and carries both
-    /// extensions, and opens the two devices on it.
+    /// Selects a device at the floor with external-memory fd support.
     fn selectPhysicalDevice(
         self: *Fixture,
         gpa: std.mem.Allocator,
@@ -532,9 +470,9 @@ const Fixture = struct {
         return error.RequiredDeviceExtensionMissing;
     }
 
-    /// Whether `physical` carries every name in `device_extension_names`.
+    /// Requires OPAQUE_FD memory and enables semaphore fds only if advertised.
     fn hasDeviceExtensions(
-        self: *const Fixture,
+        self: *Fixture,
         gpa: std.mem.Allocator,
         physical: vulkan.VkPhysicalDevice,
     ) TestError!bool {
@@ -567,7 +505,7 @@ const Fixture = struct {
             error.OutOfHostMemory, error.OutOfDeviceMemory => return err,
             else => return false,
         };
-        var found: usize = 0;
+        var enabled: dispatch.EnabledDeviceExts = .{};
         for (properties[0..count]) |property| {
             // `extensionName` is a fixed 256-byte array with no sentinel
             // (`src/vulkan.zig:4287`), so the terminator is a byte to find. A
@@ -576,11 +514,14 @@ const Fixture = struct {
             const name_end = std.mem.indexOfScalar(u8, &property.extensionName, 0) orelse
                 property.extensionName.len;
             const reported: [:0]const u8 = property.extensionName[0..name_end :0];
-            for (device_extension_names) |wanted| {
-                if (std.mem.eql(u8, reported, wanted)) found += 1;
+            if (std.mem.eql(u8, reported, device_extension_names[0])) {
+                enabled = enabled.with(.external_memory_fd);
+            } else if (std.mem.eql(u8, reported, device_extension_names[1])) {
+                enabled = enabled.with(.external_semaphore_fd);
             }
         }
-        return found >= device_extension_names.len;
+        self.enabled_extensions = enabled;
+        return enabled.has(.external_memory_fd);
     }
 
     /// The first family carrying `universal_queue_flags`.
@@ -609,8 +550,7 @@ const Fixture = struct {
         return null;
     }
 
-    /// One `VkDevice` on the fixture's physical device, with both extensions
-    /// and one queue, and the device tier loaded against those extensions.
+    /// Creates one queue with the physical device's selected extension set.
     fn createDevice(self: *Fixture, gpa: std.mem.Allocator) TestError!Device {
         const priority: f32 = 0.0;
         var queue_create_info: vulkan.VkDeviceQueueCreateInfo = .{
@@ -628,8 +568,11 @@ const Fixture = struct {
         // `*[N][*:0]const u8` would not coerce element-wise to the pointer the
         // binding names.
         var enabled_names: [device_extension_names.len][*c]const u8 = undefined;
-        for (&enabled_names, device_extension_names) |*slot, name| {
-            slot.* = @ptrCast(name);
+        enabled_names[0] = @ptrCast(device_extension_names[0]);
+        var enabled_count: u32 = 1;
+        if (self.enabled_extensions.has(.external_semaphore_fd)) {
+            enabled_names[1] = @ptrCast(device_extension_names[1]);
+            enabled_count += 1;
         }
         var create_info: vulkan.VkDeviceCreateInfo = .{
             .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO),
@@ -639,7 +582,7 @@ const Fixture = struct {
             .pQueueCreateInfos = &queue_create_info,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = null,
-            .enabledExtensionCount = @intCast(device_extension_names.len),
+            .enabledExtensionCount = enabled_count,
             .ppEnabledExtensionNames = &enabled_names,
             .pEnabledFeatures = null,
         };
@@ -665,7 +608,7 @@ const Fixture = struct {
         const procs = try dispatch.loadDeviceProcs(gpa, .{
             .get_device_proc_addr = get_device_proc_addr,
             .device = handle,
-            .enabled_extensions = Device.enabled_extensions,
+            .enabled_extensions = self.enabled_extensions,
         });
         errdefer gpa.destroy(procs);
 
@@ -678,6 +621,7 @@ const Fixture = struct {
             .procs = procs,
             .queue = queue,
             .queue_family_index = self.queue_family_index,
+            .enabled_extensions = self.enabled_extensions,
         };
     }
 
@@ -705,12 +649,12 @@ const Fixture = struct {
     }
 };
 
-/// One image, the memory behind it, and the size that allocation was made
-/// with, which is the one number an import has to be told.
+/// One image and its exported Vulkan allocation metadata.
 const ImageAllocation = struct {
     image: vulkan.VkImage,
     memory: vulkan.VkDeviceMemory,
     allocation_size: vulkan.VkDeviceSize,
+    memory_type_index: u32,
 
     /// The image before the memory that backs it, which is the order
     /// `FENCED_DELETER_TYPES` states at `FencedDeleter.h:46`-`:47`.
@@ -753,12 +697,12 @@ test "the value the first device wrote is the value the second device samples" {
     var fixture = try Fixture.init(std.testing.allocator, &teardowns);
     defer fixture.deinit(std.testing.allocator, &teardowns);
 
-    const first_service = memory_service.init(.{
+    const first_service = MemoryService.init(.{
         .physical_device = fixture.physical_device,
         .device = fixture.first.handle,
         .instance_procs = fixture.instance_procs,
         .device_procs = fixture.first.procs,
-        .enabled_extensions = Device.enabled_extensions,
+        .enabled_extensions = fixture.first.enabled_extensions,
     });
     // `CheckSupport` is one extension bit
     // (`MemoryServiceImplementationOpaqueFD.cpp:47`), so the negative space
@@ -814,26 +758,20 @@ test "the value the first device wrote is the value the second device samples" {
     // what the specification asks for while a descriptor is outstanding.
     const descriptor = try exportImageMemory(fixture.first, exported_image.memory);
     try std.testing.expect(descriptor >= 0);
-
-    // The driver's own answer to "which memory types can this descriptor be
-    // imported as". The import below allocates from one of them, so where the
-    // driver names one the shard uses it, and where it names none the shard
-    // chooses for the device and says so in the skip it may print. A driver
-    // that will not describe a descriptor is not yet a driver that will not
-    // import one, and the import below is what tells the two apart.
-    const named = try memoryFdProperties(fixture.second, descriptor);
+    var descriptor_owned = true;
+    defer if (descriptor_owned) platform.closeSemaphoreHandle(std.testing.io, descriptor);
 
     // The second device's half. The same ported `CreateImage` builds its side
     // of the shared allocation, which is the image `importMemory` measures and
     // the image the imported memory is bound to. It gets no allocation of its
     // own: `vkBindImageMemory` binds an image once, so the import is the only
     // memory this image ever names.
-    const second_service = memory_service.init(.{
+    const second_service = MemoryService.init(.{
         .physical_device = fixture.physical_device,
         .device = fixture.second.handle,
         .instance_procs = fixture.instance_procs,
         .device_procs = fixture.second.procs,
-        .enabled_extensions = Device.enabled_extensions,
+        .enabled_extensions = fixture.second.enabled_extensions,
     });
     const shared_image = try createImage(&fixture, fixture.second);
     // Torn down by hand rather than by `defer`, because the imported memory
@@ -855,27 +793,11 @@ test "the value the first device wrote is the value the second device samples" {
     );
     defer readback.deinit(fixture.second, &teardowns);
 
-    // The memory type the importing device allocates the descriptor as. The
-    // driver's answer is authoritative where it gives one, because the
-    // descriptor names the type the importing device allocates as. A driver
-    // that names none has refused to describe the descriptor, which says
-    // nothing about whether the import below works, so the shard then takes
-    // the importing device's own device-local types for `shared_image` — the
-    // kinds of memory the exporting device allocated that image from.
-    const memory_type_index = if (describesImportableMemory(named))
-        try importMemoryTypeIndex(
-            &fixture,
-            fixture.second,
-            shared_image,
-            named.memory_type_bits,
-        )
-    else
-        try importMemoryTypeIndex(
-            &fixture,
-            fixture.second,
-            shared_image,
-            std.math.maxInt(u32),
-        );
+    // OPAQUE_FD preserves the exporting Vulkan allocation's memory type.
+    // Both logical devices use this fixture's one physical device and driver,
+    // so their memory type tables are compatible. Querying fd properties for
+    // this handle type is forbidden by VUID-00674.
+    const memory_type_index = exported_image.memory_type_index;
 
     // The control. A second descriptor out of the same allocation, imported
     // into the device that exported it, through the same service and with the
@@ -890,33 +812,19 @@ test "the value the first device wrote is the value the second device samples" {
     const control_image = try createImage(&fixture, fixture.first);
     defer destroyImage(fixture.first.procs, fixture.first.handle, control_image, &teardowns);
     const control_descriptor = try exportImageMemory(fixture.first, exported_image.memory);
+    var control_descriptor_owned = true;
+    defer if (control_descriptor_owned) platform.closeSemaphoreHandle(std.testing.io, control_descriptor);
     const control_params = try first_service.getMemoryImportParams(.{
         .allocation_size = exported_image.allocation_size,
-        .memory_type_index = try importMemoryTypeIndex(
-            &fixture,
-            fixture.first,
-            control_image,
-            std.math.maxInt(u32),
-        ),
+        .memory_type_index = exported_image.memory_type_index,
         .dedicated_allocation = .no,
     }, control_image);
-    const control_memory = first_service.importMemory(
+    const control_memory = try first_service.importMemory(
         control_descriptor,
         control_params,
         control_image,
-    ) catch |err| switch (err) {
-        // The named code, refused by the device that holds the allocation. A
-        // different capability from the cross-device one, so this skip names
-        // the capability that is actually missing rather than the one the test
-        // is named after. Every other refusal propagates.
-        error.OutOfDeviceMemory => {
-            platform.closeSemaphoreHandle(std.testing.io, control_descriptor);
-            platform.closeSemaphoreHandle(std.testing.io, descriptor);
-            printSelfImportRefusedSkip(descriptor, vulkan.VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            return error.SkipZigTest;
-        },
-        else => |other| return other,
-    };
+    );
+    control_descriptor_owned = false;
     defer freeMemory(fixture.first.procs, fixture.first.handle, control_memory, &teardowns);
 
     // The control's own claim: a service that reports no support and imports
@@ -935,22 +843,12 @@ test "the value the first device wrote is the value the second device samples" {
     try std.testing.expect(!params.dedicated_allocation);
     try std.testing.expectEqual(exported_image.allocation_size, params.allocation_size);
 
-    imported_memory = second_service.importMemory(
+    imported_memory = try second_service.importMemory(
         descriptor,
         params,
         shared_image,
-    ) catch |err| switch (err) {
-        // The gate. The named code, on the second device only, and only after
-        // the same import succeeded on the device that exported the descriptor.
-        // Anything else propagates, so a defect in the shard, an exhausted
-        // host and a timeout all still fail.
-        error.OutOfDeviceMemory => {
-            platform.closeSemaphoreHandle(std.testing.io, descriptor);
-            printCrossDeviceImportSkip(descriptor, vulkan.VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            return error.SkipZigTest;
-        },
-        else => |other| return other,
-    };
+    );
+    descriptor_owned = false;
     const bind_image_memory = fixture.second.procs.bind_image_memory orelse
         return error.MissingDeviceProc;
     // The import below is what wrote `imported_memory`, and a null one would
@@ -983,12 +881,12 @@ test "the exported descriptor is a real, readable descriptor" {
     // The descriptor below comes from the family this service supports, so
     // the service is built here and its answer is part of the claim: a
     // descriptor from a service that reports no support would prove nothing.
-    const service = memory_service.init(.{
+    const service = MemoryService.init(.{
         .physical_device = fixture.physical_device,
         .device = fixture.first.handle,
         .instance_procs = fixture.instance_procs,
         .device_procs = fixture.first.procs,
-        .enabled_extensions = Device.enabled_extensions,
+        .enabled_extensions = fixture.first.enabled_extensions,
     });
     try std.testing.expect(service.isSupported());
 
@@ -1040,164 +938,85 @@ test "the exported descriptor is a real, readable descriptor" {
     try teardowns.report();
 }
 
-test "the semaphore fd import reports already-signalled for fd = -1" {
+test "native semaphore fd operations honor capability and sync-fd sentinel semantics" {
     var teardowns: TeardownErrors = .{};
     var fixture = try Fixture.init(std.testing.allocator, &teardowns);
     defer fixture.deinit(std.testing.allocator, &teardowns);
 
-    const first_service = semaphore_service.init(.{
+    const opaque_service = SemaphoreService.init(.{
         .device = fixture.first.handle,
         .device_procs = fixture.first.procs,
-        .support = .{
-            .physical_device = fixture.physical_device,
-            .instance_procs = fixture.instance_procs,
-            .enabled_extensions = Device.enabled_extensions,
-            .handle_type = .opaque_fd,
-        },
+        .support = opaqueSupport(&fixture),
     });
-    try std.testing.expect(first_service.isSupported());
-
-    // The round trip. An exportable semaphore on the first device, a real
-    // descriptor out of `ExportSemaphore`
-    // (`SemaphoreServiceImplementationFD.cpp:160`), and an import on the
-    // second device. `importSemaphore` duplicates the descriptor before
-    // handing it to `vkImportSemaphoreFdKHR` (`:122`-`:123`), so the caller
-    // still owns the one it passed and closes it exactly once, here.
-    const exported = try first_service.createExportableSemaphore();
-    defer destroySemaphore(fixture.first.procs, fixture.first.handle, exported, &teardowns);
-    const descriptor = try first_service.exportSemaphore(exported);
-    try std.testing.expect(descriptor >= 0);
-    defer platform.closeSemaphoreHandle(std.testing.io, descriptor);
-
-    const second_service = semaphore_service.init(.{
-        .device = fixture.second.handle,
-        .device_procs = fixture.second.procs,
-        .support = .{
-            .physical_device = fixture.physical_device,
-            .instance_procs = fixture.instance_procs,
-            .enabled_extensions = Device.enabled_extensions,
-            .handle_type = .opaque_fd,
-        },
-    });
-    // `importSemaphore` threads `io` first, so Zig does not bind it as a member
-    // (`src/platform/external_semaphore.zig:238`-`:239`).
-    const imported = try semaphore_service.importSemaphore(
-        std.testing.io,
-        second_service,
-        descriptor,
-    );
-    defer destroySemaphore(fixture.second.procs, fixture.second.handle, imported, &teardowns);
-    try std.testing.expect(imported != null);
-
-    // The negative space the sentinel does not own, which is the half of this
-    // claim no driver can withhold. `-1` names a state only for the sync handle
-    // type, so the opaque service refuses it, and it refuses it before any
-    // driver call, which is why this claim holds wherever the driver runs. It
-    // sits above the gate below because it needs no sync handle type at all.
     try std.testing.expectError(
         error.InvalidSemaphoreHandle,
-        semaphore_service.importSemaphore(
-            std.testing.io,
-            second_service,
-            platform.semaphore_fd_already_signaled_fd,
-        ),
+        SemaphoreService.importSemaphore(std.testing.io, opaque_service, -1),
     );
-
-    // The sentinel. `kSemaphoreFdAlreadySignaledFd` is `-1`
-    // (`SemaphoreServiceImplementationFD.cpp:167`) and it belongs to the sync
-    // handle type (`UtilsVulkan.h:48`-`:51`), so the service that accepts it is
-    // the sync one.
-    //
-    // A sync descriptor is a sync descriptor only where the driver says the
-    // sync handle type can be exported and imported: `checkSupport`
-    // (`external_semaphore.zig:135`) is that answer, and it is the precondition
-    // upstream keeps by never constructing the service for a handle type
-    // `CheckFDSupport` (`SemaphoreServiceImplementationFD.cpp:205`) refuses.
-    // Without it the import below is not a claim about the sentinel but about a
-    // driver that does not carry that handle type at all.
-    const sync_service = semaphore_service.init(.{
-        .device = fixture.second.handle,
-        .device_procs = fixture.second.procs,
-        .support = .{
-            .physical_device = fixture.physical_device,
-            .instance_procs = fixture.instance_procs,
-            .enabled_extensions = Device.enabled_extensions,
-            .handle_type = .sync_fd,
-        },
-    });
-
-    // The driver's own answer, read the way `checkSupport`
-    // (`external_semaphore.zig:135`-`:151`) reads it: the same query, the same
-    // handle type, the same two bits. The shard asks rather than reads
-    // `isSupported`, for two reasons. The skip can then name the bits the
-    // driver reported instead of only saying no; and the service's answer has
-    // to agree with the driver's, so a service that disagreed is a defect in
-    // the port and fails here rather than skipping.
-    //
-    // `sync_service.handle_type` is the handle type the service was built from,
-    // so the query below cannot drift from the service it describes.
-    const query_properties = fixture.instance_procs
-        .get_physical_device_external_semaphore_properties orelse
-        return error.SyncFdSemaphoreQueryMissing;
-    var semaphore_info: vulkan.VkPhysicalDeviceExternalSemaphoreInfo = .{
-        .sType = vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO_KHR,
-        .handleType = sync_service.handle_type.vkHandleType(),
-    };
-    var semaphore_properties: vulkan.VkExternalSemaphoreProperties = .{
-        .sType = vulkan.VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES_KHR,
-    };
-    query_properties(fixture.physical_device, &semaphore_info, &semaphore_properties);
-    const driver_carries_sync_fd = semaphore_properties.externalSemaphoreFeatures &
-        sync_fd_required_features == sync_fd_required_features;
-    try std.testing.expectEqual(driver_carries_sync_fd, sync_service.isSupported());
-
-    // The capability gate. Reached only on the driver's own answer: the query
-    // exists, so `checkSupport` had it too, and the two bits are what it asked
-    // for, so nothing but the driver can have withheld them. The opaque half
-    // above has run and asserted by the time this prints.
-    if (!driver_carries_sync_fd) {
-        printSyncFdSemaphoreSkip(semaphore_properties.externalSemaphoreFeatures);
-        return error.SkipZigTest;
+    if (opaque_service.isSupported()) {
+        const exported = try opaque_service.createExportableSemaphore();
+        defer destroySemaphore(fixture.first.procs, fixture.first.handle, exported, &teardowns);
+        const descriptor = try opaque_service.exportSemaphore(exported);
+        defer platform.closeSemaphoreHandle(std.testing.io, descriptor);
+        const second = SemaphoreService.init(.{
+            .device = fixture.second.handle,
+            .device_procs = fixture.second.procs,
+            .support = opaqueSupport(&fixture),
+        });
+        const imported = try SemaphoreService.importSemaphore(std.testing.io, second, descriptor);
+        defer destroySemaphore(fixture.second.procs, fixture.second.handle, imported, &teardowns);
+        const signaled = try submitSignalOnly(fixture.first, exported);
+        defer destroyFence(fixture.first.procs, fixture.first.handle, signaled, &teardowns);
+        try waitForFence(fixture.first, signaled);
+        const waited = try submitWaitOnly(fixture.second, imported);
+        defer destroyFence(fixture.second.procs, fixture.second.handle, waited, &teardowns);
+        try waitForFence(fixture.second, waited);
+    } else {
+        // A legal creation request must fail before allocating a semaphore.
+        try std.testing.expectError(error.UnsupportedHandleType, opaque_service.createExportableSemaphore());
     }
 
-    const already_signaled = try semaphore_service.importSemaphore(
-        std.testing.io,
-        sync_service,
-        platform.semaphore_fd_already_signaled_fd,
-    );
-    defer destroySemaphore(
-        fixture.second.procs,
-        fixture.second.handle,
-        already_signaled,
-        &teardowns,
-    );
-    try std.testing.expect(already_signaled != null);
-
-    // "Already signalled" is an observable claim and not a name: a submission
-    // that waits on the imported semaphore and does nothing else has to retire
-    // inside the fence bound. A semaphore that were not signalled would hold
-    // that submission forever, and the bound turns "forever" into a failure.
-    const fence = try submitWaitOnly(fixture.second, already_signaled);
-    defer destroyFence(fixture.second.procs, fixture.second.handle, fence, &teardowns);
-    try waitForFence(fixture.second, fence);
-    const get_fence_status = fixture.second.procs.get_fence_status orelse
-        return error.MissingDeviceProc;
-    try std.testing.expectEqual(
-        vulkan.VK_SUCCESS,
-        get_fence_status(fixture.second.handle, fence),
-    );
-
-    // The sentinel is one value and not the negative range. `-2` is neither a
-    // state nor a file, and `SemaphoreServiceImplementationFD.cpp:93` refuses
-    // every negative descriptor; the port keeps the one the specification
-    // defines and refuses the rest.
+    var sync_support = opaqueSupport(&fixture);
+    sync_support.handle_type = .sync_fd;
+    const sync_service = SemaphoreService.init(.{
+        .device = fixture.second.handle,
+        .device_procs = fixture.second.procs,
+        .support = sync_support,
+    });
     try std.testing.expectError(
         error.InvalidSemaphoreHandle,
-        semaphore_service.importSemaphore(std.testing.io, sync_service, -2),
+        SemaphoreService.importSemaphore(std.testing.io, sync_service, -2),
     );
-    // The body's last statement: a deferred teardown that could not report its
-    // own failure is reported here instead.
+    if (sync_service.isSupported()) {
+        const already_signaled = try SemaphoreService.importSemaphore(
+            std.testing.io,
+            sync_service,
+            platform.semaphore_fd_already_signaled_fd,
+        );
+        defer destroySemaphore(fixture.second.procs, fixture.second.handle, already_signaled, &teardowns);
+        const waited = try submitWaitOnly(fixture.second, already_signaled);
+        defer destroyFence(fixture.second.procs, fixture.second.handle, waited, &teardowns);
+        try waitForFence(fixture.second, waited);
+    } else {
+        // -1 is a legal SYNC_FD import, but does not waive device capability.
+        try std.testing.expectError(
+            error.UnsupportedHandleType,
+            SemaphoreService.importSemaphore(
+                std.testing.io,
+                sync_service,
+                platform.semaphore_fd_already_signaled_fd,
+            ),
+        );
+    }
     try teardowns.report();
+}
+
+fn opaqueSupport(fixture: *Fixture) platform.SemaphoreSupportOptions {
+    return .{
+        .physical_device = fixture.physical_device,
+        .instance_procs = fixture.instance_procs,
+        .enabled_extensions = fixture.first.enabled_extensions,
+        .handle_type = .opaque_fd,
+    };
 }
 
 /// The base create info the shard owns for the shared image. The service
@@ -1230,12 +1049,12 @@ fn sharedImageBase() vulkan.VkImageCreateInfo {
 /// first test binds an import to the image this returns, so the image and the
 /// memory behind it are two steps here.
 fn createImage(fixture: *Fixture, device: Device) TestError!vulkan.VkImage {
-    const service = memory_service.init(.{
+    const service = MemoryService.init(.{
         .physical_device = fixture.physical_device,
         .device = device.handle,
         .instance_procs = fixture.instance_procs,
         .device_procs = device.procs,
-        .enabled_extensions = Device.enabled_extensions,
+        .enabled_extensions = device.enabled_extensions,
     });
     return service.createImage(sharedImageBase());
 }
@@ -1307,6 +1126,7 @@ fn createSharedImage(fixture: *Fixture, device: Device) TestError!ImageAllocatio
         .image = image,
         .memory = memory,
         .allocation_size = requirements.size,
+        .memory_type_index = type_index,
     };
 }
 
@@ -1409,162 +1229,6 @@ fn exportImageMemory(
     ));
     if (descriptor < 0) return error.InvalidMemoryHandle;
     return @intCast(descriptor);
-}
-
-/// What `vkGetMemoryFdPropertiesKHR` said about one descriptor on one device:
-/// the driver's own `VkResult`, and the memory types it named when it answered
-/// at all. The pinned generated binding carries `memoryTypeBits` and nothing
-/// else, so the shard reads that one field and chains nothing: the
-/// specification requires `pNext` to be null here.
-///
-/// The code is data here rather than an error, because a refusal is one of the
-/// two answers the cross-device claim is about and the shard has to be able to
-/// print it. `dispatch.vkResultName` names it, which is what keeps a skip from
-/// being a shrug (`docs/50-verification.md` §9.3).
-const FdDescription = struct {
-    code: vulkan.VkResult,
-    memory_type_bits: u32,
-};
-
-fn memoryFdProperties(
-    device: Device,
-    descriptor: platform.ExternalMemoryHandle,
-) TestError!FdDescription {
-    const get_memory_fd_properties_khr = device.procs.get_memory_fd_properties_khr orelse
-        return error.MissingDeviceProc;
-    var properties: vulkan.VkMemoryFdPropertiesKHR = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR),
-        .pNext = null,
-        .memoryTypeBits = 0,
-    };
-    const code = get_memory_fd_properties_khr(
-        device.handle,
-        @intCast(vulkan.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT),
-        @intCast(descriptor),
-        &properties,
-    );
-    // A refused query leaves `memoryTypeBits` as whatever the driver last put
-    // there, and a field the driver never wrote is not read.
-    if (code != vulkan.VK_SUCCESS) return .{ .code = code, .memory_type_bits = 0 };
-    return .{ .code = code, .memory_type_bits = properties.memoryTypeBits };
-}
-
-/// Whether `answer` says the descriptor is importable at all: the query
-/// succeeded and it named a memory type. Both halves count, because a driver
-/// may answer `VK_SUCCESS` and name nothing, which is the same refusal in a
-/// different costume.
-fn describesImportableMemory(answer: FdDescription) bool {
-    return answer.code == vulkan.VK_SUCCESS and answer.memory_type_bits != 0;
-}
-
-/// The skip the import claim makes when the driver refuses the descriptor on
-/// the device that exported it. There is no cross-device question to ask
-/// after that, so the message names the capability that is actually missing
-/// rather than the one the test is named after.
-///
-/// Zig has no `std.testing.skip`; the runner counts `error.SkipZigTest` as a
-/// skip and reports the count, but it prints no reason of its own, so the
-/// reason is printed here before the return (`docs/50-verification.md` §9.3).
-/// That print is deliberate: the predicate and the reason below are the only
-/// place either can be seen, and `docs/50-verification.md` §9.3 makes a
-/// visible skip mandatory. The `no-print` rule cannot tell a skip
-/// announcement from debug residue, so it raises a finding here that this
-/// print answers.
-fn printSelfImportRefusedSkip(
-    descriptor: platform.ExternalMemoryHandle,
-    code: vulkan.VkResult,
-) void {
-    std.debug.print(
-        "SKIP test-shared-memory: this driver imports no external-memory\n" ++
-            "  descriptor, not even into the device that exported it.\n" ++
-            "  missing:   importing a descriptor exported by one VkDevice into\n" ++
-            "             any VkDevice, so the cross-device half below cannot\n" ++
-            "             run\n" ++
-            "  driver:    vkImportMemoryFdKHR for fd {d} answers\n" ++
-            "             {s} ({d}) on the VkDevice that exported it\n" ++
-            "  ran:       the first device copied 0x{X} into the image, copied\n" ++
-            "             it back out, compared it, and exported the descriptor\n",
-        .{ descriptor, dispatch.vkResultName(code), code, written_value },
-    );
-}
-
-/// The skip the cross-device memory claim makes, in the same form as the skip
-/// above. The two codes are the whole claim: the descriptor came out of the
-/// first device a moment ago, the self-import above took the same service and
-/// the same allocation through `VK_SUCCESS`, and the only thing left that
-/// differs is which device received the descriptor.
-///
-/// The `std.debug.print` below is the same deliberate skip announcement as the
-/// one above: `error.SkipZigTest` reports no reason of its own, so the
-/// predicate named above is visible nowhere else.
-fn printCrossDeviceImportSkip(
-    descriptor: platform.ExternalMemoryHandle,
-    code: vulkan.VkResult,
-) void {
-    std.debug.print(
-        "SKIP test-shared-memory: this driver imports an external-memory\n" ++
-            "  descriptor only into the device that exported it.\n" ++
-            "  missing:   importing a descriptor exported by one VkDevice into a\n" ++
-            "             second VkDevice on the same VkPhysicalDevice\n" ++
-            "  driver:    vkImportMemoryFdKHR for fd {d} answers\n" ++
-            "             VK_SUCCESS on the VkDevice that exported it and\n" ++
-            "             {s} ({d}) on the second VkDevice\n" ++
-            "  ran:       the first device copied 0x{X} into the image, copied\n" ++
-            "             it back out, compared it, exported the descriptor, and\n" ++
-            "             imported a second one from it on its own device\n",
-        .{ descriptor, dispatch.vkResultName(code), code, written_value },
-    );
-}
-
-/// The skip the already-signalled sentinel claim makes, in the same form as
-/// the cross-device memory skip above: the missing capability, the bits the
-/// driver reported, and what ran before the gate.
-///
-/// The `std.debug.print` below is the same deliberate skip announcement as the
-/// one above: `error.SkipZigTest` reports no reason of its own, so the
-/// predicate named above is visible nowhere else.
-fn printSyncFdSemaphoreSkip(features: u32) void {
-    std.debug.print(
-        "SKIP test-shared-memory: this driver carries no sync-fd semaphore.\n" ++
-            "  missing:   exporting and importing a semaphore as\n" ++
-            "             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT_KHR, the\n" ++
-            "             handle type kSemaphoreFdAlreadySignaledFd belongs to\n" ++
-            "  driver:    vkGetPhysicalDeviceExternalSemaphoreProperties reports\n" ++
-            "             externalSemaphoreFeatures 0x{X}, and 0x{X} is what that\n" ++
-            "             handle type needs: exportable or importable\n" ++
-            "  ran:       the opaque-fd export on the first device, its import on\n" ++
-            "             the second, and the opaque service's refusal of fd = -1\n",
-        .{ features, sync_fd_required_features },
-    );
-}
-
-/// The memory type the descriptor may be allocated as on `device`, which is
-/// the intersection of what the driver named and what `image` accepts, narrowed
-/// to the device-local types. Dawn's OpaqueFD service needs no such search,
-/// because the descriptor carries the importing side's index
-/// (`MemoryServiceImplementationOpaqueFD.cpp:116`), and the shard builds the
-/// descriptor itself, so the driver is the authority the shard asks. A caller
-/// that has no named bits passes `std.math.maxInt(u32)`, which leaves the
-/// image's own requirements as the only narrowing.
-fn importMemoryTypeIndex(
-    fixture: *Fixture,
-    device: Device,
-    image: vulkan.VkImage,
-    importable_type_bits: u32,
-) TestError!u32 {
-    const get_image_memory_requirements = device.procs.get_image_memory_requirements orelse
-        return error.MissingDeviceProc;
-    // SAFETY: `get_image_memory_requirements` writes the whole struct before
-    // it returns, and the `memoryTypeBits` read below is the first read.
-    var requirements: vulkan.VkMemoryRequirements = undefined;
-    get_image_memory_requirements(device.handle, image, &requirements);
-    const candidate_bits = importable_type_bits & requirements.memoryTypeBits;
-    return findMemoryTypeIndex(
-        &fixture.memory_properties,
-        candidate_bits,
-        vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        0,
-    ) catch return error.NoImportableMemoryType;
 }
 
 /// Records one copy from `source` into `image` on `device` and submits it.
@@ -1718,8 +1382,8 @@ fn copyImageToBuffer(
         0,
         0,
         null,
-        1,
-        &buffer_barrier,
+        0,
+        null,
         1,
         &image_barrier,
     );
@@ -1730,6 +1394,18 @@ fn copyImageToBuffer(
         destination.buffer,
         1,
         &region,
+    );
+    cmd_pipeline_barrier(
+        pool.command_buffer,
+        @intCast(vulkan.VK_PIPELINE_STAGE_TRANSFER_BIT),
+        @intCast(vulkan.VK_PIPELINE_STAGE_HOST_BIT),
+        0,
+        0,
+        null,
+        1,
+        &buffer_barrier,
+        0,
+        null,
     );
     try dispatch.checkVkSuccess(end_command_buffer(pool.command_buffer));
     try submitAndWait(device, pool.command_buffer, teardowns);
@@ -1857,9 +1533,10 @@ fn submitWaitOnly(device: Device, semaphore: vulkan.VkSemaphore) TestError!vulka
     const fence = try createFence(device);
     // `pWaitSemaphores` is a C array, for the same reason `pCommandBuffers` is.
     var wait_semaphores = [1]vulkan.VkSemaphore{semaphore};
-    // One stage per semaphore. `0` is `VK_PIPELINE_STAGE_ALL_COMMANDS_BIT`, and
-    // `pWaitDstStageMask` is a C array, so the scalar needs an array of its own.
-    var wait_stages = [1]vulkan.VkPipelineStageFlags{0};
+    // One nonzero execution stage per binary semaphore.
+    var wait_stages = [1]vulkan.VkPipelineStageFlags{
+        @intCast(vulkan.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
+    };
     var submit: vulkan.VkSubmitInfo = .{
         .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_SUBMIT_INFO),
         .pNext = null,
@@ -1880,6 +1557,21 @@ fn submitWaitOnly(device: Device, semaphore: vulkan.VkSemaphore) TestError!vulka
         destroy_fence(device.handle, fence, null);
         return err;
     };
+    return fence;
+}
+
+fn submitSignalOnly(device: Device, semaphore: vulkan.VkSemaphore) TestError!vulkan.VkFence {
+    const destroy_fence = device.procs.destroy_fence orelse return error.MissingDeviceProc;
+    const queue_submit = device.procs.queue_submit orelse return error.MissingDeviceProc;
+    const fence = try createFence(device);
+    errdefer destroy_fence(device.handle, fence, null);
+    var semaphores = [1]vulkan.VkSemaphore{semaphore};
+    var submit: vulkan.VkSubmitInfo = .{
+        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_SUBMIT_INFO),
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &semaphores,
+    };
+    try dispatch.checkVkSuccess(queue_submit(device.queue, 1, &submit, fence));
     return fence;
 }
 

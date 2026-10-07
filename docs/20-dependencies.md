@@ -12,8 +12,8 @@ Every dependency is taken at the first rung that works:
 Rung 4 needs a written reason: a macro, an opaque handle, a callback with a
 non-representable type, or varargs. This project currently has no rung 4.
 
-**No C++ is linked, built, or vendored at any point.** That is a hard
-constraint, not a preference.
+**No C++ enters the library build or runtime.** The external Tint fixture tool
+is the test-time exception described below.
 
 ---
 
@@ -45,34 +45,33 @@ The standalone `vk.zig` in `nogui` that the user mentioned does not exist:
 `gh search code 'filename:vk.zig owner:CoffeeImpliesCode'` returns nothing, and
 `find ~/ -maxdepth 4 -iname 'vk.zig' -o -iname '*nogui*'` finds nothing.
 
-**Resolution.** Keep the pinned headers, drop the broken build glue. The
-repository is consumed as a plain commit tarball and `zig translate-c` runs in
-our own `build.zig`.
+**Resolution.** Fetch the pinned repository as header data, without its Zig
+package build script. `devenv.nix` uses `pkgs.fetchzip` with this fixed source:
 
 ```text
-$ zig translate-c -I<vulkan-headers>/vulkan <vulkan-headers>/vulkan/vulkan_core.h > vulkan.zig
-exit 0, 0 errors, 22,360 lines, 0.457 s
+URL: https://codeload.github.com/CoffeeImpliesCode/vulkan-headers/tar.gz/8249cb829eb402c65cb7e3778c51b0f8edc4a4b6
+SHA-256 (Nix base32): 0z89r39v4ivhfc6c1km0bgxgddyy7fdsy88bgr5rw0afzfcahwpa
 ```
 
-and the result compiles, links, and drives the real loader:
-
-```text
-vkCreateInstance -> 0 (VK_SUCCESS=0), handle present = true
-vkEnumeratePhysicalDevices -> 0, count = 4
-vkDestroyInstance done
-```
-
-Four devices on this host. Zero C++.
-
-**Pin.** `CoffeeImpliesCode/vulkan-headers` at commit
+**Pin.** The authority is `CoffeeImpliesCode/vulkan-headers` at commit
 `8249cb829eb402c65cb7e3778c51b0f8edc4a4b6`, Vulkan-Headers **v1.4.365**
-(`VK_HEADER_VERSION 365`). That package cannot be listed in `build.zig.zon`
-because Zig executes a dependency's own `build.zig`, so the build translates
-the nix `vulkan-headers` tree at 1.4.357 instead. The fields `gen_dispatch`
-emits are the overlap set, which Dawn pins by writing the tier table from
-`VulkanFunctions.{h,cpp}` at the pinned revision. `DUSK_VULKAN_HEADERS` in
-`devenv.nix` names the tree actually translated, and the pin moves there when
-the account package builds under Zig 0.16.0 again.
+(`VK_HEADER_VERSION 365`). The unpacked source contains
+`vulkan/vulkan/vulkan_core.h` and `vulkan/vk_video`.
+`DUSK_VULKAN_HEADERS` names `${vulkanHeadersSource}/vulkan`, the include directory
+that contains both `vulkan` and `vk_video`.
+
+Our `build.zig` translates that C header data and requires version 365.
+The Nix fixed-output fetch does not execute the repository's `build.zig` or
+compile or link C++. It is an external environment input, not a Zig dependency.
+There is no fallback to the nixpkgs 1.4.357 headers.
+
+The installed Vulkan loader, validation layers, tools, and driver keep their
+own package versions. Their versions do not define the C header authority.
+The dispatch generator uses Dawn's pinned `VulkanFunctions.{h,cpp}` tier table.
+
+This source pin does not prove generation, compilation, or runtime checks passed.
+It also does not prove platform SDK or future platform-header readiness.
+`docs/50-verification.md` owns execution evidence.
 
 ### Dispatch — hand-written, mirroring Dawn
 
@@ -110,6 +109,68 @@ serial reclamation, the lazy-allocation flag, and the per-resource
 
 `pkgs.vulkan-memory-allocator` is available in nixpkgs.
 
+### Dawn source reference — explicit, pinned Git checkout
+
+`tools/dawn_pin.zon` owns the source URL, revision, and sparse directory set:
+
+```zig
+.{
+    .url = "https://dawn.googlesource.com/dawn",
+    .revision = "32f77c02294310054a660c393feded4bcb3f203c",
+    .sparse_paths = .{ "src", "include" },
+}
+```
+
+Git is required for this explicit tool. The Zig standard library does not
+implement the Git fetch protocol or sparse checkout.
+The source reference is not a package dependency.
+The default library build does not fetch or compile Dawn.
+
+From a fresh dusk clone, select a nonexistent destination on local disk:
+
+```bash
+zig build fetch-dawn -Ddawn-dir="$HOME/.cache/dusk-research/research/dawn"
+git -C "$HOME/.cache/dusk-research/research/dawn" rev-parse HEAD
+git -C "$HOME/.cache/dusk-research/research/dawn" sparse-checkout list
+git -C "$HOME/.cache/dusk-research/research/dawn" rev-parse --is-shallow-repository
+```
+
+HEAD must equal the full revision above. The sparse list must contain exactly
+`src` and `include`, in either order. Repeating the fetch command is safe for a
+clean checkout with the same origin. The tool verifies HEAD, sparse paths, and
+cone mode after checkout. Git cone mode also includes files at the repository
+root. It does not include the other root directories.
+
+`-Ddawn-dir` overrides `DUSK_DAWN_SRC`. Without either value, the destination is
+`$buildhost_SCRATCH_ROOT/research/dawn` when that variable is nonempty.
+Otherwise it is `$HOME/.cache/dusk-research/research/dawn`.
+`devenv.nix` exports the same default as `DUSK_DAWN_SRC`.
+Entering devenv does not fetch Dawn sources.
+
+The fetch requests the exact commit with `--depth=1` and checks out detached HEAD.
+A fresh checkout is shallow. An existing checkout can retain older objects,
+refs, and shallow boundaries. The tool reports Git's actual shallow state.
+It does not promise a one-commit object database or complete history.
+It does not fetch submodules, run hooks, download build dependencies, or compile C++.
+The upstream server must permit fetching the pinned commit by hash.
+
+Before changing an existing checkout, the tool rejects tracked changes,
+untracked files, and ignored files. It also rejects a different origin and a
+destination without its own `.git` directory. It never resets or cleans files.
+Use a new destination for a checkout that contains local work.
+A failed network request can leave an initialized checkout for the next attempt.
+Do not edit the destination concurrently with the tool.
+
+This sparse tree is a source reference, not a complete Tint build tree.
+Tint needs a separate, complete checkout at the same pin and its upstream build
+dependencies. Point `DUSK_DAWN_SRC` at that checkout before entering devenv.
+The `dusk:build-tint` task checks the exact HEAD and origin before it builds.
+Its cached binary carries a revision sidecar. A cache without that sidecar does
+not qualify as a pinned translator.
+Source fetching and translator compilation remain separate actions.
+This section does not claim a fresh Tint build or a complete upstream dependency
+checkout. `docs/50-verification.md` owns translator execution evidence.
+
 ### Test shaders — WGSL sources plus generated `.spv`, compared
 
 Chosen: commit the WGSL, regenerate the `.spv` in the gate, and fail if the
@@ -120,9 +181,9 @@ library and never appears in `build.zig.zon`.
 
 **Where the translator comes from.** `pkgs.tint` resolves in nixpkgs at 0.1.7
 but ships no binary, and no other nixpkgs package emits SPIR-V from WGSL. So the
-translator is built from the pinned Dawn checkout, by the `devenv.nix` task
-`dusk:build-tint`, and cached at `${cacheRoot}/tools/tint`, exported as
-`DUSK_TINT`.
+translator is built from a complete checkout at the source-reference pin, by
+the `devenv.nix` task `dusk:build-tint`. It is cached at
+`${cacheRoot}/tools/tint`, exported as `DUSK_TINT`.
 
 It is built **inside devenv**. The container has no `/lib64` at all — only the
 nix glibc — so a binary linked against the host toolchain fails there with
@@ -145,16 +206,14 @@ drift check in `docs/50-verification.md` meaningful.
 
 ## The dependency manifest
 
-One entry. `build.zig.zon` at the time of writing:
+Zero Zig package dependencies. `build.zig.zon` declares:
 
 ```zig
-.dependencies = .{
-    .@"vulkan-headers" = .{
-        .url = "https://codeload.github.com/CoffeeImpliesCode/vulkan-headers/tar.gz/8249cb829eb402c65cb7e3778c51b0f8edc4a4b6",
-        // filled in by `zig build`
-    },
-},
+.dependencies = .{},
 ```
+
+The pinned Vulkan header data enters through `DUSK_VULKAN_HEADERS`, as described
+above. Nix fetches it separately from the Zig package manager.
 
 Everything else the port needs is either Zig standard library or a system C
 library reached through `translate-c`:
@@ -168,6 +227,15 @@ library reached through `translate-c`:
 | Threads, mutexes, conditions | Zig stdlib | 1 |
 | Dynamic library | `std.DynLib` | 1 |
 | Formatting | Zig stdlib | 1 |
+
+Pipeline map buckets use `std.hash.Wyhash`, not a cryptographic digest
+(`src/pipeline/cache_key.zig:109-115`). Key equality compares the stored bytes.
+Shader SPIR-V words use stdlib SHA3-256
+(`src/pipeline/shader_module.zig:72-76,275-284`).
+Dusk does not implement SHA3-224 persistent artifact validation.
+Dawn uses SHA3-224 for that role (`src/dawn/native/BlobCache.cpp:46-50`,
+at pin `32f77c02294310054a660c393feded4bcb3f203c`).
+Persistent artifact caching remains outside the selected runtime scope.
 
 Adding an entry requires writing here, in the same change, why the standard
 library does not cover the slot.
@@ -200,6 +268,12 @@ than mutating the shared shell. `docs/50-verification.md` owns that matrix.
 ---
 
 ## The driver question
+
+`devenv.nix` sets `LD_LIBRARY_PATH` with `lib.makeLibraryPath` for the runtime
+packages, including `vulkan-loader`. Package installation alone does not expose
+`libvulkan.so.1` to `std.DynLib`. This project shell replaces inherited audio and
+scanner library paths. It does not change the global environment or the pinned
+lavapipe ICD.
 
 Inside devenv the shell runs in a container whose `/usr` is **not** the host's
 `/usr`: `/usr/share/vulkan/icd.d` does not exist in there, so the host NVIDIA ICD

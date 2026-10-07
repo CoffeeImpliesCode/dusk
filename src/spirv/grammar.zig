@@ -5,9 +5,9 @@
 //! in the Dawn tree pinned at `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **What this file does not claim.** It does not claim to carry the whole
-//! specification. `Opcode` carries the twenty instructions the reader reasons
-//! about and nothing else; a module may legally use any of the other eight
-//! hundred, and skipping one is exact because its word count is in its header.
+//! specification. `Opcode` carries only the instructions the reader needs.
+//! A module may legally use hundreds of other instructions. The reader skips
+//! each one by the word count in its header.
 //! The enumerations are whole, because a closed enumeration is the only way to
 //! tell a decoration a module may legally carry from a word that is not a
 //! decoration at all.
@@ -21,14 +21,26 @@ const std = @import("std");
 /// every other instruction is skipped by its word count, which is exact
 /// because the count is in the instruction header.
 pub const Opcode = enum(u16) {
+    name = 5,
     entry_point = 15,
+    type_boolean = 20,
+    type_integer = 21,
+    type_float = 22,
     type_image = 25,
     type_sampler = 26,
     type_structure = 30,
     type_pointer = 32,
+    spec_constant_true = 48,
+    spec_constant_false = 49,
+    spec_constant = 50,
+    spec_constant_composite = 51,
+    spec_constant_op = 52,
+    function = 54,
+    function_end = 56,
     variable = 59,
     decorate = 71,
     member_decorate = 72,
+    decoration_group = 73,
     group_decorate = 74,
     decorate_string = 5632,
     member_decorate_string = 5633,

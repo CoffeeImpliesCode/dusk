@@ -1,55 +1,99 @@
-//! The M18 shard: one triangle, one 2x2 `rgba8unorm` offscreen texture, one
-//! readback, sixteen asserted channel values.
+//! The M18 shard encodes one triangle through the public pure frontend, finishes
+//! its command stream, replays it through the Vulkan engine, and submits it.
+//! The checked-in shaders render into a 2x2 `rgba8unorm` target. Readback uses
+//! a 256-byte row pitch and asserts all sixteen channels and untouched padding.
 //!
-//! **What this shard asserts.** One `vkCmdDraw` of the three vertices in
-//! `test/fixtures/triangle.vert.spv`, shaded by `triangle.frag.spv` from a
-//! uniform buffer, into a 2x2 `rgba8unorm` image; one `vkCmdCopyImageToBuffer`
-//! at a 256-byte row pitch; and all four pixels' four channels, read back from
-//! host-visible memory. Sixteen values, each named by pixel and channel.
+//! The vertex shader places vertices at `(0, -0.8)`, `(0.8, 0.8)`, and
+//! `(-0.8, 0.8)`. With WebGPU's flipped viewport, both row-zero pixel centres
+//! are inside the triangle and both row-one centres are outside. The red tint
+//! and blue clear distinguish a missing draw from a missing clear.
+//! A second scene enables constant-factor blending. An encoded red constant
+//! combines red source and blue destination into magenta covered pixels, while
+//! uncovered pixels stay blue. Both scenes check all channels and padding.
+//! Vertex and fragment specialization each run five scenes with unchanged shader
+//! words. Named and numeric overrides change coverage or color. Reordered aliases
+//! repeat the same live pipeline and preserve clear pixels and row padding.
 //!
-//! **What the sixteen values are.** The checked-in vertex shader
-//! (`test/fixtures/triangle.vert.wgsl`) puts the three vertices at `(0, -0.8)`,
-//! `(0.8, 0.8)` and `(-0.8, 0.8)`. On a 2x2 target the pixel centres are
-//! `(-0.5, 0.5)`, `(0.5, 0.5)`, `(-0.5, -0.5)` and `(0.5, -0.5)` in normalised
-//! device coordinates, and the fragment module carries
-//! `OpExecutionMode OriginUpperLeft`, so the positive-`y` centres are row zero.
-//! Two of the four centres are inside the triangle — both of row zero — and two
-//! are outside, each by 0.3 in `y`, so no fill rule decides a pixel. The clear
-//! colour and the tint differ, which is what makes the two rows tellable apart:
-//! a submission that drew nothing reads as sixteen bytes of clear, and one that
-//! cleared nothing reads as sixteen bytes of tint.
-//!
-//! **What this shard does not claim.** It claims no swap chain and no surface;
-//! the host is headless (`AGENTS.md` §5) and the target is an image this shard
-//! creates and destroys. `src/engine/command_buffer.zig` is not on disk, so the
-//! commands are recorded here rather than replayed from the front-end stream.
-//! Of M18 the shard exercises the three files the repository has —
-//! `src/engine/render_pass_cache.zig`, `src/engine/framebuffer_cache.zig` and
-//! `src/engine/recording_context.zig` — through their public entry points. The
-//! `cmd_*` calls around them are test scaffolding in the shape
-//! `test/vulkan_device.zig` already sets with `createFillAllocation`: no
-//! upstream row is claimed for them.
-//!
-//! **The memory types.** The staging buffer is allocated host-visible *and*
-//! host-coherent and `vkMapMemory` is called with flags zero. That is not a
-//! shortcut: the bindings this repository checks in carry `VkMemoryMapFlags` and
-//! no `VK_MEMORY_MAP_READ_BIT`, so a coherent type is the only way to read a
-//! copy back without an invalidation the port cannot spell.
+//! Resource creation uses Vulkan dispatch, but command recording belongs only
+//! to replay. This shard requires no surface or swapchain. A transfer-to-host
+//! barrier, coherent readback memory, and a completed queue fence precede every
+//! pixel observation.
 
 const std = @import("std");
 const dusk = @import("dusk");
+const specialization_graphics = @import("fixtures/specialization_graphics.zig");
 
 const vulkan = dusk.platform.vulkan_bindings;
 const dispatch = dusk.vk.dispatch;
-const platform = dusk.platform;
 
-const framebuffer_cache = dusk.engine.framebuffer_cache;
-const queue = dusk.engine.queue;
 const recording_context = dusk.engine.recording_context;
 const render_pass_cache = dusk.engine.render_pass_cache;
 const vulkan_device = dusk.engine.vulkan_device;
+const engine_buffer = dusk.engine.buffer;
+const pipeline = dusk.pipeline.pipeline;
+const bind_group = dusk.engine.bind_group;
+const descriptor_sets = dusk.pipeline.bind_group_descriptor_set;
+const encoder = dusk.command.command_encoder;
+const commands = dusk.command.commands;
 
-const BufferUsage = dusk.api.bitmask.BufferUsage;
+pub const ShaderFixtures = struct {
+    vertex_words: []const u32,
+    fragment_words: []const u32,
+    vertex_entry_point: [:0]const u8,
+    fragment_entry_point: [:0]const u8,
+    enable_constant_blend: bool = false,
+    has_tint_binding: bool = true,
+};
+
+/// Borrow native handles without transferring their destruction to the wrapper.
+pub fn borrowBuffer(
+    context: engine_buffer.Device,
+    allocation: BufferAllocation,
+    size: u64,
+    buffer_usage: dusk.api.BufferUsage,
+) engine_buffer.Buffer {
+    return .{
+        .device = context,
+        .handle = allocation.buffer,
+        .allocation = .{
+            .memory = allocation.memory,
+            .offset = 0,
+            .size = allocation.allocation_size,
+            .memory_type_index = allocation.memory_type_index,
+        },
+        .mapped = null,
+        .size = size,
+        .allocated_size = allocation.allocation_size,
+        .usage = buffer_usage,
+        .internal_usage = engine_buffer.computeInternalBufferUsages(buffer_usage),
+        .state = .unmapped,
+        .map_mode = .none,
+        .map_offset = 0,
+        .map_size = 0,
+        .is_mapped_at_creation = false,
+        .is_data_initialized = true,
+        .staging = null,
+        .last_usage_serial = 0,
+        .last_write_usage = 0,
+        .last_write_shader_stage = .none,
+        .read_usage = 0,
+        .read_shader_stages = .none,
+        .host_visible = true,
+        .host_coherent = true,
+    };
+}
+
+fn uncapturedError(
+    allocator: std.mem.Allocator,
+    _: std.Io,
+    context: *anyopaque,
+    data: dusk.core.ErrorView,
+) void {
+    _ = allocator;
+    _ = context;
+    _ = data;
+    @panic("triangle resource creation reported an uncaptured error");
+}
 
 // --- The numbers the acceptance fixes --------------------------------------
 
@@ -130,58 +174,109 @@ const fragment_entry_point = "fs_main";
 /// not fill, a null handle a successful create wrote, a memory type this host
 /// does not have, or a fixture that does not declare the entry point the
 /// pipeline names.
-const SetupError = dispatch.Error || std.mem.Allocator.Error || error{
+pub const SetupError = dispatch.Error || std.mem.Allocator.Error || error{
     DeviceProcMissing,
     HandleCreationReturnedNull,
     MapReturnedNull,
-    NoDeviceLocalMemoryType,
     NoHostVisibleMemoryType,
     EntryPointNameAbsent,
-    TintBufferDoesNotNeedEagerTransition,
-    TintBufferNotQueuedForEagerTransition,
 };
 
 // --- What one submission needs ---------------------------------------------
 
 /// A `VkBuffer` and the memory bound to it, created as a pair because neither
 /// is usable without the other.
-const BufferAllocation = struct {
+pub const BufferAllocation = struct {
     buffer: vulkan.VkBuffer,
     memory: vulkan.VkDeviceMemory,
-};
-
-/// The offscreen target: the image, its memory, and the one view the framebuffer
-/// attaches. The view is created here rather than by the cache because
-/// `FramebufferCacheKey` stores an identity the caller mints, not the handle.
-const TargetImage = struct {
-    image: vulkan.VkImage,
-    memory: vulkan.VkDeviceMemory,
-    view: vulkan.VkImageView,
+    allocation_size: u64,
+    memory_type_index: u32,
 };
 
 /// Everything one submission creates, so the teardown is one list in reverse
 /// creation order rather than a dozen defers that interleave badly.
-const Scene = struct {
+pub const Scene = struct {
     staging: BufferAllocation,
     uniform: BufferAllocation,
-    set_layout: vulkan.VkDescriptorSetLayout,
-    descriptor_pool: vulkan.VkDescriptorPool,
-    descriptor_set: vulkan.VkDescriptorSet,
-    pipeline_layout: vulkan.VkPipelineLayout,
-    vertex_module: vulkan.VkShaderModule,
-    fragment_module: vulkan.VkShaderModule,
-    pipeline: vulkan.VkPipeline,
+    fixtures: ShaderFixtures,
+
+    /// Uses actual high factories. The returned pipeline owns its canonical dependencies.
+    pub fn typedPipeline(
+        self: *const Scene,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        device: *dusk.engine.Device,
+    ) !*dusk.engine.native_resources.Pipeline {
+        return self.typedPipelineWithConstants(gpa, io, device, &.{}, &.{});
+    }
+
+    fn typedPipelineWithConstants(
+        self: *const Scene,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        device: *dusk.engine.Device,
+        vertex_constants: []const dusk.api.ConstantEntry,
+        fragment_constants: []const dusk.api.ConstantEntry,
+    ) !*dusk.engine.native_resources.Pipeline {
+        try checkEntryPoint(self.fixtures.vertex_words, self.fixtures.vertex_entry_point);
+        try checkEntryPoint(self.fixtures.fragment_words, self.fixtures.fragment_entry_point);
+        const entries = [_]dusk.pipeline.layout_internal.Entry{.{
+            .binding_number = tint_binding,
+            .visibility = .{ .fragment = true },
+            .kind = .{ .buffer = .{
+                .binding_type = .uniform,
+                .has_dynamic_offset = false,
+                .min_binding_size = uniform_byte_count,
+            } },
+        }};
+        const group = try device.createBindGroupLayout(gpa, io, .{
+            .entries = if (self.fixtures.has_tint_binding) &entries else &.{},
+        });
+        defer device.release(gpa, io, group) catch @panic("triangle group layout release failed");
+        const layout = try device.createPipelineLayout(gpa, io, .{ .groups = &.{group} });
+        defer device.release(gpa, io, layout) catch @panic("triangle layout release failed");
+        const vertex = try device.createShaderModule(gpa, io, .{
+            .words = self.fixtures.vertex_words,
+        });
+        defer device.release(gpa, io, vertex) catch @panic("triangle vertex release failed");
+        const fragment = try device.createShaderModule(gpa, io, .{
+            .words = self.fixtures.fragment_words,
+        });
+        defer device.release(gpa, io, fragment) catch @panic("triangle fragment release failed");
+        return device.createRenderPipeline(gpa, io, .{
+            .layout = layout,
+            .vertex = .{
+                .module = vertex,
+                .entry_point = self.fixtures.vertex_entry_point,
+                .stage = .vertex,
+                .constants = vertex_constants,
+            },
+            .fragment = .{
+                .module = fragment,
+                .entry_point = self.fixtures.fragment_entry_point,
+                .stage = .fragment,
+                .constants = fragment_constants,
+            },
+            .color_targets = &.{.{
+                .format = .rgba8_unorm,
+                .blend = if (self.fixtures.enable_constant_blend) .{
+                    .color = .{ .src_factor = .constant, .dst_factor = .one_minus_constant, .operation = .add },
+                    .alpha = .{ .src_factor = .constant, .dst_factor = .one_minus_constant, .operation = .add },
+                } else null,
+            }},
+        });
+    }
 };
 
 /// The stand-in for `FencedDeleter::DeleteWhenUnused`
 /// (`FramebufferCache.cpp:87`-`:89`). Nothing is in flight by the time an
 /// eviction can happen here, because the only submission has already been
 /// waited on, so the eviction destroys at once.
-const FramebufferDeleter = struct {
+pub const FramebufferDeleter = struct {
     procs: *const dispatch.DeviceProcs,
     vk_device: vulkan.VkDevice,
 
-    fn destroy(context: *anyopaque, framebuffer: vulkan.VkFramebuffer) void {
+    pub fn destroy(context: *anyopaque, framebuffer: vulkan.VkFramebuffer) void {
         const self: *FramebufferDeleter = @ptrCast(@alignCast(context));
         // Core 1.0, so a null field is a loader defect and not a device that
         // lacks the call.
@@ -196,333 +291,522 @@ const FramebufferDeleter = struct {
 // --- The acceptance ---------------------------------------------------------
 
 test "triangle: one draw into a 2x2 rgba8unorm image reads back sixteen channels" {
+    try runTriangle(null, rgbaBytes(tint));
+}
+
+test "triangle: replayed blend constant changes covered pixels and preserves clear and padding" {
+    // Red * constant red + blue * (one minus constant blue) gives magenta.
+    // Alpha is 1 * 1 + 1 * (1 - 1), so it remains opaque.
+    try runTriangle(.{ .r = 1, .g = 0, .b = 0, .a = 1 }, .{ 255, 0, 255, 255 });
+}
+
+test "triangle: vertex specialization changes coverage and canonical overrides reuse live pipelines" {
+    try runSpecializedTriangle(.vertex);
+}
+
+test "triangle: fragment specialization changes color and canonical overrides reuse live pipelines" {
+    try runSpecializedTriangle(.fragment);
+}
+
+test "triangle: graphics fixture specialization key allocation rolls back at every fail-N" {
+    const allocation_limit = 256;
+    for (0..allocation_limit) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        graphicsKeyAllocation(failing.allocator()) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        return;
+    }
+    return error.GraphicsAllocationSweepExhausted;
+}
+
+fn graphicsKeyAllocation(allocator: std.mem.Allocator) !void {
+    var key = try pipeline.buildRenderPipelineKey(allocator, .{
+        .compatible_render_pass = null,
+        .vertex = .{
+            .stage = .vertex,
+            .entry_point = specialization_graphics.entry_point,
+            .content_bytes = std.mem.sliceAsBytes(&specialization_graphics.vertex_words),
+            .constants = &.{
+                .{ .key = "shift_x", .value = 0 },
+                .{ .key = "shift_y", .value = -1 },
+            },
+        },
+        .fragment = .{
+            .stage = .fragment,
+            .entry_point = specialization_graphics.entry_point,
+            .content_bytes = std.mem.sliceAsBytes(&specialization_graphics.fragment_words),
+            .constants = &.{
+                .{ .key = "green", .value = 1 },
+                .{ .key = "red", .value = 0 },
+            },
+        },
+        .color_targets = &.{.{ .format = vulkan.VK_FORMAT_R8G8B8A8_UNORM }},
+    });
+    defer key.deinit(allocator);
+    try std.testing.expect(key.bytes.items.len != 0);
+}
+
+fn runTriangle(blend_constant: ?commands.Color, covered_pixel: [4]u8) !void {
+    const covered = [_][4]u8{ covered_pixel, covered_pixel };
+    try runTriangleCases(.{
+        .vertex_words = &vertex_words,
+        .fragment_words = &fragment_words,
+        .vertex_entry_point = vertex_entry_point,
+        .fragment_entry_point = fragment_entry_point,
+        .enable_constant_blend = blend_constant != null,
+    }, blend_constant, &.{.{ .pixels = .{
+        covered[0], covered[1], rgbaBytes(clear_colour), rgbaBytes(clear_colour),
+    } }});
+}
+
+const GraphicsCase = struct {
+    vertex_constants: []const dusk.api.ConstantEntry = &.{},
+    fragment_constants: []const dusk.api.ConstantEntry = &.{},
+    pixels: [4][4]u8,
+    identity_index: usize = 0,
+    unique_count: usize = 1,
+};
+
+fn runSpecializedTriangle(stage: pipeline.Stage) !void {
+    const red = [4]u8{ 255, 0, 0, 255 };
+    const green = [4]u8{ 0, 255, 0, 255 };
+    const yellow = [4]u8{ 255, 255, 0, 255 };
+    const blue = rgbaBytes(clear_colour);
+    const default_pixels = [4][4]u8{ red, red, blue, blue };
+    const first_pixels = if (stage == .vertex)
+        [4][4]u8{ blue, blue, red, red }
+    else
+        [4][4]u8{ green, green, blue, blue };
+    const second_pixels = if (stage == .vertex)
+        [4][4]u8{ blue, red, blue, blue }
+    else
+        [4][4]u8{ yellow, yellow, blue, blue };
+    const named_first = [_]dusk.api.ConstantEntry{
+        .{ .key = if (stage == .vertex) "shift_x" else "red", .value = 0 },
+        .{ .key = if (stage == .vertex) "shift_y" else "green", .value = if (stage == .vertex) -1 else 1 },
+    };
+    const numeric_second = [_]dusk.api.ConstantEntry{
+        .{ .key = "7", .value = 1 },
+        .{ .key = "9", .value = if (stage == .vertex) 0 else 1 },
+    };
+    const reversed_numeric_first = [_]dusk.api.ConstantEntry{
+        .{ .key = "9", .value = if (stage == .vertex) -1 else 1 },
+        .{ .key = "7", .value = 0 },
+    };
+    const reversed_named_second = [_]dusk.api.ConstantEntry{
+        .{ .key = if (stage == .vertex) "shift_y" else "green", .value = if (stage == .vertex) 0 else 1 },
+        .{ .key = if (stage == .vertex) "shift_x" else "red", .value = 1 },
+    };
+    var cases = [_]GraphicsCase{
+        .{ .pixels = default_pixels },
+        .{ .pixels = first_pixels, .identity_index = 1, .unique_count = 2 },
+        .{ .pixels = second_pixels, .identity_index = 2, .unique_count = 3 },
+        .{ .pixels = first_pixels, .identity_index = 1, .unique_count = 3 },
+        .{ .pixels = second_pixels, .identity_index = 2, .unique_count = 3 },
+    };
+    const overrides = [_][]const dusk.api.ConstantEntry{
+        &.{}, &named_first, &numeric_second, &reversed_numeric_first, &reversed_named_second,
+    };
+    for (&cases, overrides) |*case, constants| {
+        if (stage == .vertex) case.vertex_constants = constants else case.fragment_constants = constants;
+    }
+    try runTriangleCases(.{
+        .vertex_words = &specialization_graphics.vertex_words,
+        .fragment_words = &specialization_graphics.fragment_words,
+        .vertex_entry_point = specialization_graphics.entry_point,
+        .fragment_entry_point = specialization_graphics.entry_point,
+    }, null, &cases);
+}
+
+fn runTriangleCases(
+    fixtures: ShaderFixtures,
+    blend_constant: ?commands.Color,
+    cases: []const GraphicsCase,
+) !void {
+    const vertex_digest = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(fixtures.vertex_words));
+    const fragment_digest = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(fixtures.fragment_words));
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    // `HandleSet` counts the seven handle kinds `vulkan_device.zig` names, and an
-    // image, a view, a render pass, a framebuffer, a descriptor set and a
-    // pipeline are not among them. The buffers, the memory and the fences are
-    // counted, so the final `isEmpty` still catches a missed destroy.
-    //
-    // Nothing below is `defer`red. The teardown is explicit and last, because
-    // the assertions after it read the live-handle count and a `defer` would
-    // run after them; a `defer` plus an explicit call would destroy every
-    // handle twice. `test/vulkan_device.zig` makes the same choice.
-    var handles: vulkan_device.HandleSet = .{};
-    var device_mutex: platform.DeviceMutex = .{};
+    var handle_baseline: vulkan_device.HandleSet = .{};
+    {
+        const allocator = std.testing.allocator;
+        var instance = dusk.engine.Instance.init(.{ .backend_type = .vulkan });
+        defer {
+            if (instance.native_context) |native_context| {
+                std.testing.expectEqualSlices(
+                    u32,
+                    &handle_baseline.counts,
+                    &native_context.handles.counts,
+                ) catch @panic("triangle native resource handle leaked");
+            }
+            instance.deinit(allocator, io) catch @panic("triangle instance teardown failed");
+        }
+        var adapters = try instance.enumerateAdapters(allocator, io, .{
+            .backend_type = .vulkan,
+            .feature_level = .core,
+            .power_preference = .undefined_,
+        });
+        defer adapters.deinit(io) catch @panic("triangle adapters teardown failed");
+        handle_baseline = instance.native_context.?.handles;
+        if (adapters.items.len == 0) return error.NoPhysicalDevice;
+        var high_device = try adapters.items[0].createDevice(allocator, io, .{
+            .adapter = &adapters.items[0],
+            .feature_level = .core,
+            .uncaptured_context = &handle_baseline,
+            .uncaptured_callback = uncapturedError,
+        });
+        defer high_device.deinit(allocator, io) catch @panic("triangle device teardown failed");
+        const context = high_device.native.?;
+        const device = context.native_device;
+        const handles = &instance.native_context.?.handles;
+        const q = &context.queue;
+        const core_device = &high_device.core;
 
-    // One `VkInstance` per ICD, fallback first (`BackendVk.cpp:590`-`:610`), and
-    // the first physical device that reports Vulkan 1.1 or later (`:633`-`:637`).
-    var backend = vulkan_device.Backend.init(std.testing.allocator, .{
-        .handles = &handles,
-    });
+        const procs = device.procs;
+        const vk_device = device.vk_device;
 
-    var adapters = try backend.discoverPhysicalDevices(.{});
-
-    const adapter = try adapters.first();
-    try std.testing.expect(adapter.physical.supportsRequiredVersion());
-
-    var device = try vulkan_device.Device.create(std.testing.allocator, .{
-        .instance = adapter.instance,
-        .physical = &adapter.physical,
-        .handles = &handles,
-    });
-
-    var q = try queue.Queue.init(.{
-        .context = .{
+        // SAFETY: createSceneWithShaders writes every field before success. Until then,
+        // scene_created stays false, so deferred cleanup cannot read this storage.
+        // All other scene reads follow the successful assignment and flag update.
+        var scene: Scene = undefined;
+        var scene_created = false;
+        defer if (scene_created) destroyScene(device, &scene, handles);
+        var guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+        defer guard.unlock(io);
+        try high_device.bindObjectsLocked(&guard, allocator);
+        const pipeline_store = &context.pipeline_store.?;
+        // Each successful factory call owns an alias, even when it hits the cache.
+        var pipeline_aliases: [5]?*dusk.engine.native_resources.Pipeline = @splat(null);
+        defer for (pipeline_aliases) |alias| {
+            if (alias) |object| {
+                object.header.releaseUserLocked(&guard, io) catch
+                    @panic("triangle pipeline reference release failed");
+            }
+        };
+        const resource_device: engine_buffer.Device = .{
             .allocator = std.testing.allocator,
             .dispatch = device.dispatchTable(),
-            .vk_device = device.vk_device,
-            // `fetchQueue` resolves `vkGetDeviceQueue` through the device tier
-            // (`AGENTS.md` §3.1), so a loader that missed it refuses here with
-            // a typed error instead of a forced unwrap.
-            .vk_queue = try device.fetchQueue(),
-            .queue_family_index = device.queue_family_index,
+            .vk_device = vk_device,
             .memory_properties = device.memoryProperties(),
-            .handles = &handles,
-        },
-        .device_mutex = &device_mutex,
-    });
+            .non_coherent_atom_size = 1,
+            .max_buffer_size = std.math.maxInt(u64),
+            .handles = handles,
+        };
+        const target = created: {
+            guard.unlock(io);
+            defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+            break :created try high_device.createTexture(allocator, io, .{
+                .usage = .{ .render_attachment = true, .copy_src = true },
+                .size = .{ .width = target_extent, .height = target_extent },
+                .format = .rgba8_unorm,
+            });
+        };
+        defer target.header.releaseUserLocked(&guard, io) catch
+            @panic("triangle texture reference release failed");
+        const target_view = created: {
+            guard.unlock(io);
+            defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+            break :created try high_device.createTextureView(allocator, io, .{
+                .texture = target,
+                .descriptor = .{ .format = .rgba8_unorm, .dimension = ._2d },
+            });
+        };
+        defer target_view.header.releaseUserLocked(&guard, io) catch
+            @panic("triangle view reference release failed");
 
-    const procs = device.procs;
-    const vk_device = device.vk_device;
+        // `RenderPassCache::GetRenderPass` (`RenderPassCache.cpp:408`). The pass
+        // comes from a sparse query, and the key carries masks rather than handles,
+        // so two different attachment shapes can never share one `VkRenderPass`.
+        const passes = &context.render_pass_cache;
 
-    // --- the target and the two caches of M18 -------------------------------
+        var pass_query: render_pass_cache.RenderPassCacheQuery = .{};
+        pass_query.setSampleCount(1);
+        pass_query.setColor(.{
+            .index = 0,
+            .format = .rgba8_unorm,
+            .load_op = .clear,
+            .store_op = .store,
+            .has_resolve_target = false,
+            .render_to_single_sampled = false,
+        });
+        const pass = try passes.getRenderPass(io, pass_query);
+        // The `uniqueId` is stamped inside the create (`RenderPassCache.cpp:425`),
+        // so a pass that exists has an id and the first one is 1.
+        try std.testing.expectEqual(@as(u64, 1), pass.unique_id);
+        // One subpass, so the subpass that writes is subpass zero (`:477`).
+        try std.testing.expectEqual(@as(u32, 0), pass.main_subpass);
 
-    var target = try createTarget(device, &handles);
+        const framebuffers = &context.framebuffer_cache;
 
-    // `RenderPassCache::GetRenderPass` (`RenderPassCache.cpp:408`). The pass
-    // comes from a sparse query, and the key carries masks rather than handles,
-    // so two different attachment shapes can never share one `VkRenderPass`.
-    var passes = render_pass_cache.RenderPassCache.init(.{
-        .allocator = std.testing.allocator,
-        .device = .{ .procs = procs, .vk_device = vk_device },
-    });
+        // --- the rest of the submission's inputs --------------------------------
 
-    var pass_query: render_pass_cache.RenderPassCacheQuery = .{};
-    pass_query.setSampleCount(1);
-    pass_query.setColor(.{
-        .index = 0,
-        .format = .rgba8_unorm,
-        .load_op = .clear,
-        .store_op = .store,
-        .has_resolve_target = false,
-        .render_to_single_sampled = false,
-    });
-    const pass = try passes.getRenderPass(io, pass_query);
-    // The `uniqueId` is stamped inside the create (`RenderPassCache.cpp:425`),
-    // so a pass that exists has an id and the first one is 1.
-    try std.testing.expectEqual(@as(u64, 1), pass.unique_id);
-    // One subpass, so the subpass that writes is subpass zero (`:477`).
-    try std.testing.expectEqual(@as(u32, 0), pass.main_subpass);
+        scene = try createSceneWithShaders(device, handles, fixtures);
+        scene_created = true;
 
-    var deleter: FramebufferDeleter = .{ .procs = procs, .vk_device = vk_device };
-    var framebuffers = framebuffer_cache.FramebufferCache.init(.{
-        .allocator = std.testing.allocator,
-        .device = .{ .procs = procs, .vk_device = vk_device },
-        .destroy_context = &deleter,
-        .destroy_when_unused = FramebufferDeleter.destroy,
-    });
+        // The tint the fragment shader reads, written through the host and then
+        // handed to the fragment stage by a memory barrier.
+        try writeTint(device, scene.uniform.memory);
 
-    // `FramebufferCacheQuery::SetRenderPass` (`FramebufferCache.cpp:43`): the
-    // key holds the pass's `uniqueId` and never the `VkRenderPass`, because a
-    // handle may be reused by a later create.
-    var framebuffer_query: framebuffer_cache.FramebufferCacheQuery = .{};
-    framebuffer_query.key.setRenderPass(.{
-        .pass_id = pass.unique_id,
-        .width = target_extent,
-        .height = target_extent,
-    });
-    try framebuffer_query.addAttachment(.{
-        .texture_view_id = 1,
-        .depth_slice = 0,
-        .image_view = target.view,
-        // The clear travels with the query because
-        // `CommandBufferVk.cpp:1041`-`:1042` takes it from here, not from the
-        // framebuffer.
-        .clear_value = .{ .color = .{ .float32 = clear_colour } },
-    });
-    const framebuffer = try framebuffers.getOrCreate(&framebuffer_query, pass.render_pass);
-    try std.testing.expectEqual(@as(usize, 1), framebuffers.count());
+        // The staging buffer starts as a sentinel everywhere the copy must not go.
+        const staged = try mapStaging(device, scene.staging.memory);
+        defer unmapStaging(device, scene.staging.memory);
 
-    // The second call for the same key is the observable the cache exists for: a
-    // hit rather than a second `vkCreateFramebuffer`.
-    try std.testing.expectEqual(
-        framebuffer,
-        try framebuffers.getOrCreate(&framebuffer_query, pass.render_pass),
-    );
-    try std.testing.expectEqual(@as(usize, 1), framebuffers.count());
+        // The wrappers borrow the scene's native allocations. Scene teardown owns
+        // the handles, and all wrappers remain live until the queue wait completes.
+        var uniform = borrowBuffer(resource_device, scene.uniform, uniform_byte_count, .{
+            .uniform = true,
+        });
+        uniform.last_write_usage = (dusk.api.BufferUsage{ .map_write = true }).toFlags();
+        var readback = borrowBuffer(resource_device, scene.staging, readback_byte_count, .{
+            .copy_dst = true,
+            .map_read = true,
+        });
+        if (cases.len == 0 or cases.len > 5) return error.InvalidGraphicsCaseCount;
+        var identities: [3]?*pipeline.Pipeline = @splat(null);
+        for (cases, 0..) |case, case_index| {
+            if (case.identity_index >= identities.len) return error.InvalidGraphicsIdentity;
+            @memset(staged, untouched_fill);
+            const render_pipeline = created: {
+                guard.unlock(io);
+                defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+                break :created try scene.typedPipelineWithConstants(
+                    allocator,
+                    io,
+                    &high_device,
+                    case.vertex_constants,
+                    case.fragment_constants,
+                );
+            };
+            pipeline_aliases[case_index] = render_pipeline;
+            try std.testing.expect(render_pipeline.header.isAlive(&guard));
+            try std.testing.expectEqual(@as(u8, 1), render_pipeline.native.bind_group_mask);
+            try std.testing.expectEqual(
+                case.unique_count,
+                pipeline_store.queryPipelineCount(&guard),
+            );
+            if (identities[case.identity_index]) |previous| {
+                try std.testing.expect(render_pipeline.native == previous);
+                try std.testing.expect(previous.isAlive(&guard));
+            } else {
+                for (identities) |previous| {
+                    if (previous) |other| try std.testing.expect(render_pipeline.native != other);
+                }
+                identities[case.identity_index] = render_pipeline.native;
+            }
+            try std.testing.expect(case.identity_index <= case_index);
+            var descriptor_allocator = try descriptor_sets.DescriptorSetAllocator.init(
+                std.testing.allocator,
+                procs,
+                vk_device,
+                render_pipeline.layout.groups[0].native.handle,
+                &.{.{
+                    .type = @intCast(vulkan.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+                    .descriptorCount = 1,
+                }},
+            );
+            defer descriptor_allocator.deinit() catch @panic("triangle descriptor allocator teardown failed");
+            const tint_group = try bind_group.BindGroup.create(std.testing.allocator, io, &guard, .{
+                .objects = core_device.borrow().objects,
+                .descriptor_allocator = &descriptor_allocator,
+                .pipeline_layout = render_pipeline.layout.native.handle,
+                .group_index = 0,
+                .group_layout = render_pipeline.native.group_layouts[0],
+                .buffer_limits = bind_group.BufferLimits.fromPhysicalDeviceLimits(&device.physicalProperties().limits),
+                .bindings = &.{.{ .buffer = .{
+                    .binding = tint_binding,
+                    .buffer = &uniform,
+                    .offset = 0,
+                    .size = uniform_byte_count,
+                    .kind = .uniform,
+                    .stages = .{ .fragment = true },
+                } }},
+            });
+            defer {
+                tint_group.destroy(
+                    std.testing.allocator,
+                    io,
+                    &guard,
+                    q.timeline.lastSubmittedSerial(),
+                ) catch @panic("triangle bind group teardown failed");
+                descriptor_allocator.finishDeallocation(
+                    q.timeline.lastSubmittedSerial(),
+                ) catch @panic("triangle descriptor retirement failed");
+            }
 
-    // --- the rest of the submission's inputs --------------------------------
+            var frontend = encoder.CommandEncoder.init(allocator, core_device.borrow(), .{});
+            defer frontend.deinit(allocator, io, &guard);
+            var render = begun: {
+                guard.unlock(io);
+                defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+                break :begun try high_device.beginRenderPass(allocator, io, &frontend, .{
+                    .color_attachments = &.{.{
+                        .view = @ptrCast(target_view),
+                        .load_op = .clear,
+                        .store_op = .store,
+                        .clear_color = .{ .r = 0, .g = 0, .b = 1, .a = 1 },
+                    }},
+                    .width = target_extent,
+                    .height = target_extent,
+                });
+            };
+            defer render.deinit(io, &guard);
+            try render.setPipeline(&guard, try render_pipeline.renderOptions(&guard));
+            try render.setBindGroup(.{
+                .index = 0,
+                .group = @ptrCast(tint_group),
+                .layout_id = @intFromPtr(&render_pipeline.layout.groups[0].header),
+                .min_binding_buffer_size = uniform_byte_count,
+                .buffers = &.{.{
+                    .buffer = @ptrCast(&uniform),
+                    .usage = (dusk.api.BufferUsage{ .uniform = true }).toFlags(),
+                }},
+            });
+            if (blend_constant) |color| try render.setBlendConstant(color);
+            try render.draw(.{
+                .vertex_count = vertex_count,
+                .instance_count = 1,
+                .first_vertex = 0,
+                .first_instance = 0,
+            });
+            try render.end(io, &guard);
+            try frontend.copyTextureToBuffer(.{
+                .source = .{
+                    .texture = @ptrCast(target),
+                    .format = @intFromEnum(dusk.api.enums.TextureFormat.rgba8_unorm),
+                    .dimension = ._2d,
+                    .aspect = .all,
+                    .extent = .{
+                        .width = target_extent,
+                        .height = target_extent,
+                        .depth_or_array_layers = 1,
+                    },
+                },
+                .destination = .{
+                    .buffer = @ptrCast(&readback),
+                    .blocks_per_row = @divExact(bytes_per_row_alignment, bytes_per_pixel),
+                    .rows_per_image = target_extent,
+                },
+                .copy_size = .{
+                    .width = target_extent,
+                    .height = target_extent,
+                    .depth_or_array_layers = 1,
+                },
+            });
+            var finished = try frontend.finish();
+            defer finished.deinit(allocator, io, &guard);
+            var recording = recording_context.CommandRecordingContext.init(std.testing.allocator);
+            defer recording.deinit();
+            defer {
+                guard.unlock(io);
+                dispatch.checkVkSuccess(
+                    (procs.device_wait_idle orelse unreachable)(vk_device),
+                ) catch @panic("triangle GPU completion failed");
+                guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+            }
+            var lease = acquired: {
+                guard.unlock(io);
+                defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+                break :acquired try high_device.getQueue(io);
+            };
+            defer {
+                guard.unlock(io);
+                lease.deinit(io);
+                guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+            }
+            if (context.recording_uses == null) {
+                context.recording_uses = try dusk.engine.native_resources.PendingUses.prepareDeclaredLocked(
+                    allocator,
+                    &guard,
+                    core_device,
+                    &.{},
+                );
+            }
+            try dusk.engine.command_buffer.recordCommands(std.testing.allocator, .{
+                .io = io,
+                .guard = &guard,
+                .core_device = core_device,
+                .queue = q,
+                .recording = &recording,
+                .render_pass_cache = passes,
+                .framebuffer_cache = framebuffers,
+                .max_immediate_size = high_device.limits.v1.max_immediate_size,
+                .kernels = &context.kernel_cache.?,
+                .pending_uses = &context.recording_uses.?,
+                .timestamp_quantization = high_device.timestamp_quantization,
+            }, &finished);
+            try std.testing.expectEqual(@as(usize, 1), framebuffers.count());
+            const command_buffer = q.commandBuffer();
+            // Coherent memory still needs a transfer-write to host-read dependency.
+            const host_barrier: vulkan.VkBufferMemoryBarrier = .{
+                .sType = vulkan.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .srcAccessMask = vulkan.VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = vulkan.VK_ACCESS_HOST_READ_BIT,
+                .srcQueueFamilyIndex = vulkan.VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = vulkan.VK_QUEUE_FAMILY_IGNORED,
+                .buffer = scene.staging.buffer,
+                .offset = 0,
+                .size = readback_byte_count,
+            };
+            (procs.cmd_pipeline_barrier orelse return error.DeviceProcMissing)(
+                command_buffer,
+                vulkan.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vulkan.VK_PIPELINE_STAGE_HOST_BIT,
+                0,
+                0,
+                null,
+                1,
+                &host_barrier,
+                0,
+                null,
+            );
 
-    var scene = try createScene(device, &handles, pass.render_pass);
+            // --- the submission, the fence and the sixteen values -------------------
 
-    // The tint the fragment shader reads, written through the host and then
-    // handed to the fragment stage by a memory barrier.
-    try writeTint(device, scene.uniform.memory);
+            const submitted = submitted: {
+                guard.unlock(io);
+                defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+                break :submitted try lease.submit(allocator, io, .{
+                    .command_buffers = &.{command_buffer},
+                }, &.{ &render_pipeline.header, &target.header, &target_view.header });
+            };
+            {
+                guard.unlock(io);
+                defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+                lease.deinit(io);
+                try high_device.wait(io, submitted.serial);
+            }
+            try std.testing.expect(dusk.platform.Timeline.completedSerial(io, &q.timeline) >= submitted.serial);
+            try std.testing.expectEqual(
+                @as(vulkan.VkResult, vulkan.VK_SUCCESS),
+                try q.fenceStatus(submitted.fence),
+            );
 
-    // The staging buffer starts as a sentinel everywhere the copy must not go.
-    const staged = try mapStaging(device, scene.staging.memory);
-    @memset(staged, untouched_fill);
+            try expectPixel(staged, 0, 0, case.pixels[0]);
+            try expectPixel(staged, 1, 0, case.pixels[1]);
+            try expectPixel(staged, 0, 1, case.pixels[2]);
+            try expectPixel(staged, 1, 1, case.pixels[3]);
 
-    // --- the recorded commands ----------------------------------------------
-
-    // `Queue::init` began the primary command buffer
-    // (`src/engine/queue.zig:239`), so recording starts here and `submit` ends
-    // it.
-    const command_buffer = q.commandBuffer();
-
-    // `CommandRecordingContext::EmitBufferBarrierIfNecessary`
-    // (`CommandRecordingContextVk.cpp:42`). The host wrote the tint and the
-    // fragment stage reads it, which is a memory barrier with no buffer and no
-    // image barrier — the whole claim of that row.
-    const context: recording_context.Device = .{ .procs = procs, .vk_device = vk_device };
-    recording_context.emitBufferBarrierIfNecessary(context, command_buffer, .{
-        .src_stage_mask = @intCast(vulkan.VK_PIPELINE_STAGE_HOST_BIT),
-        .dst_stage_mask = @intCast(vulkan.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
-        .src_access_mask = @intCast(vulkan.VK_ACCESS_HOST_WRITE_BIT),
-        .dst_access_mask = @intCast(vulkan.VK_ACCESS_SHADER_READ_BIT),
-    });
-
-    // The same context's eager-transition answer for the tint buffer
-    // (`CommandRecordingContextVk.cpp:35`): the buffer's own usage is mappable
-    // and the usage this submit records is not, so the buffer must leave the
-    // mappable layout for the submit, and the context holds it so the way back
-    // is not forgotten.
-    var recording = recording_context.CommandRecordingContext.init(std.testing.allocator);
-    const eager = try recording.checkBufferNeedsEagerTransition(
-        &scene.uniform,
-        .{ .map_write = true },
-        .{ .uniform = true },
-    );
-    if (!eager) return error.TintBufferDoesNotNeedEagerTransition;
-    if (!recording.isEagerTransitionQueued(&scene.uniform)) {
-        return error.TintBufferNotQueuedForEagerTransition;
+            // Nothing outside the two runs the copy wrote was written at all, so the
+            // pitch is observable: a copy that ran long would leave a colour in the
+            // padding or the tail.
+            try expectSentinel(staged);
+        }
     }
-
-    imageBarrier(
-        procs,
-        command_buffer,
-        target.image,
-        @intCast(vulkan.VK_IMAGE_LAYOUT_UNDEFINED),
-        @intCast(vulkan.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-        @intCast(vulkan.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
-        @intCast(vulkan.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
-        0,
-        @intCast(vulkan.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
-    );
-
-    // `CommandBuffer::RecordBeginRenderPass` (`CommandBufferVk.cpp:1041`-`:1042`)
-    // takes the clear values from the framebuffer query, so the clear travels
-    // with the begin info rather than with the framebuffer.
-    const clear_value: vulkan.VkClearValue = .{ .color = .{ .float32 = clear_colour } };
-    const begin_info: vulkan.VkRenderPassBeginInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO),
-        .pNext = null,
-        .renderPass = pass.render_pass,
-        .framebuffer = framebuffer,
-        // `GetAlignedRenderArea` (`CommandBufferVk.cpp:198`) clamps to the pass
-        // size, and the pass is the whole 2x2 target.
-        .renderArea = .{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = .{ .width = target_extent, .height = target_extent },
-        },
-        .clearValueCount = 1,
-        .pClearValues = &clear_value,
-    };
-    (procs.cmd_begin_render_pass orelse return error.DeviceProcMissing)(
-        command_buffer,
-        &begin_info,
-        @intCast(vulkan.VK_SUBPASS_CONTENTS_INLINE),
-    );
-
-    // `ProgrammablePassState::SyncAndRun` (`CommandBufferVk.cpp:647`-`:653`)
-    // binds the pipeline, then the descriptor sets, then runs the operation.
-    (procs.cmd_bind_pipeline orelse return error.DeviceProcMissing)(
-        command_buffer,
-        @intCast(vulkan.VK_PIPELINE_BIND_POINT_GRAPHICS),
-        scene.pipeline,
-    );
-    (procs.cmd_bind_descriptor_sets orelse return error.DeviceProcMissing)(
-        command_buffer,
-        @intCast(vulkan.VK_PIPELINE_BIND_POINT_GRAPHICS),
-        scene.pipeline_layout,
-        0,
-        1,
-        &scene.descriptor_set,
-        0,
-        null,
-    );
-    (procs.cmd_draw orelse return error.DeviceProcMissing)(
-        command_buffer,
-        vertex_count,
-        1,
-        0,
-        0,
-    );
-    (procs.cmd_end_render_pass orelse return error.DeviceProcMissing)(command_buffer);
-
-    imageBarrier(
-        procs,
-        command_buffer,
-        target.image,
-        @intCast(vulkan.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-        @intCast(vulkan.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
-        @intCast(vulkan.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
-        @intCast(vulkan.VK_PIPELINE_STAGE_TRANSFER_BIT),
-        @intCast(vulkan.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
-        @intCast(vulkan.VK_ACCESS_TRANSFER_READ_BIT),
-    );
-
-    const region: vulkan.VkBufferImageCopy = .{
-        .bufferOffset = 0,
-        // `bufferRowLength` is in texels, not bytes, so the pitch the buffer
-        // names is `bytes_per_row_alignment` over four bytes per texel. Naming
-        // the target's own width instead would make the rows adjacent, which
-        // is not the copy this shard claims and leaves nothing between row one
-        // and row zero for a long copy to show up in.
-        .bufferRowLength = bytes_per_row_alignment / bytes_per_pixel,
-        // `bufferImageHeight` counts rows in a depth layer and one layer holds
-        // `target_extent` of them.
-        .bufferImageHeight = target_extent,
-        .imageSubresource = .{
-            .aspectMask = @intCast(vulkan.VK_IMAGE_ASPECT_COLOR_BIT),
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-        .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
-        .imageExtent = .{ .width = target_extent, .height = target_extent, .depth = 1 },
-    };
-    (procs.cmd_copy_image_to_buffer orelse return error.DeviceProcMissing)(
-        command_buffer,
-        target.image,
-        @intCast(vulkan.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
-        scene.staging.buffer,
-        1,
-        &region,
-    );
-
-    // --- the submission, the fence and the sixteen values -------------------
-
-    const submitted = try q.submit(.{ .command_buffers = &.{command_buffer} });
-    // `Queue.wait` threads `io` first, so Zig does not treat it as a member
-    // function and `q.wait(io, ...)` would bind `io` to the queue. The
-    // qualified call is what puts `io` in the parameter the signature names
-    // (`src/engine/queue.zig:367`).
-    const completed = try queue.Queue.wait(io, &q, .{
-        .serial = submitted.serial,
-        .timeout_ns = queue.fence_wait_timeout_ns,
-    });
-    try std.testing.expect(completed >= submitted.serial);
     try std.testing.expectEqual(
-        @as(vulkan.VkResult, vulkan.VK_SUCCESS),
-        try q.fenceStatus(submitted.fence),
+        vertex_digest,
+        std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(fixtures.vertex_words)),
     );
-
-    // The sixteen values. Row zero is the two covered centres and reads as the
-    // tint; row one is the two uncovered centres and reads as the clear.
-    try expectPixel(staged, 0, 0, rgbaBytes(tint));
-    try expectPixel(staged, 1, 0, rgbaBytes(tint));
-    try expectPixel(staged, 0, 1, rgbaBytes(clear_colour));
-    try expectPixel(staged, 1, 1, rgbaBytes(clear_colour));
-
-    // Nothing outside the two runs the copy wrote was written at all, so the
-    // pitch is observable: a copy that ran long would leave a colour in the
-    // padding or the tail.
-    try expectSentinel(staged);
-
-    // --- teardown -----------------------------------------------------------
-    //
-    // In the order the handles were created, and unmap before the device goes:
-    // `vkUnmapMemory` on a destroyed device is a use-after-free, and the queue
-    // has to have destroyed its fences before the device goes too.
-    unmapStaging(device, scene.staging.memory);
-    recording.deinit();
-    destroyScene(device, &scene, &handles);
-    destroyTarget(device, &target, &handles);
-    framebuffers.deinit();
-    passes.deinit(io);
-    // Every teardown below reaches a dispatch proc the loader can be missing
-    // (`AGENTS.md` §3.1), so each refuses with a typed error rather than
-    // panicking and the shard returns them. The block is explicit rather than
-    // deferred, which is what makes `try` available here at all: Zig 0.16 has
-    // no `try` in a `defer`. `AdapterList.deinit` resolves no proc, so it
-    // still returns nothing.
-    try q.deinit();
-    try device.deinit(std.testing.allocator);
-    adapters.deinit();
-    try backend.deinit();
-
-    try std.testing.expect(handles.isEmpty());
-    // `firstLeakedKind` answers with an optional, so the absence it reports is
-    // the optional's `null` and not a member of the enumeration: the seven
-    // `HandleKind` members are all handle types, because it declares no
-    // `count` member (`src/engine/vulkan_device.zig:113`-`:116`), and a member
-    // standing for "nothing leaked" would be acquirable and releasable like one.
-    try std.testing.expect(handles.firstLeakedKind() == null);
-    try std.testing.expectEqual(@as(u32, 0), handles.totalCount());
+    try std.testing.expectEqual(
+        fragment_digest,
+        std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(fixtures.fragment_words)),
+    );
 }
 
 // --- The sixteen values -----------------------------------------------------
@@ -604,300 +888,59 @@ fn inCopiedRun(at: usize) bool {
         (at >= bytes_per_row_alignment and at < bytes_per_row_alignment + row_byte_count);
 }
 
-// --- The target -------------------------------------------------------------
-
-/// The 2x2 `rgba8unorm` offscreen target, its memory, and its one view.
-///
-/// `initialLayout` is `VK_IMAGE_LAYOUT_UNDEFINED`: nothing has been written to
-/// the image, so its contents are undefined until the first barrier, which is
-/// why the load op then gets to discard for free.
-fn createTarget(
-    device: vulkan_device.Device,
-    handles: *vulkan_device.HandleSet,
-) SetupError!TargetImage {
-    const procs = device.procs;
-    const vk_device = device.vk_device;
-
-    const image_info: vulkan.VkImageCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .imageType = @intCast(vulkan.VK_IMAGE_TYPE_2D),
-        .format = @intCast(vulkan.VK_FORMAT_R8G8B8A8_UNORM),
-        .extent = .{ .width = target_extent, .height = target_extent, .depth = 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = @intCast(vulkan.VK_SAMPLE_COUNT_1_BIT),
-        .tiling = @intCast(vulkan.VK_IMAGE_TILING_OPTIMAL),
-        .usage = @intCast(
-            vulkan.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                vulkan.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        ),
-        .sharingMode = @intCast(vulkan.VK_SHARING_MODE_EXCLUSIVE),
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = null,
-        .initialLayout = @intCast(vulkan.VK_IMAGE_LAYOUT_UNDEFINED),
-    };
-
-    var image: vulkan.VkImage = null;
-    try dispatch.checkVkSuccess((procs.create_image orelse
-        return error.DeviceProcMissing)(vk_device, &image_info, null, &image));
-    if (image == null) return error.HandleCreationReturnedNull;
-
-    // SAFETY: `vkGetImageMemoryRequirements` is an out-parameter call: the
-    // driver writes every field of the struct before the statement returns, and
-    // the `memoryTypeBits` read below is the first read.
-    var requirements: vulkan.VkMemoryRequirements = undefined;
-    (procs.get_image_memory_requirements orelse
-        return error.DeviceProcMissing)(vk_device, image, &requirements);
-    if (requirements.memoryTypeBits == 0) return error.NoDeviceLocalMemoryType;
-
-    const type_index = vulkan_device.findMemoryTypeIndex(
-        device.memoryProperties(),
-        requirements.memoryTypeBits,
-        0,
-        vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-    ) catch return error.NoDeviceLocalMemoryType;
-
-    var memory: vulkan.VkDeviceMemory = null;
-    try allocateMemory(device, handles, .{
-        .allocationSize = requirements.size,
-        .memoryTypeIndex = type_index,
-    }, &memory);
-    try dispatch.checkVkSuccess((procs.bind_image_memory orelse
-        return error.DeviceProcMissing)(vk_device, image, memory, 0));
-
-    const view_info: vulkan.VkImageViewCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .image = image,
-        .viewType = @intCast(vulkan.VK_IMAGE_VIEW_TYPE_2D),
-        .format = @intCast(vulkan.VK_FORMAT_R8G8B8A8_UNORM),
-        .components = .{
-            .r = @intCast(vulkan.VK_COMPONENT_SWIZZLE_IDENTITY),
-            .g = @intCast(vulkan.VK_COMPONENT_SWIZZLE_IDENTITY),
-            .b = @intCast(vulkan.VK_COMPONENT_SWIZZLE_IDENTITY),
-            .a = @intCast(vulkan.VK_COMPONENT_SWIZZLE_IDENTITY),
-        },
-        .subresourceRange = .{
-            .aspectMask = @intCast(vulkan.VK_IMAGE_ASPECT_COLOR_BIT),
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-    var view: vulkan.VkImageView = null;
-    try dispatch.checkVkSuccess((procs.create_image_view orelse
-        return error.DeviceProcMissing)(vk_device, &view_info, null, &view));
-    if (view == null) return error.HandleCreationReturnedNull;
-
-    return .{ .image = image, .memory = memory, .view = view };
-}
-
-/// Destroys the target, newest first: the view before the image it was made
-/// from, and the image before the memory it is bound to. That order is the one
-/// the Vulkan specification requires (`FencedDeleter.h:46`-`:47`).
-fn destroyTarget(
-    device: vulkan_device.Device,
-    target: *TargetImage,
-    handles: *vulkan_device.HandleSet,
-) void {
-    const procs = device.procs;
-    const vk_device = device.vk_device;
-
-    (procs.destroy_image_view orelse unreachable)(vk_device, target.view, null);
-    (procs.destroy_image orelse unreachable)(vk_device, target.image, null);
-    (procs.free_memory orelse unreachable)(vk_device, target.memory, null);
-    handles.release(.memory);
-
-    // SAFETY: the three destroys above read every field, and the caller drops
-    // `target` with the rest of the test's locals, so nothing reads this again.
-    target.* = undefined;
-}
-
 // --- The scene --------------------------------------------------------------
 
-/// Creates everything one submission needs beyond its target and its pass, in
-/// the order `destroyScene` undoes.
-fn createScene(
+/// Create native scene resources with rollback at each acquisition. Pipeline
+/// creation belongs to `typedPipeline` and ownership belongs to the core device.
+pub fn createSceneWithShaders(
     device: vulkan_device.Device,
     handles: *vulkan_device.HandleSet,
-    render_pass: vulkan.VkRenderPass,
+    fixtures: ShaderFixtures,
 ) SetupError!Scene {
-    const procs = device.procs;
-    const vk_device = device.vk_device;
-
-    // The literal names no value because each field is written by the statement
-    // that creates it, below, and nothing reads a field before that statement
-    // runs. A step that fails returns its error, so `destroyScene` is reached
-    // only for a scene that reached the `return` at the end of this function,
-    // and by then every field holds what its own creating call wrote.
     var scene: Scene = .{
-        // SAFETY: `createHostBuffer` writes it on the first statement below,
-        // and the first read is `scene.staging.memory` in the test body.
+        // SAFETY: createHostBuffer fills staging before its errdefer or any caller reads it.
+        // Failure returns without exposing the partial scene.
         .staging = undefined,
-        // SAFETY: `createHostBuffer` writes it on the second statement below,
-        // and the first read is `scene.uniform.memory` in the test body.
+        // SAFETY: uniform acquisition follows staging and fills uniform before its errdefer.
+        // Failure cleans staging only. Success returns both initialized allocations.
         .uniform = undefined,
-        // SAFETY: `vkCreateDescriptorSetLayout` writes it through the pointer
-        // below, and the null check on the next line is the first read.
-        .set_layout = undefined,
-        // SAFETY: `vkCreateDescriptorPool` writes it through the pointer
-        // below, and the null check on the next line is the first read.
-        .descriptor_pool = undefined,
-        // SAFETY: `vkAllocateDescriptorSets` writes it through the pointer
-        // below, and the null check on the next line is the first read.
-        .descriptor_set = undefined,
-        // SAFETY: `vkCreatePipelineLayout` writes it through the pointer
-        // below, and the null check on the next line is the first read.
-        .pipeline_layout = undefined,
-        // SAFETY: `createShaderModule` writes it on the statement below, and
-        // the first read is `scene.vertex_module` in `createGraphicsPipeline`.
-        .vertex_module = undefined,
-        // SAFETY: `createShaderModule` writes it on the statement below, and
-        // the first read is `scene.fragment_module` in `createGraphicsPipeline`.
-        .fragment_module = undefined,
-        // SAFETY: `createGraphicsPipeline` writes it on the last statement
-        // below, and the first read is `scene.pipeline` in the test body.
-        .pipeline = undefined,
+        .fixtures = fixtures,
     };
 
     scene.staging = try createHostBuffer(device, handles, readback_byte_count, @intCast(
         vulkan.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     ));
+    errdefer destroyHostBuffer(device, handles, scene.staging);
     scene.uniform = try createHostBuffer(device, handles, uniform_byte_count, @intCast(
         vulkan.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     ));
 
-    // One binding, the one `triangle.frag.wgsl` declares: a uniform buffer in
-    // the fragment stage.
-    const binding: vulkan.VkDescriptorSetLayoutBinding = .{
-        .binding = tint_binding,
-        .descriptorType = @intCast(vulkan.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        .descriptorCount = 1,
-        .stageFlags = @intCast(vulkan.VK_SHADER_STAGE_FRAGMENT_BIT),
-    };
-    const set_layout_info: vulkan.VkDescriptorSetLayoutCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .bindingCount = 1,
-        .pBindings = &binding,
-    };
-    try dispatch.checkVkSuccess((procs.create_descriptor_set_layout orelse
-        return error.DeviceProcMissing)(vk_device, &set_layout_info, null, &scene.set_layout));
-    if (scene.set_layout == null) return error.HandleCreationReturnedNull;
-
-    const pool_size: vulkan.VkDescriptorPoolSize = .{
-        .type = @intCast(vulkan.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        .descriptorCount = 1,
-    };
-    const pool_info: vulkan.VkDescriptorPoolCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .maxSets = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes = &pool_size,
-    };
-    try dispatch.checkVkSuccess((procs.create_descriptor_pool orelse
-        return error.DeviceProcMissing)(vk_device, &pool_info, null, &scene.descriptor_pool));
-    if (scene.descriptor_pool == null) return error.HandleCreationReturnedNull;
-
-    const allocate_info: vulkan.VkDescriptorSetAllocateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO),
-        .pNext = null,
-        .descriptorPool = scene.descriptor_pool,
-        .descriptorSetCount = 1,
-        .pSetLayouts = &scene.set_layout,
-    };
-    try dispatch.checkVkSuccess((procs.allocate_descriptor_sets orelse
-        return error.DeviceProcMissing)(vk_device, &allocate_info, &scene.descriptor_set));
-    if (scene.descriptor_set == null) return error.HandleCreationReturnedNull;
-
-    const buffer_info: vulkan.VkDescriptorBufferInfo = .{
-        .buffer = scene.uniform.buffer,
-        .offset = 0,
-        .range = uniform_byte_count,
-    };
-    const write: vulkan.VkWriteDescriptorSet = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET),
-        .pNext = null,
-        .dstSet = scene.descriptor_set,
-        .dstBinding = tint_binding,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = @intCast(vulkan.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-        .pImageInfo = null,
-        .pBufferInfo = &buffer_info,
-        .pTexelBufferView = null,
-    };
-    (procs.update_descriptor_sets orelse return error.DeviceProcMissing)(
-        vk_device,
-        1,
-        &write,
-        0,
-        null,
-    );
-
-    const layout_info: vulkan.VkPipelineLayoutCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .setLayoutCount = 1,
-        .pSetLayouts = &scene.set_layout,
-        .pushConstantRangeCount = 0,
-        .pPushConstantRanges = null,
-    };
-    try dispatch.checkVkSuccess((procs.create_pipeline_layout orelse
-        return error.DeviceProcMissing)(vk_device, &layout_info, null, &scene.pipeline_layout));
-    if (scene.pipeline_layout == null) return error.HandleCreationReturnedNull;
-
-    scene.vertex_module = try createShaderModule(device, &vertex_words, vertex_entry_point);
-    scene.fragment_module = try createShaderModule(device, &fragment_words, fragment_entry_point);
-    scene.pipeline = try createGraphicsPipeline(device, scene, render_pass);
-
     return scene;
 }
 
-/// Destroys everything `createScene` created, newest first.
-///
-/// The order is the reverse of creation and also the order the specification
-/// requires: the pipeline before the layout and the modules it names, the
-/// modules before the pipeline, the buffers before the memory they are bound to.
-fn destroyScene(
+/// Releases the scene's direct native buffers after GPU completion.
+pub fn destroyScene(
     device: vulkan_device.Device,
     scene: *Scene,
     handles: *vulkan_device.HandleSet,
 ) void {
-    const procs = device.procs;
-    const vk_device = device.vk_device;
+    destroyHostBuffer(device, handles, scene.uniform);
+    destroyHostBuffer(device, handles, scene.staging);
 
-    (procs.destroy_pipeline orelse unreachable)(vk_device, scene.pipeline, null);
-    (procs.destroy_shader_module orelse unreachable)(vk_device, scene.fragment_module, null);
-    (procs.destroy_shader_module orelse unreachable)(vk_device, scene.vertex_module, null);
-    (procs.destroy_pipeline_layout orelse unreachable)(vk_device, scene.pipeline_layout, null);
-    // The set is freed with its pool, which is what
-    // `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT` would otherwise turn
-    // into a separate `vkFreeDescriptorSets`.
-    (procs.destroy_descriptor_pool orelse unreachable)(vk_device, scene.descriptor_pool, null);
-    (procs.destroy_descriptor_set_layout orelse unreachable)(vk_device, scene.set_layout, null);
-
-    (procs.destroy_buffer orelse unreachable)(vk_device, scene.uniform.buffer, null);
-    (procs.free_memory orelse unreachable)(vk_device, scene.uniform.memory, null);
-    handles.release(.buffer);
-    handles.release(.memory);
-
-    (procs.destroy_buffer orelse unreachable)(vk_device, scene.staging.buffer, null);
-    (procs.free_memory orelse unreachable)(vk_device, scene.staging.memory, null);
-    handles.release(.buffer);
-    handles.release(.memory);
-
-    // SAFETY: the destroys above read every field, and the caller drops
-    // `scene` with the rest of the test's locals, so nothing reads this again.
+    // SAFETY: cleanup releases all owned handles before this terminal poison.
+    // The caller drops the scene without another read or destroyScene call.
     scene.* = undefined;
+}
+
+fn destroyHostBuffer(
+    device: vulkan_device.Device,
+    handles: *vulkan_device.HandleSet,
+    allocation: BufferAllocation,
+) void {
+    (device.procs.destroy_buffer orelse unreachable)(device.vk_device, allocation.buffer, null);
+    (device.procs.free_memory orelse unreachable)(device.vk_device, allocation.memory, null);
+    handles.release(.buffer);
+    handles.release(.memory);
 }
 
 /// One host-visible, host-coherent buffer and the memory bound to it.
@@ -931,6 +974,10 @@ fn createHostBuffer(
         return error.DeviceProcMissing)(vk_device, &buffer_info, null, &buffer));
     if (buffer == null) return error.HandleCreationReturnedNull;
     handles.acquire(.buffer);
+    errdefer {
+        (procs.destroy_buffer orelse unreachable)(vk_device, buffer, null);
+        handles.release(.buffer);
+    }
 
     // SAFETY: `vkGetBufferMemoryRequirements` is an out-parameter call: the
     // driver writes every field of the struct before the statement returns, and
@@ -953,15 +1000,25 @@ fn createHostBuffer(
 
     var memory: vulkan.VkDeviceMemory = null;
     try allocateMemory(device, handles, .{
+        .sType = vulkan.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = requirements.size,
         .memoryTypeIndex = type_index,
     }, &memory);
+    errdefer {
+        (procs.free_memory orelse unreachable)(vk_device, memory, null);
+        handles.release(.memory);
+    }
     // Offset zero is aligned for every `VkMemoryRequirements`, so the alignment
     // rule needs no arithmetic here.
     try dispatch.checkVkSuccess((procs.bind_buffer_memory orelse
         return error.DeviceProcMissing)(vk_device, buffer, memory, 0));
 
-    return .{ .buffer = buffer, .memory = memory };
+    return .{
+        .buffer = buffer,
+        .memory = memory,
+        .allocation_size = requirements.size,
+        .memory_type_index = type_index,
+    };
 }
 
 /// Allocates one `VkDeviceMemory` and counts it.
@@ -978,210 +1035,6 @@ fn allocateMemory(
         return error.DeviceProcMissing)(device.vk_device, &info, null, memory));
     if (memory.* == null) return error.HandleCreationReturnedNull;
     handles.acquire(.memory);
-}
-
-/// Creates the `VkShaderModule` over a checked-in fixture.
-///
-/// `entry_point` is checked against the module's own words before the call: a
-/// fixture regenerated with a different entry point would otherwise fail at
-/// `vkCreateShaderModule` with a diagnostic that names neither the file nor the
-/// name the pipeline asked for.
-fn createShaderModule(
-    device: vulkan_device.Device,
-    words: []const u32,
-    entry_point: []const u8,
-) SetupError!vulkan.VkShaderModule {
-    try checkEntryPoint(words, entry_point);
-
-    // Dawn points `codeSize` and `pCode` at Tint's regenerated words
-    // (`ShaderModuleVk.cpp:500`-`:501`); the port has the caller's words at
-    // creation, so the same two fields carry them. The words are the caller's
-    // and stay the caller's: nothing here rewrites them and nothing here owns
-    // them, so a module this function returns borrows a slice that was already
-    // there (`src/pipeline/shader_module.zig:39`).
-    const info: vulkan.VkShaderModuleCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .codeSize = words.len * @sizeOf(u32),
-        .pCode = words.ptr,
-    };
-
-    var module: vulkan.VkShaderModule = null;
-    try dispatch.checkVkSuccess((device.procs.create_shader_module orelse
-        return error.DeviceProcMissing)(device.vk_device, &info, null, &module));
-    if (module == null) return error.HandleCreationReturnedNull;
-    return module;
-}
-
-/// Builds the graphics pipeline the draw needs.
-///
-/// There is no vertex input state with anything in it, because
-/// `triangle.vert.wgsl` reads `vertex_index` and no attribute; no depth-stencil
-/// state, because the target has no depth attachment; and no dynamic state,
-/// because the pass is 2x2 and the pipeline is built once for it.
-fn createGraphicsPipeline(
-    device: vulkan_device.Device,
-    scene: Scene,
-    render_pass: vulkan.VkRenderPass,
-) SetupError!vulkan.VkPipeline {
-    const procs = device.procs;
-    const vk_device = device.vk_device;
-
-    var stages = [_]vulkan.VkPipelineShaderStageCreateInfo{
-        .{
-            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO),
-            .pNext = null,
-            .flags = 0,
-            .stage = @intCast(vulkan.VK_SHADER_STAGE_VERTEX_BIT),
-            .module = scene.vertex_module,
-            .pName = vertex_entry_point,
-            .pSpecializationInfo = null,
-        },
-        .{
-            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO),
-            .pNext = null,
-            .flags = 0,
-            .stage = @intCast(vulkan.VK_SHADER_STAGE_FRAGMENT_BIT),
-            .module = scene.fragment_module,
-            .pName = fragment_entry_point,
-            .pSpecializationInfo = null,
-        },
-    };
-
-    const vertex_input: vulkan.VkPipelineVertexInputStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = null,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = null,
-    };
-
-    const input_assembly: vulkan.VkPipelineInputAssemblyStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .topology = @intCast(vulkan.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST),
-        .primitiveRestartEnable = 0,
-    };
-
-    // The flip is not a style choice. Vulkan's framebuffer origin is the top
-    // left while normalised device coordinates put +y up, so an unflipped
-    // viewport sends ndc +y to the *last* row. WebGPU sends it to row zero,
-    // and `CommandBuffer::RecordRenderPass` gets there the way this does
-    // (`CommandBufferVk.cpp:1776`-`:1778`): the viewport starts at the pass
-    // height with a negative height, which maps ndc +y to framebuffer row zero.
-    // The coverage argument in the module comment is stated against that.
-    const viewport: vulkan.VkViewport = .{
-        .x = 0,
-        .y = @floatFromInt(target_extent),
-        .width = @floatFromInt(target_extent),
-        .height = -@as(f32, @floatFromInt(target_extent)),
-        .minDepth = 0,
-        .maxDepth = 1,
-    };
-    // The scissor is not flipped: `RecordRenderPass` passes the render area
-    // through as an offset and an extent (`CommandBufferVk.cpp:1783`-`:1787`).
-    const scissor: vulkan.VkRect2D = .{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = .{ .width = target_extent, .height = target_extent },
-    };
-    const viewport_state: vulkan.VkPipelineViewportStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .viewportCount = 1,
-        .pViewports = &viewport,
-        .scissorCount = 1,
-        .pScissors = &scissor,
-    };
-
-    const rasterization: vulkan.VkPipelineRasterizationStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .depthClampEnable = 0,
-        .rasterizerDiscardEnable = 0,
-        .polygonMode = @intCast(vulkan.VK_POLYGON_MODE_FILL),
-        // No culling, so the coverage argument in the module comment depends on
-        // the fixture's vertex order alone and not on a winding convention.
-        .cullMode = @intCast(vulkan.VK_CULL_MODE_NONE),
-        .frontFace = @intCast(vulkan.VK_FRONT_FACE_COUNTER_CLOCKWISE),
-        .depthBiasEnable = 0,
-        .depthBiasConstantFactor = 0,
-        .depthBiasClamp = 0,
-        .depthBiasSlopeFactor = 0,
-        .lineWidth = 1,
-    };
-
-    const multisample: vulkan.VkPipelineMultisampleStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .rasterizationSamples = @intCast(vulkan.VK_SAMPLE_COUNT_1_BIT),
-        .sampleShadingEnable = 0,
-        .minSampleShading = 0,
-        .pSampleMask = null,
-        .alphaToCoverageEnable = 0,
-        .alphaToOneEnable = 0,
-    };
-
-    const write_mask: vulkan.VkColorComponentFlags = @intCast(
-        vulkan.VK_COLOR_COMPONENT_R_BIT | vulkan.VK_COLOR_COMPONENT_G_BIT |
-            vulkan.VK_COLOR_COMPONENT_B_BIT | vulkan.VK_COLOR_COMPONENT_A_BIT,
-    );
-    // Blending off, so a covered pixel is the fragment's own value and not a
-    // combination with the clear.
-    const blend_attachment: vulkan.VkPipelineColorBlendAttachmentState = .{
-        .blendEnable = 0,
-        .srcColorBlendFactor = @intCast(vulkan.VK_BLEND_FACTOR_ONE),
-        .dstColorBlendFactor = @intCast(vulkan.VK_BLEND_FACTOR_ZERO),
-        .colorBlendOp = @intCast(vulkan.VK_BLEND_OP_ADD),
-        .srcAlphaBlendFactor = @intCast(vulkan.VK_BLEND_FACTOR_ONE),
-        .dstAlphaBlendFactor = @intCast(vulkan.VK_BLEND_FACTOR_ZERO),
-        .alphaBlendOp = @intCast(vulkan.VK_BLEND_OP_ADD),
-        .colorWriteMask = write_mask,
-    };
-    const color_blend: vulkan.VkPipelineColorBlendStateCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .logicOpEnable = 0,
-        .logicOp = @intCast(vulkan.VK_LOGIC_OP_COPY),
-        .attachmentCount = 1,
-        .pAttachments = &blend_attachment,
-        .blendConstants = .{ 0, 0, 0, 0 },
-    };
-
-    const create_info: vulkan.VkGraphicsPipelineCreateInfo = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO),
-        .pNext = null,
-        .flags = 0,
-        .stageCount = stages.len,
-        .pStages = &stages,
-        .pVertexInputState = &vertex_input,
-        .pInputAssemblyState = &input_assembly,
-        .pTessellationState = null,
-        .pViewportState = &viewport_state,
-        .pRasterizationState = &rasterization,
-        .pMultisampleState = &multisample,
-        .pDepthStencilState = null,
-        .pColorBlendState = &color_blend,
-        .pDynamicState = null,
-        .layout = scene.pipeline_layout,
-        .renderPass = render_pass,
-        .subpass = 0,
-        .basePipelineHandle = null,
-        .basePipelineIndex = -1,
-    };
-
-    var pipeline: vulkan.VkPipeline = null;
-    try dispatch.checkVkSuccess((procs.create_graphics_pipelines orelse
-        return error.DeviceProcMissing)(vk_device, null, 1, &create_info, null, &pipeline));
-    if (pipeline == null) return error.HandleCreationReturnedNull;
-    return pipeline;
 }
 
 // --- Helpers ----------------------------------------------------------------
@@ -1267,60 +1120,4 @@ fn mapMemory(
     try dispatch.checkVkSuccess((device.procs.map_memory orelse
         return error.DeviceProcMissing)(device.vk_device, memory, 0, size, 0, &mapped));
     return @ptrCast(mapped orelse return error.MapReturnedNull);
-}
-
-/// One whole-image layout transition.
-///
-/// One `vkCmdPipelineBarrier` with one image barrier and no memory barrier and
-/// no buffer barrier, the mirror of what `emitBufferBarrierIfNecessary` does for
-/// the host-to-fragment barrier.
-fn imageBarrier(
-    procs: *const dispatch.DeviceProcs,
-    command_buffer: vulkan.VkCommandBuffer,
-    image: vulkan.VkImage,
-    old_layout: vulkan.VkImageLayout,
-    new_layout: vulkan.VkImageLayout,
-    src_stage: vulkan.VkPipelineStageFlags,
-    dst_stage: vulkan.VkPipelineStageFlags,
-    src_access: vulkan.VkAccessFlags,
-    dst_access: vulkan.VkAccessFlags,
-) void {
-    const barrier: vulkan.VkImageMemoryBarrier = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER),
-        .pNext = null,
-        .srcAccessMask = src_access,
-        .dstAccessMask = dst_access,
-        .oldLayout = old_layout,
-        .newLayout = new_layout,
-        // The image never changes owner, so both families are ignored rather
-        // than named as the exclusive family.
-        .srcQueueFamilyIndex = vulkan.VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = vulkan.VK_QUEUE_FAMILY_IGNORED,
-        .image = image,
-        .subresourceRange = .{
-            .aspectMask = @intCast(vulkan.VK_IMAGE_ASPECT_COLOR_BIT),
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-    (procs.cmd_pipeline_barrier orelse unreachable)(
-        command_buffer,
-        src_stage,
-        dst_stage,
-        0,
-        0,
-        null,
-        0,
-        null,
-        1,
-        &barrier,
-    );
-}
-
-// Keep the bitmask type named here rather than reached through a chain, so a
-// reader can see which usage words the eager-transition assertion compares.
-comptime {
-    if (@TypeOf(BufferUsage) != type) @compileError("the usage bitmask is a type");
 }

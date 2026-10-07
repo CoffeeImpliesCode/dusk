@@ -15,7 +15,7 @@ pub const Proc = *const fn () callconv(.c) void;
 
 /// Generated from dawn.json "request adapter callback" (src/dawn/dawn.json:98).
 /// Tags: none.
-pub const RequestAdapterCallback = *const fn (userdata: ?*anyopaque, status: enums.RequestAdapterStatus, adapter: ?objects.Adapter, message: []const u8) callconv(.c) void;
+pub const RequestAdapterCallback = *const fn (userdata: ?*anyopaque, status: enums.RequestAdapterStatus, adapter: ?objects.Adapter, message: []const u8) void;
 
 /// Generated from dawn.json "request adapter callback info" (src/dawn/dawn.json:106).
 /// Tags: none.
@@ -36,24 +36,24 @@ pub const DawnStoreCacheDataFunction = *const fn (key: ?*const anyopaque, key_si
 
 /// Generated from dawn.json "dawn load cache data callback" (src/dawn/dawn.json:269).
 /// Tags: dawn, native.
-pub const DawnLoadCacheDataCallback = *const fn (userdata: ?*anyopaque, key_size: usize, key: ?[]const u8, value_size: usize, value: []u8) callconv(.c) usize;
+pub const DawnLoadCacheDataCallback = *const fn (userdata: ?*anyopaque, key_size: usize, key: ?[]const u8, value_size: usize, value: []u8) usize;
 
 /// Generated from dawn.json "dawn load cache data callback info" (src/dawn/dawn.json:280).
 /// Tags: dawn, native.
 pub const DawnLoadCacheDataCallbackInfo = struct {
-    callback: DawnLoadCacheDataCallback = null,
+    callback: ?DawnLoadCacheDataCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
 
 /// Generated from dawn.json "dawn store cache data callback" (src/dawn/dawn.json:287).
 /// Tags: dawn, native.
-pub const DawnStoreCacheDataCallback = *const fn (userdata: ?*anyopaque, key_size: usize, key: ?[]const u8, value_size: usize, value: ?[]const u8) callconv(.c) void;
+pub const DawnStoreCacheDataCallback = *const fn (userdata: ?*anyopaque, key_size: usize, key: ?[]const u8, value_size: usize, value: ?[]const u8) void;
 
 /// Generated from dawn.json "dawn store cache data callback info" (src/dawn/dawn.json:297).
 /// Tags: dawn, native.
 pub const DawnStoreCacheDataCallbackInfo = struct {
-    callback: DawnStoreCacheDataCallback = null,
+    callback: ?DawnStoreCacheDataCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
@@ -64,7 +64,7 @@ pub const Callback = *const fn (userdata: ?*anyopaque) callconv(.c) void;
 
 /// Generated from dawn.json "buffer map callback" (src/dawn/dawn.json:778).
 /// Tags: none.
-pub const BufferMapCallback = *const fn (userdata: ?*anyopaque, status: enums.MapAsyncStatus, message: []const u8) callconv(.c) void;
+pub const BufferMapCallback = *const fn (userdata: ?*anyopaque, status: enums.MapAsyncStatus, message: []const u8) void;
 
 /// Generated from dawn.json "buffer map callback info" (src/dawn/dawn.json:785).
 /// Tags: none.
@@ -77,7 +77,7 @@ pub const BufferMapCallbackInfo = struct {
 
 /// Generated from dawn.json "compilation info callback" (src/dawn/dawn.json:1033).
 /// Tags: none.
-pub const CompilationInfoCallback = *const fn (userdata: ?*anyopaque, status: enums.CompilationInfoRequestStatus, compilation_info: *const descriptors.CompilationInfoChain) callconv(.c) void;
+pub const CompilationInfoCallback = *const fn (userdata: ?*anyopaque, status: enums.CompilationInfoRequestStatus, compilation_info: *const descriptors.CompilationInfoChain) void;
 
 /// Generated from dawn.json "compilation info callback info" (src/dawn/dawn.json:1040).
 /// Tags: none.
@@ -90,7 +90,7 @@ pub const CompilationInfoCallbackInfo = struct {
 
 /// Generated from dawn.json "create compute pipeline async callback" (src/dawn/dawn.json:1246).
 /// Tags: none.
-pub const CreateComputePipelineAsyncCallback = *const fn (userdata: ?*anyopaque, status: enums.CreatePipelineAsyncStatus, pipeline: ?objects.ComputePipeline, message: []const u8) callconv(.c) void;
+pub const CreateComputePipelineAsyncCallback = *const fn (userdata: ?*anyopaque, status: enums.CreatePipelineAsyncStatus, pipeline: ?objects.ComputePipeline, message: []const u8) void;
 
 /// Generated from dawn.json "create compute pipeline async callback info" (src/dawn/dawn.json:1254).
 /// Tags: none.
@@ -103,7 +103,7 @@ pub const CreateComputePipelineAsyncCallbackInfo = struct {
 
 /// Generated from dawn.json "create render pipeline async callback" (src/dawn/dawn.json:1271).
 /// Tags: none.
-pub const CreateRenderPipelineAsyncCallback = *const fn (userdata: ?*anyopaque, status: enums.CreatePipelineAsyncStatus, pipeline: ?objects.RenderPipeline, message: []const u8) callconv(.c) void;
+pub const CreateRenderPipelineAsyncCallback = *const fn (userdata: ?*anyopaque, status: enums.CreatePipelineAsyncStatus, pipeline: ?objects.RenderPipeline, message: []const u8) void;
 
 /// Generated from dawn.json "create render pipeline async callback info" (src/dawn/dawn.json:1279).
 /// Tags: none.
@@ -116,32 +116,32 @@ pub const CreateRenderPipelineAsyncCallbackInfo = struct {
 
 /// Generated from dawn.json "device lost callback" (src/dawn/dawn.json:1617).
 /// Tags: none.
-pub const DeviceLostCallback = *const fn (userdata: ?*anyopaque, device: ?[]const objects.Device, reason: enums.DeviceLostReason, message: []const u8) callconv(.c) void;
+pub const DeviceLostCallback = *const fn (userdata: ?*anyopaque, device: ?[]const objects.Device, reason: enums.DeviceLostReason, message: []const u8) void;
 
 /// Generated from dawn.json "device lost callback info" (src/dawn/dawn.json:1625).
 /// Tags: none.
 pub const DeviceLostCallbackInfo = struct {
     mode: enums.CallbackMode,
-    callback: DeviceLostCallback = null,
+    callback: ?DeviceLostCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
 
 /// Generated from dawn.json "uncaptured error callback" (src/dawn/dawn.json:1647).
 /// Tags: none.
-pub const UncapturedErrorCallback = *const fn (userdata: ?*anyopaque, device: ?[]const objects.Device, type_: enums.ErrorType, message: []const u8) callconv(.c) void;
+pub const UncapturedErrorCallback = *const fn (userdata: ?*anyopaque, device: ?[]const objects.Device, type_: enums.ErrorType, message: []const u8) void;
 
 /// Generated from dawn.json "uncaptured error callback info" (src/dawn/dawn.json:1655).
 /// Tags: none.
 pub const UncapturedErrorCallbackInfo = struct {
-    callback: UncapturedErrorCallback = null,
+    callback: ?UncapturedErrorCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
 
 /// Generated from dawn.json "pop error scope callback" (src/dawn/dawn.json:1670).
 /// Tags: none.
-pub const PopErrorScopeCallback = *const fn (userdata: ?*anyopaque, status: enums.PopErrorScopeStatus, type_: enums.ErrorType, message: []const u8) callconv(.c) void;
+pub const PopErrorScopeCallback = *const fn (userdata: ?*anyopaque, status: enums.PopErrorScopeStatus, type_: enums.ErrorType, message: []const u8) void;
 
 /// Generated from dawn.json "pop error scope callback info" (src/dawn/dawn.json:1678).
 /// Tags: none.
@@ -154,32 +154,32 @@ pub const PopErrorScopeCallbackInfo = struct {
 
 /// Generated from dawn.json "logging callback" (src/dawn/dawn.json:1777).
 /// Tags: dawn.
-pub const LoggingCallback = *const fn (userdata: ?*anyopaque, type_: enums.LoggingType, message: []const u8) callconv(.c) void;
+pub const LoggingCallback = *const fn (userdata: ?*anyopaque, type_: enums.LoggingType, message: []const u8) void;
 
 /// Generated from dawn.json "logging callback info" (src/dawn/dawn.json:1785).
 /// Tags: dawn.
 pub const LoggingCallbackInfo = struct {
-    callback: LoggingCallback = null,
+    callback: ?LoggingCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
 
 /// Generated from dawn.json "dispose callback" (src/dawn/dawn.json:2033).
 /// Tags: dawn, native.
-pub const DisposeCallback = *const fn (userdata: ?*anyopaque, status: enums.CallbackStatus) callconv(.c) void;
+pub const DisposeCallback = *const fn (userdata: ?*anyopaque, status: enums.CallbackStatus) void;
 
 /// Generated from dawn.json "dispose callback info" (src/dawn/dawn.json:2040).
 /// Tags: dawn, native.
 pub const DisposeCallbackInfo = struct {
     mode: enums.CallbackMode,
-    callback: DisposeCallback = null,
+    callback: ?DisposeCallback = null,
     /// Passed to the callback as its first argument.
     userdata: ?*anyopaque = null,
 };
 
 /// Generated from dawn.json "queue work done callback" (src/dawn/dawn.json:3126).
 /// Tags: none.
-pub const QueueWorkDoneCallback = *const fn (userdata: ?*anyopaque, status: enums.QueueWorkDoneStatus, message: []const u8) callconv(.c) void;
+pub const QueueWorkDoneCallback = *const fn (userdata: ?*anyopaque, status: enums.QueueWorkDoneStatus, message: []const u8) void;
 
 /// Generated from dawn.json "queue work done callback info" (src/dawn/dawn.json:3133).
 /// Tags: none.
@@ -192,7 +192,7 @@ pub const QueueWorkDoneCallbackInfo = struct {
 
 /// Generated from dawn.json "request device callback" (src/dawn/dawn.json:3627).
 /// Tags: none.
-pub const RequestDeviceCallback = *const fn (userdata: ?*anyopaque, status: enums.RequestDeviceStatus, device: ?objects.Device, message: []const u8) callconv(.c) void;
+pub const RequestDeviceCallback = *const fn (userdata: ?*anyopaque, status: enums.RequestDeviceStatus, device: ?objects.Device, message: []const u8) void;
 
 /// Generated from dawn.json "request device callback info" (src/dawn/dawn.json:3636).
 /// Tags: none.

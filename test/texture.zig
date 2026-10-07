@@ -14,11 +14,9 @@
 //! filled the gap would still return the 64 right bytes, so the pad is the only
 //! observable that separates an honest move from a short one.
 //!
-//! **Why the format is a parameter and not a table read.** `FormatInfo` is what
-//! the format table of M7 hands over (`src/engine/texture.zig:99`), and a
-//! texture cannot exist without one. The shard declares the four facts about
-//! `rgba8unorm` it needs and passes them in, which is the shape the module asks
-//! of its callers.
+//! **The device owns the format rows.** Texture and view creation borrow the
+//! canonical rows specialized from the device's enabled features. The fixture
+//! keeps those rows alive until its device arena releases every object.
 //!
 //! **What this shard does not claim.** It does not claim a Vulkan image. The
 //! front end holds no Vulkan (`AGENTS.md` §3), so the store below is the whole
@@ -34,32 +32,13 @@ const core = dusk.core;
 const engine = dusk.engine;
 const texture = dusk.engine.texture;
 
-const FormatInfo = texture.FormatInfo;
 const TexelCopyBufferLayout = texture.TexelCopyBufferLayout;
 const TexelCopyTextureInfo = texture.TexelCopyTextureInfo;
 const TexelCopyTextureLayout = texture.TexelCopyTextureLayout;
 const TextureLimits = texture.TextureLimits;
 
-/// The format every texture here is built in. A four-byte block over a 1 by 1
-/// block grid makes one texel four bytes wide, which is what makes the row of a
-/// 4-wide texture exactly 16 bytes and the whole level exactly 64
-/// (`src/dawn/native/Format.cpp:461-462`, `:547`).
-const rgba8unorm: FormatInfo = .{
-    .format = .rgba8_unorm,
-    .base_format = .rgba8_unorm,
-    .block_byte_size = 4,
-    .aspects = .{ .color = 1 },
-};
-
 /// The extent every texture here has: 4 by 4 by one layer.
 const extent: api.Extent3D = .{ .width = 4, .height = 4, .depth_or_array_layers = 1 };
-
-/// The bytes one row of the store holds: four texels of four bytes each.
-const row_byte_size: usize = extent.width * rgba8unorm.block_byte_size;
-
-/// The bytes the whole level holds: four rows of sixteen. This is the 64 the
-/// acceptance names.
-const level_byte_size: usize = row_byte_size * extent.height;
 
 /// The pitch Dawn fixes for a linear copy
 /// (`src/dawn/common/Constants.h:44`, checked at `CommandValidation.cpp:426`).
@@ -91,8 +70,8 @@ fn patternChannel(x: u32, y: u32, channel: usize) u8 {
 }
 
 /// The 64 bytes the acceptance copies.
-const pattern: [level_byte_size]u8 = blk: {
-    var bytes: [level_byte_size]u8 = undefined;
+const pattern: [extent.width * extent.height * 4]u8 = blk: {
+    var bytes: [extent.width * extent.height * 4]u8 = undefined;
     var y: u32 = 0;
     while (y < extent.height) : (y += 1) {
         var x: u32 = 0;
@@ -112,13 +91,18 @@ const pattern: [level_byte_size]u8 = blk: {
 /// (`ComputeRequiredBytesInCopy`, `CommandValidation.cpp:286-291`): every row but
 /// the last contributes a whole stride and the last contributes the bytes it
 /// holds.
-fn expectedLinearByteCount(pitch: u32) usize {
+fn expectedLinearByteCount(pitch: u32, row_byte_size: usize) usize {
     return @as(usize, pitch) * (extent.height - 1) + row_byte_size;
 }
 
 /// The linear side of a copy at `pitch`, sized by the library's own rule so a
 /// disagreement with `expectedLinearByteCount` is a failure and not a surprise.
-fn linearSide(allocator: std.mem.Allocator, pitch: u32, pad: u8) ![]u8 {
+fn linearSide(
+    allocator: std.mem.Allocator,
+    pitch: u32,
+    pad: u8,
+    row_byte_size: usize,
+) ![]u8 {
     const byte_count = texture.computeRequiredBytesInCopy(
         @intCast(row_byte_size),
         pitch,
@@ -132,7 +116,7 @@ fn linearSide(allocator: std.mem.Allocator, pitch: u32, pad: u8) ![]u8 {
 
 /// Lays the pattern into a linear side at `pitch`, so a write starts from a
 /// buffer that already holds a byte at every pad position.
-fn fillLinearSide(bytes: []u8, pitch: u32) void {
+fn fillLinearSide(bytes: []u8, pitch: u32, row_byte_size: usize) void {
     const pitch_bytes: usize = pitch;
     var y: usize = 0;
     while (y < extent.height) : (y += 1) {
@@ -147,18 +131,29 @@ fn fillLinearSide(bytes: []u8, pitch: u32) void {
 /// row bytes and `pad` in the gap. The byte index `expectEqualSlices` reports
 /// is the offset in the linear side, so `index / pitch` is the row and
 /// `index % pitch` the column, which is what the per-byte loop used to print.
-fn expectedLinearSide(gpa: std.mem.Allocator, pitch: u32, pad: u8) ![]u8 {
-    const bytes = try gpa.alloc(u8, expectedLinearByteCount(pitch));
+fn expectedLinearSide(
+    gpa: std.mem.Allocator,
+    pitch: u32,
+    pad: u8,
+    row_byte_size: usize,
+) ![]u8 {
+    const bytes = try gpa.alloc(u8, expectedLinearByteCount(pitch, row_byte_size));
     @memset(bytes, pad);
-    fillLinearSide(bytes, pitch);
+    fillLinearSide(bytes, pitch, row_byte_size);
     return bytes;
 }
 
 /// Asserts that `bytes` holds the pattern one row per `pitch` and that every
 /// other byte is still `pad`. Both halves are checked byte by byte: a move that
 /// copies the 64 texels and fills the gap passes the first half alone.
-fn expectLinearSide(gpa: std.mem.Allocator, bytes: []const u8, pitch: u32, pad: u8) !void {
-    const expected = try expectedLinearSide(gpa, pitch, pad);
+fn expectLinearSide(
+    gpa: std.mem.Allocator,
+    bytes: []const u8,
+    pitch: u32,
+    pad: u8,
+    row_byte_size: usize,
+) !void {
+    const expected = try expectedLinearSide(gpa, pitch, pad, row_byte_size);
     defer gpa.free(expected);
 
     try std.testing.expectEqual(expected.len, bytes.len);
@@ -197,11 +192,14 @@ fn sameAllocator(left: std.mem.Allocator, right: std.mem.Allocator) bool {
 /// so a rule that reported something and swallowed it is a failure.
 const ErrorRecorder = struct {
     count: u64 = 0,
+    /// Shares this existing heap allocation; fixture moves cannot move the mutex.
+    object_mutex: std.Io.Mutex = .init,
 
     fn record(
         allocator: std.mem.Allocator,
+        _: std.Io,
         context: *anyopaque,
-        data: *const core.ErrorData,
+        data: core.ErrorView,
     ) void {
         const self: *ErrorRecorder = @ptrCast(@alignCast(context));
         self.count += 1;
@@ -233,17 +231,19 @@ const Fixture = struct {
     fn init() !Fixture {
         const instance = try std.testing.allocator.create(engine.Instance);
         errdefer std.testing.allocator.destroy(instance);
-        instance.* = engine.Instance.init(.{});
+        instance.* = engine.Instance.init(.{ .backend_type = .null_ });
+        errdefer instance.deinit(std.testing.allocator, std.testing.io) catch @panic("texture instance rollback failed");
 
         var adapters = try instance.enumerateAdapters(
             std.testing.allocator,
+            std.testing.io,
             .{
                 .feature_level = .core,
                 .power_preference = .undefined_,
                 .backend_type = .null_,
             },
         );
-        errdefer adapters.deinit();
+        errdefer adapters.deinit(std.testing.io) catch @panic("texture adapter rollback failed");
         if (adapters.items.len != 1) return error.NullAdapterCountChanged;
 
         const recorder = try std.testing.allocator.create(ErrorRecorder);
@@ -251,8 +251,9 @@ const Fixture = struct {
         recorder.* = .{};
 
         const adapter = &adapters.items[0];
-        const device = try adapter.createDevice(std.testing.allocator, .{
+        const device = try adapter.createDevice(std.testing.allocator, std.testing.io, .{
             .adapter = adapter,
+            .object_mutex = &recorder.object_mutex,
             .required_features = &.{},
             .feature_level = adapter.getFeatureLevel(),
             .uncaptured_context = @ptrCast(recorder),
@@ -270,8 +271,9 @@ const Fixture = struct {
         // The device drops its instance registration first (`Device.cpp:493`),
         // then the adapters go, then the two blocks behind the pointers the
         // device still holds.
-        self.device.deinit(std.testing.allocator);
-        self.adapters.deinit();
+        self.device.deinit(std.testing.allocator, std.testing.io) catch @panic("texture device teardown failed");
+        self.adapters.deinit(std.testing.io) catch @panic("texture adapter teardown failed");
+        self.instance.deinit(std.testing.allocator, std.testing.io) catch @panic("texture instance teardown failed");
         std.testing.allocator.destroy(self.recorder);
         std.testing.allocator.destroy(self.instance);
         self.* = undefined;
@@ -282,6 +284,13 @@ const Fixture = struct {
     /// (`src/engine/device.zig:277-279`).
     fn coreDevice(self: *Fixture) *core.Device {
         return self.device.coreDevice();
+    }
+
+    fn lockObjects(self: *Fixture) core.ObjectGuard {
+        const host = self.coreDevice();
+        const guard = core.ObjectGuard.lockUncancelable(std.testing.io, host.borrow().objects);
+        host.bindTrackingOwner(&guard, @ptrCast(&self.device));
+        return guard;
     }
 
     /// The four limits a texture descriptor can be above. They are read from the
@@ -297,10 +306,22 @@ const Fixture = struct {
         };
     }
 
+    fn rowByteSize(self: *const Fixture) !usize {
+        const info = self.device.formatInfo(.rgba8_unorm) orelse return error.FormatRowMissing;
+        const block = (try info.getAspectInfoForAspect(.color)).block;
+        return @as(usize, @divExact(extent.width, block.width)) * block.byte_size;
+    }
+
+    fn levelByteSize(self: *const Fixture) !usize {
+        const info = self.device.formatInfo(.rgba8_unorm) orelse return error.FormatRowMissing;
+        const block = (try info.getAspectInfoForAspect(.color)).block;
+        return (try self.rowByteSize()) * @divExact(extent.height, block.height);
+    }
+
     /// A 4x4 `rgba8unorm` texture, one level, one layer, one sample, with the
     /// usages the caller names.
-    fn createTextureWithUsage(self: *Fixture, usage: api.TextureUsage) !*texture.Texture {
-        const created = try texture.Texture.create(self.coreDevice(), .{
+    fn createTextureWithUsage(self: *Fixture, guard: *const core.ObjectGuard, usage: api.TextureUsage) !*texture.Texture {
+        const created = try texture.Texture.create(std.testing.allocator, std.testing.io, guard, self.coreDevice(), .{
             .descriptor = .{
                 .usage = usage,
                 .dimension = ._2d,
@@ -309,14 +330,15 @@ const Fixture = struct {
                 .mip_level_count = 1,
                 .sample_count = 1,
             },
-            .format_info = &rgba8unorm,
+            .format_info = self.device.formatInfo(.rgba8_unorm) orelse
+                return error.FormatRowMissing,
             .limits = self.textureLimits(),
         });
-        return texture.resolveTexture(self.coreDevice(), created);
+        return texture.resolveTexture(self.coreDevice(), guard, created);
     }
 
-    fn createTexture(self: *Fixture) !*texture.Texture {
-        return self.createTextureWithUsage(.{ .copy_src = true, .copy_dst = true });
+    fn createTexture(self: *Fixture, guard: *const core.ObjectGuard) !*texture.Texture {
+        return self.createTextureWithUsage(guard, .{ .copy_src = true, .copy_dst = true });
     }
 
     /// A view named by the descriptor the caller gives, over the same format.
@@ -324,18 +346,20 @@ const Fixture = struct {
     /// (`dawn.json:4529-4530`).
     fn createView(
         self: *Fixture,
+        guard: *const core.ObjectGuard,
         parent: api.objects.Texture,
         descriptor: api.descriptors.TextureViewDescriptorChain,
     ) !*texture.TextureView {
-        const created = try texture.Texture.createView(self.coreDevice(), parent, .{
+        const created = try texture.Texture.createView(std.testing.allocator, std.testing.io, guard, self.coreDevice(), parent, .{
             .descriptor = descriptor,
-            .format_info = &rgba8unorm,
+            .format_info = self.device.formatInfo(descriptor.format) orelse
+                return error.FormatRowMissing,
         });
-        return texture.resolveTextureView(self.coreDevice(), created);
+        return texture.resolveTextureView(self.coreDevice(), guard, created);
     }
 
-    fn createWholeView(self: *Fixture, parent: api.objects.Texture) !*texture.TextureView {
-        return self.createView(parent, .{ .format = .rgba8_unorm, .dimension = ._2d });
+    fn createWholeView(self: *Fixture, guard: *const core.ObjectGuard, parent: api.objects.Texture) !*texture.TextureView {
+        return self.createView(guard, parent, .{ .format = .rgba8_unorm, .dimension = ._2d });
     }
 };
 
@@ -346,45 +370,51 @@ const Fixture = struct {
 test "a 4x4 rgba8unorm texture holds every texel a linear write delivered" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
+    var guard = fixture.lockObjects();
+    defer guard.unlock(std.testing.io);
+    const row_byte_size = try fixture.rowByteSize();
+    const level_byte_size = try fixture.levelByteSize();
+    try std.testing.expectEqual(pattern.len, level_byte_size);
 
-    const tex = try fixture.createTexture();
+    const tex = try fixture.createTexture(&guard);
+    defer tex.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
 
     // The shape the creation rules resolved, read back before anything is
     // written. A texture that reported a different extent would make the byte
     // assertions below pass or fail for the wrong reason.
-    try std.testing.expectEqual(api.TextureDimension._2d, tex.getDimension());
-    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, tex.getFormat());
-    try std.testing.expectEqual(extent, tex.getBaseSize());
-    try std.testing.expectEqual(extent.width, tex.getWidth());
-    try std.testing.expectEqual(extent.height, tex.getHeight());
-    try std.testing.expectEqual(@as(u32, 1), tex.getArrayLayers());
-    try std.testing.expectEqual(@as(u32, 1), tex.getNumMipLevels());
-    try std.testing.expectEqual(@as(u32, 1), tex.getSampleCount());
-    try std.testing.expectEqual(@as(usize, 1), tex.subresourceCount());
-    try std.testing.expect(!tex.isMultisampledTexture());
-    try std.testing.expect(!tex.isSubresourceContentInitialized(tex.getAllSubresources()));
+    try std.testing.expectEqual(api.TextureDimension._2d, tex.getDimension(&guard));
+    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, tex.getFormat(&guard));
+    try std.testing.expectEqual(extent, tex.getBaseSize(&guard));
+    try std.testing.expectEqual(extent.width, tex.getWidth(&guard));
+    try std.testing.expectEqual(extent.height, tex.getHeight(&guard));
+    try std.testing.expectEqual(@as(u32, 1), tex.getArrayLayers(&guard));
+    try std.testing.expectEqual(@as(u32, 1), tex.getNumMipLevels(&guard));
+    try std.testing.expectEqual(@as(u32, 1), tex.getSampleCount(&guard));
+    try std.testing.expectEqual(@as(usize, 1), tex.subresourceCount(&guard));
+    try std.testing.expect(!tex.isMultisampledTexture(&guard));
+    try std.testing.expect(!tex.isSubresourceContentInitialized(&guard, tex.getAllSubresources(&guard)));
 
     // One subresource, because one level times one layer times one aspect.
-    const all_subresources = tex.getAllSubresources();
+    const all_subresources = tex.getAllSubresources(&guard);
     try std.testing.expectEqual(@as(u32, 0), all_subresources.base_mip_level);
     try std.testing.expectEqual(@as(u32, 1), all_subresources.level_count);
     try std.testing.expectEqual(@as(u32, 0), all_subresources.base_array_layer);
     try std.testing.expectEqual(@as(u32, 1), all_subresources.layer_count);
-    try std.testing.expectEqual(@as(usize, 0), tex.aspectIndex(.color));
-    try std.testing.expectEqual(extent, tex.getMipLevelSubresourcePhysicalSize(0));
-    try std.testing.expectEqual(row_byte_size, tex.levelRowByteSize(0));
-    try std.testing.expectEqual(@as(usize, extent.height), tex.levelRowCount(0));
-    try std.testing.expectEqual(level_byte_size, tex.imageByteSize(0));
-    try std.testing.expectEqual(@as(usize, 0), tex.subresourceByteOffset(0, 0, .color));
+    try std.testing.expectEqual(@as(usize, 0), tex.aspectIndex(&guard, .color));
+    try std.testing.expectEqual(extent, tex.getMipLevelSubresourcePhysicalSize(&guard, 0));
+    try std.testing.expectEqual(row_byte_size, tex.levelRowByteSize(&guard, 0));
+    try std.testing.expectEqual(@as(usize, extent.height), tex.levelRowCount(&guard, 0));
+    try std.testing.expectEqual(level_byte_size, tex.imageByteSize(&guard, 0));
+    try std.testing.expectEqual(@as(usize, 0), tex.subresourceByteOffset(&guard, 0, 0, .color));
 
     // The write: the whole level at the fixed pitch. The linear side is
     // `256 * 3 + 16` bytes, so every row carries 240 pad bytes the copy must
     // step over.
-    const source = try linearSide(std.testing.allocator, row_pitch, write_pad);
+    const source = try linearSide(std.testing.allocator, row_pitch, write_pad, row_byte_size);
     defer std.testing.allocator.free(source);
-    fillLinearSide(source, row_pitch);
+    fillLinearSide(source, row_pitch, row_byte_size);
 
-    try tex.writeTexture(copy_whole_level, wholeLevelLayout(), linearLayout(row_pitch), source);
+    try tex.writeTexture(&guard, copy_whole_level, wholeLevelLayout(), linearLayout(row_pitch), source);
 
     // The 64 bytes, in the store, one by one. A write that dropped the 64 at
     // the head of the store instead of four rows of sixteen fails at row one.
@@ -398,16 +428,18 @@ test "a 4x4 rgba8unorm texture holds every texel a linear write delivered" {
     }
 
     // The rule the write claims to have satisfied, read back.
-    try std.testing.expect(tex.isSubresourceContentInitialized(tex.getAllSubresources()));
+    try std.testing.expect(tex.isSubresourceContentInitialized(&guard, tex.getAllSubresources(&guard)));
     try std.testing.expectEqual(@as(usize, 1), tex.initialized.len);
 
     // A texture without the destination usage refuses the write, and one
     // without the source usage refuses the read. Both refusals come before any
     // of the layout rules, so neither needs a legal pitch to reach.
-    const read_only = try fixture.createTextureWithUsage(.{ .copy_src = true });
+    const read_only = try fixture.createTextureWithUsage(&guard, .{ .copy_src = true });
+    defer read_only.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
     try std.testing.expectError(
         error.TextureUsageMissingCopyDst,
         read_only.writeTexture(
+            &guard,
             copy_whole_level,
             wholeLevelLayout(),
             linearLayout(row_pitch),
@@ -415,12 +447,14 @@ test "a 4x4 rgba8unorm texture holds every texel a linear write delivered" {
         ),
     );
 
-    const write_only = try fixture.createTextureWithUsage(.{ .copy_dst = true });
-    const unreadable = try linearSide(std.testing.allocator, row_pitch, read_pad);
+    const write_only = try fixture.createTextureWithUsage(&guard, .{ .copy_dst = true });
+    defer write_only.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
+    const unreadable = try linearSide(std.testing.allocator, row_pitch, read_pad, row_byte_size);
     defer std.testing.allocator.free(unreadable);
     try std.testing.expectError(
         error.TextureUsageMissingCopySrc,
         write_only.copyTextureToBuffer(
+            &guard,
             copy_whole_level,
             wholeLevelLayout(),
             linearLayout(row_pitch),
@@ -438,14 +472,23 @@ test "a 4x4 rgba8unorm texture holds every texel a linear write delivered" {
 test "a texture copied to a buffer returns all 64 texels at a 256-byte row pitch" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
+    var guard = fixture.lockObjects();
+    defer guard.unlock(std.testing.io);
+    const row_byte_size = try fixture.rowByteSize();
+    const level_byte_size = try fixture.levelByteSize();
+    try std.testing.expectEqual(pattern.len, level_byte_size);
 
-    const tex = try fixture.createTexture();
+    const tex = try fixture.createTexture(&guard);
+    defer tex.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
 
     // The size the rule computes, asserted before the copy so a failure names
     // the arithmetic and not the bytes. 784 is `256 * 3 + 16`; 64 is what the
     // texels alone weigh, and the difference is the pad the copy must skip.
-    try std.testing.expectEqual(@as(usize, 784), expectedLinearByteCount(row_pitch));
-    try std.testing.expectEqual(@as(usize, 1552), expectedLinearByteCount(wide_row_pitch));
+    try std.testing.expectEqual(@as(usize, 784), expectedLinearByteCount(row_pitch, row_byte_size));
+    try std.testing.expectEqual(
+        @as(usize, 1552),
+        expectedLinearByteCount(wide_row_pitch, row_byte_size),
+    );
     const tight_bytes = texture.computeRequiredBytesInCopy(
         @intCast(row_byte_size),
         @intCast(row_byte_size),
@@ -454,20 +497,21 @@ test "a texture copied to a buffer returns all 64 texels at a 256-byte row pitch
     );
     try std.testing.expectEqual(level_byte_size, @as(usize, @intCast(tight_bytes)));
 
-    const source = try linearSide(std.testing.allocator, row_pitch, write_pad);
+    const source = try linearSide(std.testing.allocator, row_pitch, write_pad, row_byte_size);
     defer std.testing.allocator.free(source);
-    fillLinearSide(source, row_pitch);
-    try tex.writeTexture(copy_whole_level, wholeLevelLayout(), linearLayout(row_pitch), source);
+    fillLinearSide(source, row_pitch, row_byte_size);
+    try tex.writeTexture(&guard, copy_whole_level, wholeLevelLayout(), linearLayout(row_pitch), source);
 
     // The read side starts full of a byte the copy must not write, so a copy
     // that returns fewer bytes than it must is visible.
-    const destination = try linearSide(std.testing.allocator, row_pitch, read_pad);
+    const destination = try linearSide(std.testing.allocator, row_pitch, read_pad, row_byte_size);
     defer std.testing.allocator.free(destination);
     try std.testing.expectEqual(read_pad, destination[0]);
-    const last_index = expectedLinearByteCount(row_pitch) - 1;
+    const last_index = expectedLinearByteCount(row_pitch, row_byte_size) - 1;
     try std.testing.expectEqual(read_pad, destination[last_index]);
 
     try tex.copyTextureToBuffer(
+        &guard,
         copy_whole_level,
         wholeLevelLayout(),
         linearLayout(row_pitch),
@@ -476,29 +520,42 @@ test "a texture copied to a buffer returns all 64 texels at a 256-byte row pitch
 
     // Every one of the 64 texels, at the head of its own row, and every one of
     // the 720 pad bytes still holding the byte it started with.
-    try expectLinearSide(std.testing.allocator, destination, row_pitch, read_pad);
+    try expectLinearSide(std.testing.allocator, destination, row_pitch, read_pad, row_byte_size);
 
     // The repeat: the same texture and the same 64 texels at a second legal
     // pitch. A copy that derived the pitch from the row instead of taking the
     // caller's would land the texels sixteen bytes apart and fail here.
-    const wide_destination = try linearSide(std.testing.allocator, wide_row_pitch, read_pad);
+    const wide_destination = try linearSide(
+        std.testing.allocator,
+        wide_row_pitch,
+        read_pad,
+        row_byte_size,
+    );
     defer std.testing.allocator.free(wide_destination);
     try tex.copyTextureToBuffer(
+        &guard,
         copy_whole_level,
         wholeLevelLayout(),
         linearLayout(wide_row_pitch),
         wide_destination,
     );
-    try expectLinearSide(std.testing.allocator, wide_destination, wide_row_pitch, read_pad);
+    try expectLinearSide(
+        std.testing.allocator,
+        wide_destination,
+        wide_row_pitch,
+        read_pad,
+        row_byte_size,
+    );
 
     // And a pitch that is not a multiple of the fixed one is refused by name,
     // which is the rule that leaves the two pitches above as the shapes a caller
     // can ask for.
-    const misaligned = try linearSide(std.testing.allocator, row_pitch, read_pad);
+    const misaligned = try linearSide(std.testing.allocator, row_pitch, read_pad, row_byte_size);
     defer std.testing.allocator.free(misaligned);
     try std.testing.expectError(
         error.CopyBytesPerRowNotAligned,
         tex.copyTextureToBuffer(
+            &guard,
             copy_whole_level,
             wholeLevelLayout(),
             linearLayout(misaligned_row_pitch),
@@ -516,32 +573,36 @@ test "a texture copied to a buffer returns all 64 texels at a 256-byte row pitch
 test "a second view whose base mip level is 1 is rejected" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
+    var guard = fixture.lockObjects();
+    defer guard.unlock(std.testing.io);
 
-    const tex = try fixture.createTexture();
+    const tex = try fixture.createTexture(&guard);
+    defer tex.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
     const parent = handleOf(tex);
 
     // The first view names level 0 and is accepted, so the rejection below is
     // about the base level and not about the descriptor as a whole.
-    const view = try fixture.createWholeView(parent);
-    try std.testing.expectEqual(@as(u32, 0), view.getBaseMipLevel());
-    try std.testing.expectEqual(@as(u32, 1), view.getLevelCount());
-    try std.testing.expectEqual(@as(u32, 0), view.getBaseArrayLayer());
-    try std.testing.expectEqual(@as(u32, 1), view.getLayerCount());
-    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, view.getFormat());
-    try std.testing.expectEqual(api.TextureViewDimension._2d, view.getDimension());
-    try std.testing.expect(tex == view.getTexture());
-    try std.testing.expect(view.isSwizzleIdentity());
-    try std.testing.expectEqual(@as(u1, 1), view.getAspects().color);
-    try std.testing.expectEqual(@as(u1, 0), view.getAspects().depth);
-    try std.testing.expect(tex.getUsage().has(view.getUsage()));
-    try std.testing.expectEqual(view.getUsage().toFlags(), view.getInternalUsage().toFlags());
+    const view = try fixture.createWholeView(&guard, parent);
+    defer view.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture view reference release failed");
+    try std.testing.expectEqual(@as(u32, 0), view.getBaseMipLevel(&guard));
+    try std.testing.expectEqual(@as(u32, 1), view.getLevelCount(&guard));
+    try std.testing.expectEqual(@as(u32, 0), view.getBaseArrayLayer(&guard));
+    try std.testing.expectEqual(@as(u32, 1), view.getLayerCount(&guard));
+    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, view.getFormat(&guard));
+    try std.testing.expectEqual(api.TextureViewDimension._2d, view.getDimension(&guard));
+    try std.testing.expect(tex == view.getTexture(&guard));
+    try std.testing.expect(view.isSwizzleIdentity(&guard));
+    try std.testing.expectEqual(@as(u1, 1), view.getAspects(&guard).color);
+    try std.testing.expectEqual(@as(u1, 0), view.getAspects(&guard).depth);
+    try std.testing.expect(tex.getUsage(&guard).has(view.getUsage(&guard)));
+    try std.testing.expectEqual(view.getUsage(&guard).toFlags(), view.getInternalUsage(&guard).toFlags());
 
     // A one-level texture has no level 1. The descriptor that says so with a
     // count of one is refused by the mip-range rule, which compares
     // `baseMipLevel + mipLevelCount` with the level count (`Texture.cpp:969`).
     try std.testing.expectError(
         error.TextureViewMipRangeExceeds,
-        fixture.createView(parent, .{
+        fixture.createView(&guard, parent, .{
             .format = .rgba8_unorm,
             .dimension = ._2d,
             .base_mip_level = 1,
@@ -555,7 +616,7 @@ test "a second view whose base mip level is 1 is rejected" {
     // shard asserts both so a port that moved either rule is caught.
     try std.testing.expectError(
         error.TextureViewLayerCountZero,
-        fixture.createView(parent, .{
+        fixture.createView(&guard, parent, .{
             .format = .rgba8_unorm,
             .dimension = ._2d,
             .base_mip_level = 1,
@@ -564,14 +625,50 @@ test "a second view whose base mip level is 1 is rejected" {
 
     // A view that names level 0 with an explicit count of one is accepted, so
     // the rule above is about the base level and not about the count.
-    const named = try fixture.createView(parent, .{
+    const named = try fixture.createView(&guard, parent, .{
         .format = .rgba8_unorm,
         .dimension = ._2d,
         .base_mip_level = 0,
         .mip_level_count = 1,
     });
-    try std.testing.expectEqual(@as(u32, 0), named.getBaseMipLevel());
-    try std.testing.expectEqual(@as(u32, 1), named.getLevelCount());
+    defer named.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture view reference release failed");
+    try std.testing.expectEqual(@as(u32, 0), named.getBaseMipLevel(&guard));
+    try std.testing.expectEqual(@as(u32, 1), named.getLevelCount(&guard));
 
+    try std.testing.expectEqual(@as(u64, 0), fixture.recorder.count);
+}
+
+test "a declared sRGB view borrows the canonical device format row" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var guard = fixture.lockObjects();
+    defer guard.unlock(std.testing.io);
+
+    const linear_info = fixture.device.formatInfo(.rgba8_unorm) orelse
+        return error.FormatRowMissing;
+    const srgb_info = fixture.device.formatInfo(.rgba8_unorm_srgb) orelse
+        return error.FormatRowMissing;
+    try std.testing.expect(linear_info != srgb_info);
+    try std.testing.expect(linear_info.viewCompatibleWith(srgb_info));
+
+    const parent = try texture.Texture.create(std.testing.allocator, std.testing.io, &guard, fixture.coreDevice(), .{
+        .descriptor = .{
+            .usage = .{ .texture_binding = true },
+            .size = extent,
+            .format = .rgba8_unorm,
+            .view_format_count = 1,
+            .view_formats = &.{.rgba8_unorm_srgb},
+        },
+        .format_info = linear_info,
+        .limits = fixture.textureLimits(),
+    });
+    const parent_texture = try texture.resolveTexture(fixture.coreDevice(), &guard, parent);
+    defer parent_texture.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture reference release failed");
+    const view = try fixture.createView(&guard, parent, .{
+        .format = .rgba8_unorm_srgb,
+        .dimension = ._2d,
+    });
+    defer view.header.releaseUserLocked(&guard, std.testing.io) catch @panic("texture view reference release failed");
+    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm_srgb, view.getFormat(&guard));
     try std.testing.expectEqual(@as(u64, 0), fixture.recorder.count);
 }

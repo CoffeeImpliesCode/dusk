@@ -1,0 +1,5 @@
+.{
+    .url = "https://dawn.googlesource.com/dawn",
+    .revision = "32f77c02294310054a660c393feded4bcb3f203c",
+    .sparse_paths = .{ "src", "include" },
+}

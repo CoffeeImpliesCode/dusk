@@ -16,15 +16,12 @@
 //! is M14's `ValidateCompatibilityWithPipelineLayout`
 //! (`ShaderModule.cpp:1576`, called at `Pipeline.cpp:135`).
 //!
-//! **What this file does not claim.** It does not claim to check a shader
-//! against a layout, and it does not claim that a reflection result is
-//! complete. It reads what `spirv.reflect` found, which for the committed
-//! fixtures is the whole of what they declare
-//! (`test/fixtures/triangle.frag.wgsl` declares one uniform buffer and nothing
-//! else).
+//! Canonical descriptor metadata comes from `spirv.reflect`. This file retains
+//! every field and groups the descriptors without reading SPIR-V a second time.
 
 const std = @import("std");
 const spirv = @import("../spirv/root.zig");
+const layout_internal = @import("layout_internal.zig");
 
 const ErrorOrOutOfMemory = spirv.ErrorOrOutOfMemory;
 
@@ -35,12 +32,107 @@ const ErrorOrOutOfMemory = spirv.ErrorOrOutOfMemory;
 /// `ShaderModule.cpp:75`.
 pub const ResourceKind = spirv.ResourceKind;
 
-/// One descriptor the shader declares.
-pub const Binding = struct {
-    set: u32,
-    binding: u32,
-    kind: spirv.ResourceKind,
-};
+/// The canonical descriptor record, also used by auto-layout consumers.
+pub const Binding = spirv.Resource;
+
+/// A native shader declaration disagrees with its canonical private binding.
+pub const ShaderBindingError = error{ShaderBindingMismatch};
+
+/// Checks combined and private native bindings against unchanged shader declarations.
+/// Ordinary public separate bindings retain their existing validation path.
+/// This does not acquire owners or replace feature and lifetime checks.
+pub fn validateBinding(
+    resource: Binding,
+    layout_binding: layout_internal.Binding,
+    stages: layout_internal.ShaderStages,
+) ShaderBindingError!void {
+    const combined_layout = switch (layout_binding.layout) {
+        .static_sampler => |sampler| sampler.use == .single_texture_ycbcr,
+        else => false,
+    };
+    const depth_view = switch (layout_binding.layout) {
+        .sampled_texture => |texture| texture.depth_view,
+        else => false,
+    };
+    const external_private = !layout_binding.isUserFacing();
+    if (!resource.combined_image_sampler and !combined_layout and
+        !depth_view and !external_private) return;
+    if (resource.binding != layout_binding.binding_number or
+        resource.array_size != layout_binding.array_size or
+        layout_binding.index_in_array != 0) return error.ShaderBindingMismatch;
+    if (stages.bits() == 0 or
+        layout_binding.visibility.bits() & stages.bits() != stages.bits())
+        return error.ShaderBindingMismatch;
+
+    if (resource.combined_image_sampler or combined_layout) {
+        if (!resource.combined_image_sampler or !combined_layout)
+            return error.ShaderBindingMismatch;
+        const sampler = layout_binding.layout.static_sampler;
+        if (sampler.sampled_texture_binding != null or sampler.sampler_identity == 0 or
+            sampler.combined_image_sampler_descriptor_count == 0)
+            return error.ShaderBindingMismatch;
+        if (resource.array_size != 1) return error.ShaderBindingMismatch;
+        try validateSampledBinding(resource, .{
+            .sample_type = .float_filterable,
+            .view_dimension = .two_d,
+            .multisampled = false,
+        });
+        return;
+    }
+    switch (layout_binding.layout) {
+        .sampled_texture => |texture| try validateSampledBinding(resource, texture),
+        .buffer => |buffer| {
+            if (resource.kind != .uniform_buffer or buffer.binding_type != .uniform or
+                resource.array_size != 1) return error.ShaderBindingMismatch;
+        },
+        .static_sampler, .sampler => {
+            if (resource.kind != .sampler or resource.array_size != 1)
+                return error.ShaderBindingMismatch;
+        },
+        else => return error.ShaderBindingMismatch,
+    }
+}
+
+fn validateSampledBinding(
+    resource: Binding,
+    texture: layout_internal.SampledTextureBinding,
+) ShaderBindingError!void {
+    if (resource.kind != .sampled_texture or resource.image_sampled != 1 or
+        resource.image_format != 0 or resource.image_multisampled != texture.multisampled)
+        return error.ShaderBindingMismatch;
+    const expected_dimension: spirv.Dim = switch (texture.view_dimension) {
+        .one_d => .one_dimensional,
+        .two_d, .two_d_array => .two_dimensional,
+        .cube, .cube_array => .cube,
+        .three_d => .three_dimensional,
+    };
+    const expected_arrayed = texture.view_dimension == .two_d_array or
+        texture.view_dimension == .cube_array;
+    if (resource.image_dimension != expected_dimension or
+        resource.image_arrayed != expected_arrayed) return error.ShaderBindingMismatch;
+    const scalar = resource.sampled_scalar orelse return error.ShaderBindingMismatch;
+    if (texture.depth_view and
+        (!texture.internal or texture.sample_type != .float_unfilterable))
+        return error.ShaderBindingMismatch;
+    switch (texture.sample_type) {
+        .float_filterable, .float_unfilterable => {
+            if (scalar != .float or scalar.float != 32 or resource.image_depth or
+                resource.image_depth_mode != 0) return error.ShaderBindingMismatch;
+        },
+        .depth => {
+            if (scalar != .float or scalar.float != 32 or !resource.image_depth or
+                resource.image_depth_mode != 1) return error.ShaderBindingMismatch;
+        },
+        .sint => {
+            if (scalar != .signed_integer or scalar.signed_integer != 32 or
+                resource.image_depth_mode != 0) return error.ShaderBindingMismatch;
+        },
+        .uint => {
+            if (scalar != .unsigned_integer or scalar.unsigned_integer != 32 or
+                resource.image_depth_mode != 0) return error.ShaderBindingMismatch;
+        },
+    }
+}
 
 /// The descriptors at one set, as a window into `Layout.bindings`.
 pub const GroupRange = struct {
@@ -103,13 +195,7 @@ pub fn layoutFromResources(
     resources: []const spirv.Resource,
 ) ErrorOrOutOfMemory!Layout {
     const bindings = try allocator.alloc(Binding, resources.len);
-    for (bindings, resources) |*binding, resource| {
-        binding.* = .{
-            .set = resource.set,
-            .binding = resource.binding,
-            .kind = resource.kind,
-        };
-    }
+    @memcpy(bindings, resources);
     std.mem.sort(Binding, bindings, NoContext{}, lessBySetThenBinding);
 
     return .{ .allocator = allocator, .bindings = bindings };

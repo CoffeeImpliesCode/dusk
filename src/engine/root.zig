@@ -5,10 +5,9 @@
 //! textures and the bind groups, and the one that never encodes a command.
 //!
 //! **This file is the engine's public surface.** Every name a consumer reaches
-//! is re-exported here. A milestone adds its own file to the import list below
-//! and its own names to the export list; it never edits another milestone's
-//! line. `src/root.zig` re-exports this file as `dusk.engine`, which is the
-//! path `test/null_device.zig` reaches the library through.
+//! is re-exported here. File namespaces expose each owner's typed descriptors
+//! and operations without a second runtime facade. `src/root.zig` publishes
+//! this file as `dusk.engine`.
 //!
 //! **What this file does not claim.** The names a milestone below has not
 //! landed are absent rather than declared and empty.
@@ -22,8 +21,8 @@ const limits_mod = @import("limits.zig");
 const null_backend_mod = @import("null_backend.zig");
 const physical_device_mod = @import("physical_device.zig");
 
-// The front end. `Instance`, `Adapter` and `Device` are M8; `queue`, `buffer`
-// and `texture` arrive at M9, M10 and M11.
+// The front-end owners. Native Vulkan state lives at stable addresses behind
+// Instance and Device; the null backend is an explicit test choice.
 pub const Instance = instance_mod.Instance;
 pub const Adapter = adapter_mod.Adapter;
 pub const Device = device_mod.Device;
@@ -31,11 +30,13 @@ pub const PhysicalDevice = physical_device_mod.PhysicalDevice;
 
 /// One enumeration's adapters and the physical devices behind them.
 pub const AdapterList = instance_mod.AdapterList;
+/// A counted physical-device enumeration that retains its Instance owner.
+pub const PhysicalDeviceList = instance_mod.PhysicalDeviceList;
 /// `DeviceBase::State` (`Device.h:366-372`) without `BeingCreated`, because
 /// the port builds a device in one call and never has a half-built one.
 pub const DeviceState = device_mod.State;
 
-// The back ends. `null_backend` is M8; the Vulkan one arrives at M9.
+// The deterministic null back end. Native Vulkan ownership is published below.
 pub const null_backend = null_backend_mod;
 
 // The names more than one of those files answers through.
@@ -78,6 +79,27 @@ pub const enforceLimitSpecInvariants = device_mod.enforceLimitSpecInvariants;
 
 /// `adapter.zig`: the adapters behind one enumeration.
 pub const adapter = adapter_mod;
+/// `async_registry.zig`: typed asynchronous completion cells and future waits.
+pub const async_registry = @import("async_registry.zig");
+pub const async_root_requests = @import("async_root_requests.zig");
+pub const native_async_device = @import("native_async_device.zig");
+pub const native_async_descriptors = @import("native_async_descriptors.zig");
+pub const native_async_pipeline = @import("native_async_pipeline.zig");
+pub const native_async_map_queue = @import("native_async_map_queue.zig");
+pub const native_async_scope_info = @import("native_async_scope_info.zig");
+pub const native_async_handles = @import("native_async_handles.zig");
+pub const RootKind = async_root_requests.RootKind;
+pub const RootRecord = async_root_requests.RootRecord;
+pub const OwnedAdapterSelection = async_root_requests.OwnedAdapterSelection;
+pub const OwnedDevice = async_root_requests.OwnedDevice;
+pub const OwnedDeviceInput = async_root_requests.OwnedDeviceInput;
+pub const RootOutcome = async_root_requests.RootOutcome;
+pub const RootWorkError = async_root_requests.RootWorkError;
+pub const RootDescriptorError = async_root_requests.RootDescriptorError;
+pub const RootCreateError = async_root_requests.RootCreateError;
+pub const OwnedRootReleaseError = async_root_requests.OwnedRootReleaseError;
+pub const RootReleaseResult = async_root_requests.RootReleaseResult;
+pub const RootDisposalError = async_root_requests.RootDisposalError;
 /// `buffer.zig`: the buffer object, its usage rules, the upload ring and the
 /// barriers its writes raise.
 pub const buffer = @import("buffer.zig");
@@ -109,10 +131,70 @@ pub const stream = @import("stream.zig");
 pub const texture = @import("texture.zig");
 /// `toggles.zig`: the toggle names and the per-feature defaults.
 pub const toggles = @import("toggles.zig");
-/// `vulkan_device.zig`: the M9 Vulkan back end — the ICD search, the instance,
-/// the `VkDevice`, the handle set it owns and the `Backend` the front end
-/// reaches Vulkan through.
+/// `vulkan_device.zig`: Vulkan discovery and logical-device creation, including
+/// the handle set and queried physical capabilities.
 pub const vulkan_device = @import("vulkan_device.zig");
 /// `vulkan_format.zig`: the `TextureFormat` to `VkFormat` table and the feature
 /// query behind it.
 pub const vulkan_format = @import("vulkan_format.zig");
+
+/// Canonical format capabilities and aspect/block metadata for a feature set.
+pub const format = @import("format.zig");
+/// Distinct texel/block units and checked copy-geometry conversions.
+pub const block_info = @import("block_info.zig");
+/// Native descriptor-set objects used by recorded programmable passes.
+pub const bind_group = @import("bind_group.zig");
+/// Replay of finished front-end commands into the queue's Vulkan recording.
+pub const command_buffer = @import("command_buffer.zig");
+/// Query-pool creation, reset, resolution, and serial-safe retirement.
+pub const vulkan_query_set = @import("vulkan_query_set.zig");
+
+/// Stable Vulkan instance ownership shared by adapter lists and devices.
+pub const native_instance_context = @import("native_instance_context.zig");
+/// Stable device dispatch, queue, pipeline and replay ownership.
+pub const native_device_context = @import("native_device_context.zig");
+/// Physical Vulkan capabilities mapped into front-end features and limits.
+pub const native_capabilities = @import("native_capabilities.zig");
+/// Typed resources and descriptors used by the native Device methods.
+pub const native_resources = @import("native_resources.zig");
+/// Original-guard weak indices owned by the stable native device context.
+pub const native_resource_store = @import("native_resource_store.zig");
+pub const native_weak_index = @import("native_weak_index.zig");
+pub const native_attachment_store = @import("native_attachment_store.zig");
+pub const native_render_state = @import("native_render_state.zig");
+/// Bounded canonical utility pipeline leases and native recording.
+pub const native_kernels = @import("native_kernels.zig");
+/// Committed shader words and fixed native utility binding definitions.
+pub const native_kernel_definitions = @import("native_kernel_definitions.zig");
+/// GPU validation of indirect draw and dispatch arguments.
+pub const native_indirect = @import("native_indirect.zig");
+/// GPU conversion of native timestamp ticks into nanoseconds.
+pub const native_timestamps = @import("native_timestamps.zig");
+/// Native clears, copies, and shader-based texture conversions.
+pub const native_blit = @import("native_blit.zig");
+/// External texture owners, metadata, and native GPU sampling.
+pub const external_texture = @import("external_texture.zig");
+
+test "native public owners and Device method declarations are referenced" {
+    const std = @import("std");
+    inline for (.{
+        native_instance_context,
+        native_device_context,
+        native_capabilities,
+        native_resources,
+        native_resource_store,
+        native_weak_index,
+        native_attachment_store,
+        native_render_state,
+        native_kernels,
+        native_kernel_definitions,
+        native_indirect,
+        native_timestamps,
+        native_blit,
+        external_texture,
+        native_instance_context.NativeInstanceContext,
+        native_device_context.NativeDeviceContext,
+        Device,
+        PhysicalDeviceList,
+    }) |owner| std.testing.refAllDecls(owner);
+}

@@ -8,6 +8,12 @@
 //! **What this file does not claim.** It does not claim Dawn's message text.
 //! Dawn has no message id at this revision. `src/dawn/native/ErrorData.h:102`
 //! holds a `std::string`, so the wording below is the port's own.
+//!
+//! `ErrorData` remains a synchronous mutable payload. For asynchronous ownership,
+//! prepare an `ErrorReservation`, build an `ErrorDraft`, then seal and release
+//! the resulting `ErrorRef`. Sealing allocates nothing; views borrow immutable
+//! bytes through a held reference. This module does not route scopes, claim
+//! terminal outcomes, or invoke callbacks; those callers synchronize publication.
 
 const std = @import("std");
 
@@ -20,6 +26,10 @@ pub const ValidationError = error{
     BufferSizeTooSmall,
     BufferUsageMissingCopyDst,
     TextureFormatNotRenderable,
+    /// The enabled features do not support the requested texture format.
+    TextureFormatUnsupported,
+    /// The supplied canonical row names a different descriptor format.
+    TextureFormatMetadataMismatch,
     BindGroupLayoutMismatch,
     EncoderAlreadyFinished,
     StaleHandle,
@@ -174,6 +184,8 @@ pub fn codeFromError(err: Error) ErrorCode {
         error.BufferSizeTooSmall => |member| .{ .validation = member },
         error.BufferUsageMissingCopyDst => |member| .{ .validation = member },
         error.TextureFormatNotRenderable => |member| .{ .validation = member },
+        error.TextureFormatUnsupported => |member| .{ .validation = member },
+        error.TextureFormatMetadataMismatch => |member| .{ .validation = member },
         error.BindGroupLayoutMismatch => |member| .{ .validation = member },
         error.EncoderAlreadyFinished => |member| .{ .validation = member },
         error.StaleHandle => |member| .{ .validation = member },
@@ -286,6 +298,14 @@ pub const message_table = std.StaticStringMap([]const u8).initComptime(.{
     .{
         "TextureFormatNotRenderable",
         "texture format {s} cannot be a render attachment",
+    },
+    .{
+        "TextureFormatUnsupported",
+        "the enabled features do not support the texture format",
+    },
+    .{
+        "TextureFormatMetadataMismatch",
+        "the texture format metadata does not match the descriptor format",
     },
     .{
         "BindGroupLayoutMismatch",
@@ -535,7 +555,7 @@ pub const ErrorData = struct {
         errdefer allocator.free(message);
 
         var context: std.ArrayList(ErrorContext) = .empty;
-        errdefer context.deinit(allocator);
+        errdefer freeOwnedContext(allocator, &context);
         const initial_context_count = initial_context.len;
         for (initial_context[0..initial_context_count]) |item| {
             try appendOwnedContext(allocator, &context, item);
@@ -559,24 +579,10 @@ pub const ErrorData = struct {
         return appendOwnedContext(allocator, &self.context, item);
     }
 
-    /// Frees every allocation the payload owns and poisons the payload.
+    /// Frees the owned message and context bytes. The receiver is invalid afterwards.
     ///
-    /// `self.* = undefined` is the terminal state, not a reset of the three
-    /// slots. A slot that still reads `message` or `context` after the free is
-    /// a payload whose storage is gone, and no caller could tell it from a live
-    /// one, so a reset is a lie the type does not carry. Every caller already
-    /// treats the payload as dead once the call returns:
-    /// `ErrorScopeStack.handleError` (`src/core/error_scope.zig:209-221`) frees
-    /// the payload itself and hands back only a bool,
-    /// `ErrorScope.capture` (`src/core/error_scope.zig:104-114`) drops the
-    /// reference to an error it will not keep, and every raiser reads the
-    /// fields before its `defer` runs (`test/error_sets.zig:40-63`,
-    /// `test/error_scope.zig:34-56`).
-    ///
-    /// The rule that leaves is one `deinit` per payload: a second call reads
-    /// undefined memory, which is a caller defect rather than a double free,
-    /// and it is the same trade every other `deinit` in the tree makes
-    /// (`src/core/error_scope.zig:120`, `src/memory/size_tracker.zig:85`).
+    /// ErrorDraft.fromOwned transfers this payload before a scope or result retains it.
+    /// A sealed ErrorRef owns its payload; release the reference instead of this draft.
     pub fn deinit(self: *ErrorData, allocator: std.mem.Allocator) void {
         const context_count = self.context.items.len;
         for (self.context.items[0..context_count]) |item| allocator.free(item.text);
@@ -607,6 +613,302 @@ pub const ErrorData = struct {
             try out.appendSlice(allocator, item.text);
         }
         return out.toOwnedSlice(allocator);
+    }
+};
+
+/// A mutable, singly owned error prepared before asynchronous publication.
+///
+/// `allocator` frees all payload storage, even if the node uses another allocator.
+/// Its backing state must outlive the draft and every sealed reference. `data`
+/// is `null` after a move or discard. Copies are not independent owners.
+pub const ErrorDraft = struct {
+    allocator: std.mem.Allocator,
+    data: ?ErrorData,
+
+    /// Builds an owned draft with the table message and copied context.
+    /// On error no payload escapes. Async drafts never retain caller traces.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        code: ErrorCode,
+        initial_context: []const ErrorContext,
+    ) FormatError!ErrorDraft {
+        return .{
+            .allocator = allocator,
+            .data = try ErrorData.init(allocator, code, null, initial_context),
+        };
+    }
+
+    /// Copies an exact message and its context, including first-loss messages.
+    /// Neither input slice is borrowed after return. On error nothing is owned.
+    pub fn initMessage(
+        allocator: std.mem.Allocator,
+        code: ErrorCode,
+        message: []const u8,
+        initial_context: []const ErrorContext,
+    ) std.mem.Allocator.Error!ErrorDraft {
+        const owned_message = try allocator.dupe(u8, message);
+        errdefer allocator.free(owned_message);
+        var context: std.ArrayList(ErrorContext) = .empty;
+        errdefer freeOwnedContext(allocator, &context);
+        for (initial_context) |item| try appendOwnedContext(allocator, &context, item);
+        return .{
+            .allocator = allocator,
+            .data = .{
+                .code = code,
+                .message = owned_message,
+                .context = context,
+                .backtrace = null,
+            },
+        };
+    }
+
+    /// Moves `data` by value without cloning its bytes, and poisons the source.
+    /// All its allocations must belong to `allocator`; its borrowed trace is dropped.
+    pub fn fromOwned(allocator: std.mem.Allocator, data: *ErrorData) ErrorDraft {
+        var owned = data.*;
+        owned.backtrace = null;
+        // SAFETY: The draft owns the payload; the caller cannot read or deinit the source again.
+        data.* = undefined;
+        return .{ .allocator = allocator, .data = owned };
+    }
+
+    /// Appends owned context with the recorded payload allocator.
+    /// Requires a live draft; allocation failure leaves previous context intact.
+    pub fn appendContext(
+        self: *ErrorDraft,
+        item: ErrorContext,
+    ) std.mem.Allocator.Error!void {
+        const data = if (self.data) |*payload| payload else @panic("ErrorDraft already consumed");
+        try data.appendContext(self.allocator, item);
+    }
+
+    /// Frees a losing draft once. Safe after sealing or an earlier discard.
+    /// An independently copied live draft must not also be discarded.
+    pub fn discard(self: *ErrorDraft) void {
+        if (self.data) |*data| data.deinit(self.allocator);
+        self.data = null;
+    }
+};
+
+/// Immutable diagnostic borrowed from a caller-held `ErrorRef`.
+/// Message and context remain valid until that reference is released. The
+/// backtrace is always `null`: worker traces are not owned asynchronous data.
+pub const ErrorView = struct {
+    code: ErrorCode,
+    message: []const u8,
+    context: []const ErrorContext,
+    backtrace: ?*const std.builtin.StackTrace = null,
+};
+
+/// A reference quota could not be increased. No count changes on error.
+pub const ErrorReferenceCountError = error{ErrorReferenceCountOverflow};
+
+/// Retain refused overflow or exhausted its bounded atomic retry budget.
+/// Neither error creates a new reference; the caller still owns its old one.
+pub const ErrorRetainError = ErrorReferenceCountError || error{ErrorReferenceContention};
+
+const ErrorNodeHandle = opaque {};
+
+const ErrorNode = struct {
+    header_allocator: std.mem.Allocator,
+    references: std.atomic.Value(u32),
+    payload: union(enum) {
+        reserved,
+        owned: struct {
+            allocator: std.mem.Allocator,
+            data: ErrorData,
+        },
+        static: ErrorView,
+    },
+};
+
+fn errorNode(handle: *ErrorNodeHandle) *ErrorNode {
+    return @ptrCast(@alignCast(handle));
+}
+
+/// A stable header reserved before accepting an asynchronous request.
+///
+/// The reservation has one owner and cannot be shared between writers.
+/// `prepare` allocates only the header. Extra reference slots are prepaid by
+/// `reserveReferences` before the terminal claim. Seal consumes the reservation
+/// and returns one handle representing all prepaid slots; distribute copies
+/// only against those slots, and release every unused slot once. `discard`
+/// frees an unused header regardless of how many reference slots were reserved.
+/// The header allocator's backing state must outlive every resulting reference.
+pub const ErrorReservation = struct {
+    /// `null` means sealed or discarded; no header is owned in that state.
+    node: ?*ErrorNodeHandle,
+
+    /// Reserves an empty stable header with one reference slot.
+    /// On allocation failure no reservation is created.
+    pub fn prepare(allocator: std.mem.Allocator) std.mem.Allocator.Error!ErrorReservation {
+        const node = try allocator.create(ErrorNode);
+        node.* = .{
+            .header_allocator = allocator,
+            .references = .init(1),
+            .payload = .reserved,
+        };
+        return .{ .node = @ptrCast(node) };
+    }
+
+    /// Prepays additional reference slots without allocation or atomic retries.
+    /// Requires exclusive ownership of this unsealed reservation.
+    pub fn reserveReferences(
+        self: *ErrorReservation,
+        additional: u32,
+    ) ErrorReferenceCountError!void {
+        const node = errorNode(self.node orelse @panic("ErrorReservation already consumed"));
+        const current = node.references.load(.monotonic);
+        if (additional > std.math.maxInt(u32) - current) {
+            return error.ErrorReferenceCountOverflow;
+        }
+        node.references.store(current + additional, .monotonic);
+    }
+
+    /// Moves the owned draft into the header and clears its borrowed trace.
+    /// Allocates nothing and cannot fail. Requires a live reservation and draft;
+    /// synchronize terminal publication externally before readers access the result.
+    pub fn seal(self: *ErrorReservation, draft: *ErrorDraft) ErrorRef {
+        const handle = self.node orelse @panic("ErrorReservation already consumed");
+        var data = draft.data orelse @panic("ErrorDraft already consumed");
+        data.backtrace = null;
+        errorNode(handle).payload = .{
+            .owned = .{ .allocator = draft.allocator, .data = data },
+        };
+        draft.data = null;
+        self.node = null;
+        return .{ .node = handle };
+    }
+
+    /// Seals the header as host OOM using static text and no payload allocation.
+    pub fn sealOutOfMemory(self: *ErrorReservation) ErrorRef {
+        return self.sealStatic(.{ .unrecoverable = error.OutOfHostMemory }, "Out of memory");
+    }
+
+    /// Seals the first loss fallback while preserving its supplied loss code.
+    /// Use only when copying the first loss message failed; allocates nothing.
+    pub fn sealDeviceLostFallback(self: *ErrorReservation, reason: DeviceLostError) ErrorRef {
+        return self.sealStatic(.{ .device_lost = reason }, "Device lost");
+    }
+
+    /// Seals the actual native error name with its selected core category/code.
+    /// `native_error` must have a finite error-set type. `@errorName` provides
+    /// compiler-static text, not a worker-local formatted buffer. Allocates nothing.
+    pub fn sealNativeError(
+        self: *ErrorReservation,
+        code: ErrorCode,
+        native_error: anytype,
+    ) ErrorRef {
+        comptime {
+            switch (@typeInfo(@TypeOf(native_error))) {
+                .error_set => |set| {
+                    if (set == null) @compileError("sealNativeError requires a finite error set");
+                },
+                else => @compileError("sealNativeError requires an error value"),
+            }
+        }
+        return self.sealStatic(code, @errorName(native_error));
+    }
+
+    fn sealStatic(
+        self: *ErrorReservation,
+        code: ErrorCode,
+        static_message: []const u8,
+    ) ErrorRef {
+        const handle = self.node orelse @panic("ErrorReservation already consumed");
+        errorNode(handle).payload = .{
+            .static = .{ .code = code, .message = static_message, .context = &.{} },
+        };
+        self.node = null;
+        return .{ .node = handle };
+    }
+
+    /// Frees an unused header and all its prepaid slots. Safe after sealing
+    /// or a prior discard; copied reservations are not independent owners.
+    pub fn discard(self: *ErrorReservation) void {
+        if (self.node) |handle| {
+            const node = errorNode(handle);
+            node.header_allocator.destroy(node);
+            self.node = null;
+        }
+    }
+};
+
+/// An owned reference to a sealed immutable diagnostic at a stable address.
+///
+/// A plain copy does not retain. Each owner consumes one prepaid slot or one
+/// successful `retain`, then calls `release` once. Readers must hold a reference;
+/// a borrowed pointer cannot resurrect a node after its last release.
+/// Retain/release are atomic; allocator backing state must permit destruction
+/// on the last releasing thread and remain alive until then.
+pub const ErrorRef = struct {
+    /// Opaque storage prevents access to the mutable draft or node layout.
+    node: *ErrorNodeHandle,
+
+    /// Maximum strong-CAS attempts for one retain. Exhaustion is reported,
+    /// never an unbounded spin or a fabricated successful retain.
+    pub const retain_retry_limit: u32 = 64;
+
+    /// Borrows immutable payload slices while the caller holds this reference.
+    pub fn view(self: ErrorRef) ErrorView {
+        const node = errorNode(self.node);
+        return switch (node.payload) {
+            .reserved => @panic("ErrorRef is not sealed"),
+            .owned => |*owned| .{
+                .code = owned.data.code,
+                .message = owned.data.message,
+                .context = owned.data.context.items,
+            },
+            .static => |static| static,
+        };
+    }
+
+    /// Creates one additional owned reference without allocation. Requires an
+    /// existing caller-held reference. On error the original ownership remains.
+    /// This fallible operation belongs before any infallible terminal claim.
+    pub fn retain(self: ErrorRef) ErrorRetainError!ErrorRef {
+        const node = errorNode(self.node);
+        var current = node.references.load(.monotonic);
+        for (0..retain_retry_limit) |_| {
+            if (current == 0) @panic("ErrorRef retain without a live reference");
+            if (current == std.math.maxInt(u32)) return error.ErrorReferenceCountOverflow;
+            if (node.references.cmpxchgStrong(
+                current,
+                current + 1,
+                .monotonic,
+                .monotonic,
+            )) |changed| {
+                current = changed;
+            } else {
+                return self;
+            }
+        }
+        return error.ErrorReferenceContention;
+    }
+
+    /// Consumes one reference. The last release frees the payload with its
+    /// recorded allocator, then the header with its separate recorded allocator.
+    /// The caller must not use this alias afterward, even if another alias lives.
+    pub fn release(self: ErrorRef) void {
+        self.releaseMany(1);
+    }
+
+    /// Consumes `count` reference slots owned by the caller in one atomic step.
+    /// Used to drop undistributed prepaid slots; requires a nonzero owned count.
+    /// Count underflow is an always-on contract panic, not unchecked wrapping.
+    pub fn releaseMany(self: ErrorRef, count: u32) void {
+        if (count == 0) @panic("ErrorRef release count must be nonzero");
+        const node = errorNode(self.node);
+        const previous = node.references.fetchSub(count, .acq_rel);
+        if (previous < count) @panic("ErrorRef reference count underflow");
+        if (previous != count) return;
+        switch (node.payload) {
+            .reserved => @panic("ErrorRef release before seal"),
+            .owned => |*owned| owned.data.deinit(owned.allocator),
+            .static => {},
+        }
+        const allocator = node.header_allocator;
+        allocator.destroy(node);
     }
 };
 
@@ -663,6 +965,14 @@ fn renderTemplate(
     }
     try out.appendSlice(allocator, template[cursor..]);
     return out.toOwnedSlice(allocator);
+}
+
+fn freeOwnedContext(
+    allocator: std.mem.Allocator,
+    context: *std.ArrayList(ErrorContext),
+) void {
+    for (context.items) |item| allocator.free(item.text);
+    context.deinit(allocator);
 }
 
 fn appendOwnedContext(

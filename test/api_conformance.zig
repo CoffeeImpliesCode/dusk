@@ -38,6 +38,8 @@ test "the census is 347 objects, 205 methods and 571 members" {
     try std.testing.expectEqual(object_count, handled.entry_count);
     try std.testing.expectEqual(method_count, handled.method_count);
     try std.testing.expectEqual(member_count, handled.member_count);
+    try std.testing.expectEqual(object_count, @typeInfo(handled.Entry).@"enum".fields.len);
+    try std.testing.expectEqual(method_count, @typeInfo(api.proc.ProcTable).@"struct".fields.len);
 }
 
 test "the generated domains are the ones the plan records" {
@@ -190,4 +192,209 @@ fn emptyMaskHasNoFlag(comptime one: Bitmask) !void {
 
 test "every API declaration is reachable from the module root" {
     std.testing.refAllDecls(api);
+}
+
+// These are consumer signatures, not generator text checks. Exact pointer
+// types check the calling convention, argument projection, and error channel.
+test "procedure table accepts native void and slice contracts" {
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_destroy") ==
+        *const fn (api.objects.Buffer) void);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_set_label") ==
+        *const fn (api.objects.Buffer, []const u8) void);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_get_features") ==
+        *const fn (api.objects.Adapter, *api.descriptors.SupportedFeatures) void);
+}
+
+test "procedure table returns handles and scalar values through native errors" {
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_get_instance") ==
+        *const fn (api.objects.Adapter) api.errors.Error!api.objects.Instance);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_has_feature") ==
+        *const fn (api.objects.Adapter, enums.FeatureName) api.errors.Error!bool);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_get_size") ==
+        *const fn (api.objects.Buffer) api.errors.Error!u64);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_get_usage") ==
+        *const fn (api.objects.Buffer) api.errors.Error!bitmask.BufferUsage);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_get_map_state") ==
+        *const fn (api.objects.Buffer) api.errors.Error!enums.BufferMapState);
+}
+
+test "nullable buffer returns preserve object and procedure success null and error" {
+    try std.testing.expect(api.objects.Device.createBuffer ==
+        fn (
+            api.objects.Device,
+            *const api.descriptors.BufferDescriptorChain,
+        ) api.errors.Error!?api.objects.Buffer);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "device_create_buffer") ==
+        *const api.objects.Device.createBuffer);
+
+    var token: u8 = 0;
+    const buffer: api.objects.Buffer = .{ .handle = &token };
+    inline for (.{
+        @typeInfo(api.objects.Device.createBuffer).@"fn".return_type.?,
+        @typeInfo(
+            @typeInfo(
+                @FieldType(api.proc.ProcTable, "device_create_buffer"),
+            ).pointer.child,
+        ).@"fn".return_type.?,
+    }) |return_type| {
+        const success: return_type = buffer;
+        try std.testing.expectEqual(buffer.handle, (try success).?.handle);
+        const absent: return_type = null;
+        try std.testing.expect((try absent) == null);
+        const failure: return_type = error.OutOfMemory;
+        try std.testing.expectError(error.OutOfMemory, failure);
+    }
+}
+
+test "procedure table preserves output parameters and native descriptor chains" {
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_get_limits") ==
+        *const fn (
+            api.objects.Adapter,
+            *api.descriptors.Limits,
+        ) api.errors.Error!enums.Status);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_create_device") ==
+        *const fn (
+            api.objects.Adapter,
+            ?*const api.descriptors.DeviceDescriptorChain,
+        ) api.errors.Error!api.objects.Device);
+}
+
+test "procedure table returns nullable mapped pointers" {
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_get_mapped_range") ==
+        *const fn (
+            api.objects.Buffer,
+            usize,
+            usize,
+        ) api.errors.Error!?*anyopaque);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_get_const_mapped_range") ==
+        *const fn (
+            api.objects.Buffer,
+            usize,
+            usize,
+        ) api.errors.Error!?*const anyopaque);
+    try std.testing.expect(@typeInfo(api.objects.Buffer.getMappedRange).@"fn".return_type.? ==
+        api.errors.Error!?*anyopaque);
+    try std.testing.expect(@typeInfo(api.objects.Buffer.getConstMappedRange).@"fn".return_type.? ==
+        api.errors.Error!?*const anyopaque);
+}
+
+test "only proc retrieval returns the generic Proc contract" {
+    try std.testing.expect(api.proc.getProcAddress ==
+        fn ([]const u8) api.errors.Error!api.callbacks.Proc);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_destroy") ==
+        *const api.objects.Buffer.destroy);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "adapter_get_instance") ==
+        *const api.objects.Adapter.getInstance);
+}
+
+test "async object and procedure contracts require explicit effects and finite errors" {
+    const contracts = .{
+        .{ api.objects.Adapter.requestDevice, "adapter_request_device", fn (api.objects.Adapter, std.mem.Allocator, std.Io, ?*const api.descriptors.DeviceDescriptorChain, api.callbacks.RequestDeviceCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.Device.createComputePipelineAsync, "device_create_compute_pipeline_async", fn (api.objects.Device, std.mem.Allocator, std.Io, *const api.descriptors.ComputePipelineDescriptorChain, api.callbacks.CreateComputePipelineAsyncCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.Device.createRenderPipelineAsync, "device_create_render_pipeline_async", fn (api.objects.Device, std.mem.Allocator, std.Io, *const api.descriptors.RenderPipelineDescriptorChain, api.callbacks.CreateRenderPipelineAsyncCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.Device.setLoggingCallback, "device_set_logging_callback", fn (api.objects.Device, std.Io, api.callbacks.LoggingCallbackInfo) api.errors.CallbackControlError!void },
+        .{ api.objects.Device.getLostFuture, "device_get_lost_future", fn (api.objects.Device, std.Io) api.errors.CallbackControlError!api.descriptors.Future },
+        .{ api.objects.Device.popErrorScope, "device_pop_error_scope", fn (api.objects.Device, std.mem.Allocator, std.Io, api.callbacks.PopErrorScopeCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.Instance.requestAdapter, "instance_request_adapter", fn (api.objects.Instance, std.mem.Allocator, std.Io, ?*const api.descriptors.RequestAdapterOptionsChain, api.callbacks.RequestAdapterCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.Instance.processEvents, "instance_process_events", fn (api.objects.Instance, std.Io) api.errors.ProcessEventsError!void },
+        .{ api.objects.Instance.waitAny, "instance_wait_any", fn (api.objects.Instance, std.Io, usize, ?[]api.descriptors.FutureWaitInfo, u64) api.errors.FutureWaitError!enums.WaitStatus },
+        .{ api.objects.Queue.onSubmittedWorkDone, "queue_on_submitted_work_done", fn (api.objects.Queue, std.mem.Allocator, std.Io, api.callbacks.QueueWorkDoneCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+        .{ api.objects.ShaderModule.getCompilationInfo, "shader_module_get_compilation_info", fn (api.objects.ShaderModule, std.mem.Allocator, std.Io, api.callbacks.CompilationInfoCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future },
+    };
+    inline for (contracts) |contract| {
+        try std.testing.expect(contract[0] == contract[2]);
+        try std.testing.expect(@FieldType(api.proc.ProcTable, contract[1]) == *const contract[2]);
+    }
+    try std.testing.expect(api.objects.Buffer.mapAsync ==
+        fn (api.objects.Buffer, std.mem.Allocator, std.Io, bitmask.MapMode, api.objects.Buffer.MapAsyncOffsetOptions, api.callbacks.BufferMapCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future);
+    try std.testing.expect(@FieldType(api.proc.ProcTable, "buffer_map_async") ==
+        *const fn (api.objects.Buffer, std.mem.Allocator, std.Io, bitmask.MapMode, usize, usize, api.callbacks.BufferMapCallbackInfo) api.errors.AsyncStartError!api.descriptors.Future);
+}
+
+test "native support errors are finite public API contracts" {
+    try std.testing.expect(api.AsyncStartError == api.errors.AsyncStartError);
+    try std.testing.expect(api.FutureWaitError == api.errors.FutureWaitError);
+    try std.testing.expect(api.CallbackControlError == api.errors.CallbackControlError);
+    try std.testing.expect(api.ProcessEventsError == api.errors.ProcessEventsError);
+    try std.testing.expect(api.errors.AsyncStartError == error{
+        OutOfMemory,
+        Canceled,
+        MissingFutureNamespaceSource,
+        FutureNamespaceExhausted,
+        FutureNamespaceContention,
+        FutureIdExhausted,
+        AsyncCapacityExceeded,
+        InvalidAsyncCapacity,
+        InvalidCallbackMode,
+        InvalidOwner,
+        OwnerStopped,
+        InstanceShutDown,
+        TaskQueueFull,
+        PoolShutDown,
+        WorkerExhausted,
+        ConcurrencyUnavailable,
+        InvalidRequest,
+        ReferenceCountOverflow,
+    });
+    try std.testing.expect(api.errors.FutureWaitError == error{
+        Canceled,
+        MissingFutureNamespaceSource,
+        InvalidFutureId,
+        FutureInstanceMismatch,
+        FutureCountMismatch,
+        WaitCountExceeded,
+        ReentrantWait,
+        InstanceShutDown,
+        TimedWaitUnavailable,
+        WaitIterationExhausted,
+        WaitEpochExhausted,
+        ReferenceCountOverflow,
+    });
+    try std.testing.expect(api.errors.CallbackControlError ==
+        error{ Canceled, MissingFutureNamespaceSource, DeviceNotAlive, InvalidOwner });
+    try std.testing.expect(api.errors.ProcessEventsError ==
+        error{ InstanceShutDown, ReferenceCountOverflow });
+}
+
+test "descriptor contracts retain named callback-info records" {
+    inline for (.{ api.descriptors.DeviceDescriptor, api.descriptors.DeviceDescriptorChain }) |Descriptor| {
+        try std.testing.expect(@FieldType(Descriptor, "device_lost_callback_info") == api.callbacks.DeviceLostCallbackInfo);
+        try std.testing.expect(@FieldType(Descriptor, "uncaptured_error_callback_info") == api.callbacks.UncapturedErrorCallbackInfo);
+    }
+    try std.testing.expect(@FieldType(api.descriptors.DawnCacheDeviceDescriptor, "dawn_load_cache_data_callback_info") == api.callbacks.DawnLoadCacheDataCallbackInfo);
+    try std.testing.expect(@FieldType(api.descriptors.DawnCacheDeviceDescriptor, "dawn_store_cache_data_callback_info") == api.callbacks.DawnStoreCacheDataCallbackInfo);
+    try std.testing.expect(@FieldType(api.descriptors.SharedBufferMemoryHostPointerDescriptor, "dispose_callback_info") == api.callbacks.DisposeCallbackInfo);
+}
+
+test "callback-info records expose schema modes and per-request userdata" {
+    inline for (.{
+        api.callbacks.RequestAdapterCallbackInfo,
+        api.callbacks.RequestDeviceCallbackInfo,
+        api.callbacks.BufferMapCallbackInfo,
+        api.callbacks.CompilationInfoCallbackInfo,
+        api.callbacks.CreateComputePipelineAsyncCallbackInfo,
+        api.callbacks.CreateRenderPipelineAsyncCallbackInfo,
+        api.callbacks.DeviceLostCallbackInfo,
+        api.callbacks.PopErrorScopeCallbackInfo,
+        api.callbacks.DisposeCallbackInfo,
+        api.callbacks.QueueWorkDoneCallbackInfo,
+    }) |Info| {
+        try std.testing.expect(@FieldType(Info, "mode") == enums.CallbackMode);
+        try std.testing.expect(@FieldType(Info, "userdata") == ?*anyopaque);
+    }
+    inline for (.{
+        .{ api.callbacks.DawnLoadCacheDataCallbackInfo, api.callbacks.DawnLoadCacheDataCallback },
+        .{ api.callbacks.DawnStoreCacheDataCallbackInfo, api.callbacks.DawnStoreCacheDataCallback },
+        .{ api.callbacks.UncapturedErrorCallbackInfo, api.callbacks.UncapturedErrorCallback },
+        .{ api.callbacks.LoggingCallbackInfo, api.callbacks.LoggingCallback },
+    }) |contract| {
+        try std.testing.expect(@FieldType(contract[0], "callback") == ?contract[1]);
+        try std.testing.expect(@FieldType(contract[0], "userdata") == ?*anyopaque);
+        const info: contract[0] = .{};
+        try std.testing.expect(info.callback == null);
+    }
+    const lost: api.callbacks.DeviceLostCallbackInfo = .{ .mode = .wait_any_only };
+    const dispose: api.callbacks.DisposeCallbackInfo = .{ .mode = .wait_any_only };
+    try std.testing.expect(lost.callback == null);
+    try std.testing.expect(dispose.callback == null);
 }

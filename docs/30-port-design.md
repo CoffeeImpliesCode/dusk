@@ -6,19 +6,61 @@ descriptor chains, how a `VkResult` becomes a Zig error, how the dispatch table
 is loaded, which container replaces which, and how `dawn.json` becomes Zig.
 
 Every upstream claim cites `path:line` in the Dawn tree pinned at
-`32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-`/tmp/scratch/research/dawn`. Zig claims cite a file and line in
-the 0.16.0 standard library, or the generated `vulkan.zig` in the probe
-directory, and those observations were made by reading the file.
+`32f77c02294310054a660c393feded4bcb3f203c`. The original readings used
+`/tmp/scratch/research/dawn`. This historical path is not a
+required checkout location. `tools/dawn_pin.zon` records the source pin.
+Recreate its `src`/`include` sparse checkout with `zig build fetch-dawn`.
+Use `zig build fetch-dawn -Ddawn-dir=/absolute/path/to/research/dawn` to select
+a destination. Without that option, the step uses `DUSK_DAWN_SRC`, then
+`buildhost_SCRATCH_ROOT/research/dawn`, then
+`$HOME/.cache/dusk-research/research/dawn`.
+The explicit source-only fetch does not build or depend on Dawn C++ or Tint.
+Ordinary builds do not depend on it.
+
+Zig claims cite the 0.16.0 standard library or the generated `vulkan.zig`
+in the historical probe directory. Those observations came from file readings.
 
 A contested decision carries five parts: **Priority**, **Constraint**,
 **Cost imposed on consumers**, **Counterchoice**, **Grade and origin**.
 
-**What this document does not claim.** It does not claim the port compiles; no
-code exists yet. It does not claim any timing, throughput, or memory figure,
-because none has been measured. It does not claim `dawn.json` output is
-byte-compatible with Dawn's C header, and §4 says why that is not the goal. It
-does not reopen any decision in `docs/20-dependencies.md`.
+**What this document claims.** The typed native facade now integrates the implemented production subset.
+It provides instance and adapter discovery, synchronous resource creation, recorded submission, serial wait, and ordered native cleanup.
+The generated 205-method procedure table remains a separate API surface.
+This result does not establish full public WebGPU parity, M1–M21 completion, or every native feature.
+The historical proof records below do not establish the later native integration.
+
+The formerly missing M6, M7, M18, and M19 families passed local behavior tests
+on 2026-10-07. The following snapshots predate native stage constants.
+Three selected cross-test rows and explicit zero-layer GPU checks passed.
+Final test-helper replay checks passed.
+The historical full `zwanzig` snapshot reported 107 optional-unwrap warnings, not a clean ten-stage contract.
+The historical legacy `zig-gate --no-zbc` passed its five active stages.
+It explicitly skipped `zbc`. It did not run `zwanzig`, cross-tests, or coverage.
+The historical aggregate passed 69/69 build steps with 251 root tests in each safety mode.
+The current full aggregate passed 73/73 steps, with 262 root tests each in Debug and actual ReleaseSafe.
+Current cross-tests passed three rows with 262 root tests each, including big-endian `powerpc64-linux`.
+Both compute shards passed again with zero validation layers.
+Final 142-file source lint passed with zero diagnostics, errors, or warnings.
+The current legacy `zig-gate --no-zbc` passed its five active stages.
+The full ten-stage contract remains unclaimed and outside the permitted analyzer boundary.
+A reproduced render-bundle allocation-failure callback bug now has a passing regression.
+This fix does not establish general successful-operation reentrancy.
+The historical 138-row census covered M6 (63), M7 (32), M18 (38), and M19 (five).
+It is neither a remaining count nor the whole backlog.
+M14's 63/341 triage budget does not subtract implementation backlog.
+`docs/40-plan.md` owns the selected remaining async, disk, persistent-cache,
+and specialization groups.
+The triangle and query shards encode through the frontend and finish a `Finished` stream.
+The engine replays that stream into Vulkan before submission.
+No timing, throughput, or memory-performance figure is claimed here.
+This document does not claim `dawn.json` output is byte-compatible with Dawn's
+C header. Section 4 explains that decision.
+It does not reopen decisions in `docs/20-dependencies.md`.
+
+Use named acceptance steps, for example `zig build test-memory`,
+`zig build test-formats`, `zig build test-triangle`, and `zig build test-query-set`.
+`zig build test` runs the aggregate suite. Arguments after `--` did not filter
+that suite through the former `b.args` forwarding.
 
 ---
 
@@ -26,13 +68,13 @@ does not reopen any decision in `docs/20-dependencies.md`.
 
 ### 1.1 The model
 
-`docs/10-architecture.md` fixes the shape: one arena per device, every object is
-a handle, no per-object free. This section states what that means at the type
-level and what it costs.
+`docs/10-architecture.md` separates borrowed generated handles from typed native owners.
+Core host objects occupy one arena per device.
+Native payloads can be released before that arena.
+This section states both contracts and their costs.
 
-A handle is a pointer into the device's arena, plus one byte of kind for the
-boundary check below. Not a tagged integer, not a generational id, not an index
-into a slab.
+A generated handle is a pointer into the device arena with a kind tag.
+It is not a generational ID or a slab index.
 
 ```zig
 // src/core/handle.zig
@@ -92,8 +134,9 @@ where a device belongs without a cast. `kind` exists so the API layer can
 reject that cast at a boundary with a message rather than with a crash. It is
 one byte; it is not a type-level guarantee.
 
-A handle carries no state of its own. Copying one is a pointer copy. There is
-no destructor, no `deinit`, no `release`.
+A generated handle carries no owned reference. Copying one is a pointer copy.
+The value has no destructor, `deinit`, or `release`.
+The following examples describe borrowed core handles, not the typed native facade.
 
 ```zig
 // src/engine/device.zig
@@ -114,20 +157,75 @@ pub fn destroyBuffer(dev: *Device, buffer: Buffer) void {
 }
 ```
 
-`destroyBuffer` marks, and frees nothing. Memory returns to the arena when the
-device is destroyed, through `Device.deinit`.
+Core destruction marks the host object and invokes its destruction callback.
+The callback can release owned native payloads.
+The arena retains host object storage until core device teardown.
+It does not retain every Vulkan allocation until teardown.
 
-```zig
-pub fn deinit(dev: *Device) void {
-    dev.pending_fences.waitAll();
-    dev.arena.deinit();
-}
-```
+**Typed native owners.** `engine.Device.release` checks device identity, pending GPU work, and live dependents before native destruction.
+Bind groups, pipeline layouts, pipelines, and texture views retain their dependencies.
+Pipeline-store cache hits return owned references.
+These counts are not a complete Dawn `Ref<T>` replacement.
 
-**When memory is released.** Only in `Device.deinit`. The arena is the whole
-object heap for that device.
-Every constructor call site passes `dev.arena.allocator()`, which is what makes
-the M3 `queryCapacity == 0` assertion in `docs/40-plan.md` meaningful.
+**Device-owned live object caches.** `ResourceStore` owns weak indices for bind-group layouts, pipeline layouts, samplers, shader modules, and attachment states.
+The stable native device context owns this store (`src/engine/native_resource_store.zig:12-48`).
+The original `ObjectGuard` serializes lookup, native creation, insertion, alias acquisition, and removal.
+The index owns no reference. A hit acquires one user alias, including when only internal leases keep the object alive.
+Bind groups, pipelines, recordings, and pending GPU roots retain internal leases in the same core ledger.
+Final release or explicit payload retirement removes weak membership before native destruction.
+Dead arena headers can remain, but a later lookup cannot return their retired payloads.
+
+Hash equality alone never establishes identity. Each bucket uses a full semantic comparison.
+Bind-group layouts normalize descriptor entry order but preserve logical binding numbers, visibility, types, dynamic offsets, minimum sizes, and validation counts.
+Their compatibility token also belongs to identity (`native_resource_store.zig:58-76`).
+Pipeline layouts compare ordered canonical group owners, including empty gaps and trailing groups, immediate byte size, and compatibility token.
+Explicit token zero and nonzero domains remain distinct. Automatic layouts mint a token once per preparation.
+Sampler identity includes every ordinary field and every supplied Y′CbCr conversion field, including conversion presence.
+Labels do not affect identity. Sampler LOD signed zero has one representation (`src/engine/sampler.zig:38-56`).
+Shader identity compares unchanged owned SPIR-V words, not labels (`native_resource_store.zig:51-56`).
+Attachment identity includes color slots and formats, depth/stencil format, sample count, resolve-expansion masks, and pixel-local-storage slots.
+The canonical constructors normalize ordinary resolve targets (`src/command/attachment_state.zig:229-261`).
+Identity does not imply backend support for every binding kind, pixel-local storage, or resolve expansion.
+
+Factories reject allocator mismatch, invalid dependencies, and missing cleanup procedures before native creation.
+Reference overflow leaves existing aliases unchanged.
+Failed insertion publishes no cache hook. Factory rollback releases temporary references and destroys initialized native payloads.
+The render-pass cache also destroys a created-but-uninserted `VkRenderPass` if map insertion fails (`src/engine/render_pass_cache.zig:583-597`).
+Its monotonic ID can advance on a failed native create or insertion. Rollback does not promise gap-free IDs.
+The cutover has no compatibility shim or second ownership ledger.
+These are live object caches, not persisted driver artifacts.
+Actual `VkPipelineCache` persistence and its pipeline-create integration remain unimplemented.
+
+**Selected native external auxiliary ABI.** Public logical bindings remain in `0..999`.
+For external logical binding `N`, the private auxiliary block starts at `1000 + 4*N`.
+The four roles occupy that block, with maximum private binding 4999.
+The assignment is independent of descriptor input order and cannot collide with a public binding.
+This is Dusk's selected native ABI, not a claim that Dawn's descending UINT_MAX binding scheme is a suitable Vulkan ABI.
+Callers supply matching unchanged SPIR-V declarations. The runtime does not rewrite bindings or words.
+The owned fixture cutover assigns logical binding 0 to private roles 1000, 1001, and 1002.
+Its public sampler binding 2 and storage binding 4 do not change.
+This selected source contract alone establishes no regenerated artifact, Vulkan layout, or GPU pass.
+
+`native_resources.destroyAll` walks the core object list before the arena is released.
+The core retirement hooks remove weak pipeline and resource memberships before payload destruction.
+Current device destruction frees the native context and core arena.
+It does not preserve a new reference-counted host shell.
+
+**Stable placement.** Native contexts initialize at their final heap addresses.
+Keep each high-level instance and device unmoved while children or operation pins borrow it.
+Adapter lists own stable physical rows and retain the instance.
+Devices retain their adapter, physical row, and instance through explicit counts.
+List and instance teardown refuse live children without changing their counts.
+`std.Io` stays explicit at each operation. Native owners do not capture it.
+
+**Standalone native query borrows.** The caller uniquely owns a low-level queue and must not copy it.
+The high-level facade instead lends its context-owned queue through `QueueLease`.
+Construction may move a standalone queue before native query registration.
+After registration, keep the queue and registered query-set storage alive and unmoved
+until deregistration or queue teardown detaches every borrow.
+Query-set destruction can defer detachment until the last submission completes.
+These are caller obligations, not enforced runtime pins or a repaired observed use-after-free.
+See `src/engine/queue.zig` and `src/engine/query_set.zig` for the native borrow contract.
 
 **What a stale handle does.** It reads memory the arena still owns, so the read
 is defined behaviour rather than undefined behaviour. Three cases, in order:
@@ -154,31 +252,29 @@ pub fn writeBuffer(
 
 **Cost imposed on consumers.**
 
-- Objects cannot outlive their device. A consumer that wants a buffer to
-  survive device teardown must keep the device alive, or copy the bytes out
-  first. Dawn permits the first and permits the second through `Ref<T>`; the
-  port permits both only if the consumer holds the device.
-- Peak memory is the high-water mark of the device's lifetime, not the live
-  set. A consumer that creates and destroys a texture every frame pays for the
-  whole run. Dawn's refcount returns the allocation at the last release.
-- A consumer cannot port a Dawn object graph by copying the `Ref<T>` fields. It
-  has to model device ownership explicitly.
+- Borrowed handles cannot outlive their device arena.
+  Copying a handle does not retain its device or native payload.
+- Host wrapper storage follows the device's allocation high-water mark.
+  Explicit native release can return GPU payload storage before teardown.
+- The caller must keep parent instances, lists, and devices alive and unmoved.
+  Typed dependency counts do not provide general surviving objects after device teardown.
+- A live queue lease excludes high-level submit, unmap, and release.
+  The caller must end that lease with explicit `Io`.
 
 ### 1.2 The decision record
 
 **Priority.** Safety, first in the house order in `AGENTS.md` §2.
 
-**Constraint.** Zig has no refcounted smart pointer. `AGENTS.md` §3 lists
-per-object refcounting as one of two options, and `docs/10-architecture.md`
-already chose the arena. Dawn's own record of why its model is hard is the
-`DeleteThis` comment at `src/dawn/native/ObjectBase.h:177-186`: a derived class
-must override `DeleteThis` so that `DestroyImpl` runs while the derived class is
-still intact, and every class that overrides `DeleteThis` again must remember to
-call the base. That is a footgun the port declines to carry.
+**Constraint.** The generated handle surface does not use refcounted smart pointers.
+It uses arena host storage and borrowed handles.
+The typed native facade separately counts resource dependencies and operation pins.
+This does not adopt Dawn's general `Ref<T>` contract.
+Dawn's `DeleteThis` override rule remains an upstream policy difference
+(`src/dawn/native/ObjectBase.h:177-186`).
 
-**Cost imposed on consumers.** The three costs listed in §1.1.
+**Cost imposed on consumers.** The costs listed in §1.1.
 
-**Counterchoice.** Per-object reference counting with an explicit `release()`:
+**Counterchoice for generated handles.** General per-object reference counting with an explicit `release()`:
 
 ```zig
 pub fn createBuffer(dev: *Device, alloc: std.mem.Allocator, desc: BufferDescriptor) Allocator.Error!Buffer {
@@ -191,19 +287,16 @@ pub fn retain(buffer: Buffer) void { ... }
 pub fn release(buffer: Buffer) void { ... }  // frees at zero
 ```
 
-This genuinely wins in one setting: a long-lived engine whose objects must
-outlive the device that made them. A compositor holding a swapchain image and a
-device that is being torn down and rebuilt is exactly that case — the image
-outlives the device, refcounting keeps it valid, and an arena cannot. It also
-wins when peak memory matters more than safety: it returns allocation at the
-last release, so a per-frame create/destroy loop does not grow.
+This alternative can keep a host shell alive after the device stops.
+It does not make a destroyed native device or its payload valid for GPU work.
+It can also reclaim host object storage at the last reference.
+Current Dusk native release reclaims payloads, but keeps arena host storage.
 
-**Grade and origin.** Settled. `docs/10-architecture.md` "Object model";
-`AGENTS.md` §2 and §3; upstream evidence `src/dawn/common/RefCounted.h:69`,
-`src/dawn/common/RefCounted.cpp:41-43` (`kPayloadBits = 2`), and
-`src/dawn/common/RefBase.h:52-57`, which asserts `sizeof(RefBase<T>) ==
-sizeof(T)` and so makes `Ref<T>` zero-overhead at the cost of a manual
-`release()` discipline the type system cannot check.
+**Grade and origin.** Settled for borrowed generated handles, not a prohibition on native dependency counts.
+See `docs/10-architecture.md` "Object model" and this section.
+Upstream evidence remains `src/dawn/common/RefCounted.h:69`,
+`src/dawn/common/RefCounted.cpp:41-43`, and `src/dawn/common/RefBase.h:52-57`.
+Dusk's typed facade has explicit release without Dawn's general intrusive smart-pointer surface.
 
 ### 1.3 What the arena does not replace
 
@@ -226,6 +319,33 @@ Dawn reads and writes the payload through `PayloadFetchAnd` and
 `PayloadFetchOr` with relaxed ordering (`src/dawn/common/RefCounted.cpp:64-77`).
 The port has no equivalent atomic to reason about, and a named field is one
 assertion instead of a bit-mask argument.
+
+### 1.4 Current native integration boundary
+
+The published typed facade reaches real Vulkan discovery, device creation, resource factories, submission, serial wait, and cleanup.
+`docs/40-plan.md` "Current native phase-2 integration" records the actual consumer proof and its verification-record link.
+That consumer does not define generated procedure-table parity or full public WebGPU parity.
+
+Raw Vulkan querying and frontend capability projection remain separate.
+Core admission gates robust access, compression eligibility, four descriptor-array dynamic-indexing flags, fragment atomics, and full draw indices.
+It also gates independent blend, depth-bias clamp, cube arrays, and sample-rate shading.
+Native creation enables the queried baseline flags.
+The prior missing-baseline-guard observation is obsolete.
+This corrected hardware baseline does not establish full Dawn Core parity.
+
+The native projection advertises `core_features_and_limits` only when Core hardware guards and offered limits pass.
+It advertises `depth_clip_control` only when queried `depthClamp` is present.
+The caller must require depth-clip control to enable native depth clamp.
+Optional compression feature bits remain unadvertised, despite hardware compression eligibility.
+Other required native features fail with a typed error.
+
+Offered limits respect queried descriptor budgets, per-stage resources, and fragment-output resources.
+They cap bind groups at `4`, bindings per group at `1000`, and immediate data at `256` bytes.
+Device creation bounds level defaults by offered capabilities and preserves accepted required values.
+Maximum limits are upper bounds. Alignment limits are lower bounds.
+Maintenance4 support controls the native LocalSizeId path.
+These formulas and feature policies are partial merges, not literal Dawn normalization.
+
 
 ---
 
@@ -338,17 +458,92 @@ pub fn init(
 
 `code` is the machine-readable id. `message` is a formatted string for a human.
 `context` is the port's `mContexts`. `backtrace` is `mBacktrace`. The two
-dropped members are `mDebugGroups` and `mBackendMessages`, which Dawn uses to
-relay messages from a back end that has its own diagnostics; the port's only
-back end is Vulkan, and its messages reach the log through the same `message`
-field.
+dropped members are `mDebugGroups` and `mBackendMessages`.
+Dawn uses them for backend diagnostics.
+Vulkan is Dusk's implemented native backend. The null backend remains a test path.
+Native errors use typed error values and diagnostics.
 
-`message` is allocated from the allocator `init` takes, never from a global, per
-`AGENTS.md` §2. On the out-of-memory path the caller passes a comptime string
-with no arguments, so the only allocation is a constant-size copy of that
-string. If that copy fails, the caller has an `error.OutOfMemory` and no
-`Error`, which is the honest outcome: an allocator that cannot allocate cannot
-carry a message.
+The mutable `core.ErrorData` API remains available for synchronous callers.
+`ErrorData.init` owns its message and copied context text.
+Its failure cleanup frees all copied context text, including failures after earlier context copies.
+Its optional backtrace remains borrowed.
+
+#### 2.2.1 Owned diagnostic publication
+
+`src/core/errors.zig` adds `ErrorDraft`, `ErrorReservation`, `ErrorRef`, and `ErrorView`.
+`src/core/root.zig` exports these APIs.
+These are original Dusk glue, not ports of Dawn functions.
+These diagnostic components alone do not implement async requests, owned scopes, registries, or callbacks.
+The native owned-scope stack retains `ErrorRef` diagnostics and pending-task leases (`src/core/error_scope.zig:71-95,582-606`).
+Current native async source and exercised consumer status are in §3.2 and `docs/50-verification.md`.
+
+`ErrorDraft` singly owns mutable payload storage and records its payload allocator.
+`init` copies table-based diagnostics. `initMessage` copies an exact message and its context.
+`fromOwned` moves an existing `ErrorData` without copying its bytes.
+`discard` frees a losing draft once. Copies are not independent owners.
+
+`ErrorReservation.prepare` allocates a stable header with a separate recorded allocator.
+`reserveReferences` prepays additional reference slots without allocation.
+`seal` consumes the reservation and draft without allocation or failure.
+It clears the borrowed backtrace before publication.
+The caller must synchronize publication before readers access the sealed payload.
+
+`sealOutOfMemory` uses static host-OOM text.
+`sealDeviceLostFallback` preserves the supplied loss code when copying the first loss message fails.
+`sealNativeError` uses compiler-static `@errorName` text from a finite native error set.
+These seal paths allocate no payload storage.
+
+`ErrorRef.view` returns an `ErrorView` with const message and context slices.
+The view borrows storage through the caller-held reference. It never owns a trace.
+`retain` uses at most 64 strong-CAS attempts.
+Overflow or contention returns a typed error without creating a reference.
+Retain belongs before an infallible terminal claim.
+Copies consume prepaid slots or require a successful retain.
+`releaseMany` consumes a nonzero number of caller-owned slots, including unused prepaid slots.
+The last release frees the payload and header exactly once with their respective allocators.
+Both allocator backing states must remain live through that release.
+
+BG133 exercised this component through `core/root`: 15/15 tests in Debug and 15/15 in explicit ReleaseSafe.
+The recorded run exited 0 in 38.99 seconds, with ten new ownership tests and five existing tests.
+This result does not establish native consumer integration or a full gate.
+
+#### 2.2.2 Shader diagnostic ownership
+
+`src/pipeline/shader_compilation_messages.zig` defines immutable `Message` records and the owning `Messages` container.
+`shader_module.getCompilationInfo(module)` returns a borrowed `Messages` view, not a new owner.
+Its item array and text remain valid only until `ShaderModule.destroy`.
+Do not call `deinit` on that view.
+The synchronous borrow does not implement Dawn's future or callback contract.
+Native async completion now uses `native_async_scope_info.getCompilationInfo` and the separate typed `Device.getCompilationInfoAsync` observer.
+The accepted operation owns a snapshot. Callback views borrow through return, while typed results require `deinit`.
+
+`shader_compilation_messages.snapshot(allocator, source)` copies a `[]const Message`.
+`Messages.clone(allocator, source)` copies a `Messages` record.
+`shader_module.snapshotCompilationInfo(allocator, module)` copies the module's diagnostics.
+These helpers are original Dusk glue, not additional Dawn function ports.
+Each result owns its item array and all diagnostic text, independent of the source lifetime.
+Copies preserve every message type and byte/UTF-16 position field.
+Empty text becomes `""` without retaining a source pointer.
+Nonempty records use one item allocation and at most one contiguous text allocation.
+An empty record allocates nothing.
+
+Keep the source alive and unchanged through the copy.
+Release each result once with `Messages.deinit`.
+Assignment aliases storage and does not create another owner.
+The result's allocator backing state must outlive that release.
+Allocation failure or checked-size overflow returns `error.OutOfMemory`, frees partial storage, and leaves the source unchanged.
+
+`shader_compilation_messages.one` owns its item array but borrows the supplied message text.
+Its caller keeps that text alive and unchanged until release.
+`shader_module.createErrorShaderModule` instead snapshots `ErrorModuleDescriptor.message` into module-owned diagnostic storage.
+The caller may change or release the input text after construction returns.
+This contract owns diagnostic text, not the descriptor's optional label.
+Module destruction frees the diagnostic array and copied text.
+
+BG138 exercised the published-root shader-module shard: 4/4 Debug build steps and 14/14 tests, plus 14/14 explicit ReleaseSafe tests.
+The recorded run exited 0 in 67.11 seconds.
+Seven new tests cover text ownership, source-array overwrite, module destruction, cloning, borrowed-builder cleanup, and allocation-failure rollback.
+This bounded result does not establish public async completion, native GPU consumer integration, or a full gate.
 
 ### 2.3 `DAWN_INVALID_IF` becomes a typed error plus a message table
 
@@ -516,6 +711,43 @@ Dawn's async machinery is five files.
 member named `id`) and `future wait info`
 (`src/dawn/dawn.json:2766-2772`, a `future` plus a `bool completed`).
 
+**Generated callback-info contract.** The pinned revision is `32f77c02294310054a660c393feded4bcb3f203c`.
+The generated API preserves each callback-info argument as a record value named `callback_info`.
+The record stays last and outside grouped options.
+Its schema fields and synthetic Zig `userdata` remain together.
+`tools/gen_api.zig.emitCallbackFunction` renders the schema's `callback function` category with the default native Zig calling convention.
+Each callback retains its existing synthetic userdata-first parameter.
+Callback functions, enclosing generated methods, and the procedure table do not promise Dawn's C ABI.
+The native convention permits the projected Zig slices and object values in callback signatures.
+This mapping belongs to Dusk's generator, not Dawn's native implementation.
+
+The following paths are relative to the pinned Dawn checkout.
+Native signatures receive the corresponding `WGPU*CallbackInfo` by const reference.
+Zig passes its existing callback-info record by value.
+
+| Method | `src/dawn/dawn.json` argument | Native record signature |
+| --- | --- | --- |
+| `Adapter.requestDevice` | `:163-165` | `src/dawn/native/Adapter.h:68-69` |
+| `Buffer.mapAsync` | `:660-662` | `src/dawn/native/Buffer.h:198-202` |
+| `Device.createComputePipelineAsync` | `:1365-1367` | `src/dawn/native/Device.h:282-286` |
+| `Device.createRenderPipelineAsync` | `:1401-1403` | `src/dawn/native/Device.h:282-286` |
+| `Device.setLoggingCallback` | `:1584-1586` | `src/dawn/native/Device.h:328-330` |
+| `Device.popErrorScope` | `:1598-1600` | `src/dawn/native/Device.h:328-330` |
+| `Instance.requestAdapter` | `:2722-2724` | `src/dawn/native/Instance.h:82-83` |
+| `Queue.onSubmittedWorkDone` | `:3065-3067` | `src/dawn/native/Queue.h:78-79` |
+| `ShaderModule.getCompilationInfo` | `:3859-3861` | `src/dawn/native/ShaderModule.h:417` |
+
+Five descriptor fields also retain their schema names and callback-info record types.
+Device loss and uncaptured error fields come from `src/dawn/dawn.json:220-223`, including the generated device-descriptor chain copy.
+Cache load and store fields come from `src/dawn/dawn.json:310-313`.
+The host-pointer disposal field comes from `src/dawn/dawn.json:2048-2057`.
+Nullable callbacks inside these records retain typed `null` defaults.
+No global userdata or separate callback registration substitutes for these records.
+Native events consume record mode, callback, and userdata at `src/dawn/native/Buffer.cpp:296-305`,
+`src/dawn/native/CreatePipelineAsyncEvent.cpp:91-118`, and `src/dawn/native/Queue.cpp:193-211`.
+This generated contract does not establish an implemented async runtime.
+
+
 Two public entry points depend on this. Async pipeline creation runs through
 `CreatePipelineAsyncEvent` (`src/dawn/native/CreatePipelineAsyncEvent.h:52`),
 which is a `TrackedEvent` with an `InitializeAsync` at `:71` that posts to the
@@ -542,38 +774,40 @@ concurrency. `Io.Group` at `:1218` is an unordered set of tasks awaited as a
 whole, with `async` at `:1240`, `concurrent` at `:1261`, `await` at `:1282`,
 and `cancel` at `:1298`.
 
-The pool is `Io.Threaded` (`lib/std/Io/Threaded.zig`), `init` at `:1607` with
-`InitOptions` at `:1573`. The size limit is `async_limit: ?Io.Limit` at
-`:1586`, and `Io.Limit` is an enum with `limited(n)` at `lib/std/Io.zig:632`.
-The `Io` value comes from `Threaded.io` at
-`lib/std/Io/Threaded.zig:1806`.
+**Implemented worker pool.** `src/platform/threads.zig` owns a fixed set of
+`std.Thread` workers and uses `std.Io.Mutex` and `std.Io.Condition` for synchronization.
+The default worker count is two. Its bounded queue holds at most 4096 tasks.
+Tasks run only on worker threads, never inline on the submitting thread.
+This is not an `Io.Threaded` pool or an implemented public async runtime.
 
-So Dawn's two-thread pool is one option value:
+`postTask` accepts a task only after it acquires the mutex and checks the pool state and queue capacity.
+It returns `Canceled`, `PoolShutDown`, `WorkerExhausted`, or `TaskQueueFull` before acceptance.
+A rejected task does not borrow its context or `Io` backend state, or enter the queue.
+A successful post copies the exact supplied `Io` into `QueuedTask` and borrows its backend state and the caller-owned context.
+`Task.run` receives that same `Io`, not the worker synchronization `Io`.
+The caller keeps the task context and its `Io` backend state alive until `Task.run` returns.
 
-```zig
-// src/platform/pool.zig
-pub fn initPool(gpa: std.mem.Allocator) std.Io.Threaded {
-    return .init(gpa, .{
-        .async_limit = worker_thread_count,
-        .concurrent_limit = worker_thread_count,
-    });
-}
-```
+`join` and `deinit` stop acceptance, drain every accepted task, and join every worker.
+Shutdown does not cancel queued tasks or free their contexts.
+Worker synchronization and shutdown synchronization are uncancelable.
+`init` passes its `Io` explicitly to each worker's thread entry for synchronization.
+The caller keeps that `Io` backend state alive until `join` returns.
+Neither task execution nor worker synchronization uses a global or pool-stored `Io` fallback.
+Canceled `Io` therefore does not abandon accepted work.
+See §9.3 for the normal loop bound and accepted queued tail.
 
-The two limits are separate fields in 0.16.0. `async_limit` is at
-`lib/std/Io/Threaded.zig:1586` and governs `Io.async`: past the limit, the task
-runs immediately on the calling thread instead of spawning. `concurrent_limit`
-is at `lib/std/Io/Threaded.zig:1592` and defaults to `.unlimited`; past it,
-`Io.concurrent` returns `error.ConcurrencyUnavailable`. The port sets both to
-`.limited(2)` so a bound is a bound rather than a default.
+The `std.Io.Future` examples below are design sketches, not exact current entry-point signatures.
+Their scheduling and cancellation behavior must not be applied to the worker-pool task itself.
 
-This is a different failure mode from Dawn's `std::queue`-backed `TaskTracking`
-(`src/dawn/platform/WorkerThread.h:101-107`), which queues and never refuses.
-Under `dusk`, a third `Io.async` task runs inline on the submitting thread: it
-is still validated, it is just not parallel. A third `Io.concurrent` call fails
-with `error.ConcurrencyUnavailable`. Both are recorded because they change
-latency, not correctness, and `docs/50-verification.md` owns what a timing claim
-needs.
+**Runtime status.** All eight generated callback-future starts have native callback bridges and separate typed `std.Io.Future` observer routes.
+They cover adapter/device requests, map, queue completion, compute/render pipeline creation, scope pop, and compilation info.
+`Device.getLostFuture` accesses the loss Future reserved during device creation. It does not start a ninth operation.
+Logging registration is callback control, not a future start.
+The registry owns callback modes, completion, cancellation, and late-result disposal (`src/engine/async_registry.zig`).
+Typed cancellation abandons observation, not accepted work.
+The high Device occupies its final owned address before async publication.
+Generated ProcTable types do not establish a complete C dispatch table, wire support, or the browser forwarder.
+`docs/50-verification.md` separates this source inventory from the six-family Debug/ReleaseSafe external smoke.
 
 **Decision: `std.Io.Future`, passed by value, awaited by the caller.**
 
@@ -620,7 +854,8 @@ operation, `Io.Threaded.init_single_threaded` at
 `lib/std/Io/Threaded.zig:1674` runs tasks inline — so a deterministic back end
 is a parameter swap.
 
-**Cancellation is free.** `Future.cancel(io)` at `lib/std/Io.zig:1191` asks the
+**Proposed future cancellation.** This is not cancellation of an accepted `WorkerPool.Task`.
+`Future.cancel(io)` at `lib/std/Io.zig:1191` asks the
 task to return `error.Canceled` at its next cancelation point. Dawn has no
 equivalent on the path that matters. `PostWorkerTask` returns a
 `std::unique_ptr<WaitableEvent>` whose only operations are `Wait` and
@@ -629,7 +864,8 @@ equivalent on the path that matters. `PostWorkerTask` returns a
 `PostWorkerJob` returns a `JobHandle` that does have `Cancel`
 (`src/dawn/platform/WorkerThread.h:95`, `src/dawn/platform/WorkerThread.cpp:50-59`),
 but a `JobHandle` is a long-running loop rather than one task, and neither is
-reachable from a `Future`. A Dawn future cannot be withdrawn. A `dusk` future can.
+reachable from a `Future`. A Dawn future cannot be withdrawn.
+Native typed observers now expose cancellation without withdrawing accepted work.
 
 ### 3.3 The decision record
 
@@ -644,15 +880,14 @@ exactly the hidden state the house rule forbids.
 
 **Cost imposed on consumers.**
 
-- Every async call takes `io` and returns a `std.Io.Future`, which must be
-  awaited or dropped. A consumer that drops a future without awaiting leaks the
-  task's resources; `Io.Group`'s doc comment at
-  `lib/std/Io.zig:1215-1217` says so explicitly.
+- The proposed async API takes `io` and returns a `std.Io.Future`.
+  The consumer must await or cancel it to release task resources.
+  `Io.Group`'s doc comment at `lib/std/Io.zig:1215-1217` states this resource obligation.
 - The `Io` value is threaded through call sites that do no I/O themselves. That
   is the price of the no-global rule.
-- The third concurrent async task runs inline rather than queueing (§3.2). A
-  consumer that depends on the pool never blocking the caller must pass a
-  larger `async_limit`.
+- An accepted worker task borrows its context until `run` returns.
+  The consumer must keep that context alive through task completion.
+  `join` establishes completion for every accepted task.
 
 **Counterchoice.** A plain callback, last parameter, named
 `<caller>_callback`, per `AGENTS.md` §2:
@@ -673,10 +908,9 @@ one. It also wins when there is exactly one completion and no cancellation to
 express: `Future` returns a two-field struct and requires an `await` that a
 callback makes unnecessary.
 
-`dusk` ships the future because `Io` gives cancellation and composability for
-free, and because the callback form has no way to express `mapAsync` failure
-without the callback's parameter becoming an error union the caller must
-inspect immediately.
+The proposed future design uses `Io` cancellation and composability.
+It does not establish implemented `mapAsync` or pipeline-request completion behavior.
+Accepted worker tasks have no cancellation disposer and must run to completion.
 
 **Grade and origin.** Settled. `AGENTS.md` §3 (io threading),
 `docs/10-architecture.md` "Threading" (one worker pool, two jobs). Upstream
@@ -1489,7 +1723,7 @@ lists them; the sizes below are `wc -l`.
 | `std::map<Serial, std::vector<Value>>` | — | `std.AutoHashMap(Serial, ArrayList(Value))` | stdlib | `AutoHashMap` at `lib/std/std.zig:1`, `getOrPut` at `lib/std/hash_map.zig:261`. |
 | `std::string`-keyed map | — | `std.StringHashMap(V)` | stdlib | `lib/std/std.zig:28`. Replaces the five `WGPUStringView` helpers in `src/dawn/common/StringViewUtils.h` (59 lines), per `docs/02-dawn-design.md` §4.11. |
 | insertion-ordered map | — | `std.ArrayHashMapUnmanaged(K, V)` | stdlib | `lib/std/std.zig:37`. For the few places Dawn uses `absl::btree_map` (`src/dawn/native/EventManager.h:94`). |
-| `LinkedList<T>` (`common/LinkedList.h`, 268) | 268 | `std.SinglyLinkedList` / `std.DoublyLinkedList` | stdlib | `lib/std/std.zig:26` and `:10`. `ApiObjectBase` is a `LinkNode` (`src/dawn/native/ObjectBase.h:147`), which the arena model removes entirely (§1). |
+| `LinkedList<T>` (`common/LinkedList.h`, 268) | 268 | `std.SinglyLinkedList` / `std.DoublyLinkedList` | stdlib | `lib/std/std.zig:26` and `:10`. Dusk does not copy Dawn's `ApiObjectBase` list implementation (`src/dawn/native/ObjectBase.h:147`). The core object list still tracks arena objects. `native_resources.destroyAll` walks that list. |
 | `MutexProtected<T>` (`common/MutexProtected.h`, 450) | 450 | `std.Io.Mutex` + explicit lock | stdlib | 0.16.0 has no `std.Thread.Mutex`. `std.Io.Mutex` is at `lib/std/Io.zig:1587`, with `lock(io)` at `:1602` and `unlock(io)` at `:1641`. It takes `io` because it is a cancelation point. |
 | `MutexCondVarProtected<T>` (`common/MutexProtected.h:395`) | 450 | `std.Io.Condition` | stdlib | `lib/std/Io.zig:1653`, `wait(io, mutex)` at `:1668`. |
 | `SlabAllocator<T>` (`common/SlabAllocator.h`, 222) | 222 | `src/core/Slab.zig` — port | port | Needs an index-encoded free list; the stdlib has no slab. |
@@ -1672,8 +1906,23 @@ Dawn's `LRUCache` (`src/dawn/common/LRUCache.h:89`) exposes `GetOrCreate` at
 `:95` and a virtual `EvictedFromCache` at `:154`, and wraps the whole thing in
 `MutexProtected<Cache>` at `:165`.
 
-The port keeps the two functions and drops the inheritance, because the only
-use is the pipeline cache and one eviction action:
+The port replaces the virtual eviction hook with caller-owned cleanup.
+Its live LRU consumer is `FramebufferCache`
+(`src/engine/framebuffer_cache.zig:155,231-249`).
+That caller creates entries on misses and sends evicted handles to a fenced
+destruction callback.
+Dawn also uses its LRU for framebuffers
+(`src/dawn/native/vulkan/FramebufferCache.h:95-100`).
+
+`PipelineStore.pipeline_caches` declares a separate Vk-driver cache map
+(`src/pipeline/pipeline.zig:673-674`).
+It has no producer or create-path consumer. Teardown only destroys stored
+entries (`src/pipeline/pipeline.zig:688-704`).
+The declaration does not establish an implemented Vk driver cache.
+Driver-cache persistence remains an optional, unimplemented optimization.
+
+This sketch describes the container policy, not the current implementation.
+The implementation is `src/pipeline/cache.zig:238-415`.
 
 ```zig
 // src/core/LruCache.zig
@@ -1726,12 +1975,144 @@ pub fn LruCache(
 }
 ```
 
-`evictOldest` is a linear scan over `capacity` entries. Dawn's is a
-`std::list` splice, which is O(1). For `capacity` in the low hundreds and a
-cache that is touched once per pipeline creation, the difference does not
-justify a hand-rolled intrusive list. **This is a performance claim and it is
-not measured.** It is a judgement about the size of `capacity`, and
-`docs/50-verification.md` owns the measurement if one is ever made.
+The implementation scans entries to find the oldest one
+(`src/pipeline/cache.zig:388-397`).
+Eviction uses `swapRemove` and repairs the index (`:378-385,400-412`).
+Dawn stores recency in a `std::list`
+(`src/dawn/common/LRUCache.h:159-165`).
+The port retains linear eviction to avoid a separate intrusive list.
+This is a design choice, not a measured performance advantage.
+Framebuffer use does not imply one access per pipeline creation.
+`docs/50-verification.md` owns any future measurement.
+
+The pipeline object map and shader digest have separate roles.
+`CacheKey.contentHash` uses Wyhash to select map buckets
+(`src/pipeline/cache_key.zig:109-115`).
+Shader words use stdlib SHA3-256
+(`src/pipeline/shader_module.zig:275-284`).
+Neither implements SHA3-224 persistent artifact validation.
+Dawn uses SHA3-224 for BlobCache validation
+(`src/dawn/native/BlobCache.cpp:46-50`).
+
+**Native SPIR-V stage constants.** `StageInput.constants` borrows a slice of `api.ConstantEntry`, with `f64` input values.
+The default is an empty slice.
+Keep the slice, its keys, and shader content live through the synchronous pipeline call.
+Compute, vertex, and fragment stages use the same normalization contract.
+This native API does not implement generated WebGPU Device ABI entry points or async pipeline creation.
+It does not parse WGSL or establish rules for uninitialized WGSL overrides.
+
+`StageInput.content_bytes` supplies authoritative metadata for every compute pipeline, even without constants.
+Graphics stages decode and reflect these bytes when constants are nonempty.
+The path uses `wordsFromBytes`, validates the words, and reflects module-scope specialization constants.
+Caller-supplied shader handles do not replace this metadata source.
+The path validates and normalizes once, before cache lookup or native calls.
+The same normalized payload supplies cache identity and Vulkan stage data.
+Empty constants require no specialization normalization and pass a null `pSpecializationInfo`.
+Compute still decodes and reflects the workgroup source, then validates its encoded default size.
+The path does not rewrite caller shader words.
+
+Keys accept canonical decimal `SpecId` strings, such as `"7"`, or unambiguous `OpName` aliases.
+Aliases and numeric keys resolve to the same module-scope specialization ID.
+Multiple shader result IDs can legally share one `SpecId`.
+Reflection retains their aliases and independent encoded defaults.
+Declarations with one specialization ID form one external value target, even when their scalar types differ.
+The codec converts the requested `f64` value for every declaration, with each type's raw range checks.
+It accepts the family only when every conversion produces the same payload size and bits.
+Different payload sizes or bits return `AmbiguousConstant`.
+Range and nonfinite failures retain their scalar errors.
+An `OpName` shared by different specialization IDs also returns `AmbiguousConstant`.
+Reflection does not require matching scalar types or encoded defaults.
+Two caller entries that resolve to one specialization ID return `DuplicateConstant`, even when their values agree.
+Unknown keys also fail validation.
+This rejects duplicate caller entries, not legal shared-ID shader declarations.
+See the [SPIR-V committee clarification, Registry issue 357](https://github.com/KhronosGroup/SPIRV-Registry/issues/357).
+Vulkan `VkSpecializationInfo` VUID 04911 requires unique map-entry IDs, not unique shader result IDs.
+Only directly decorated specialization constants accept external values.
+Derived `OpSpecConstantOp` results do not become separate external IDs.
+See [SPIR-V 1.6 §2.12 and §3.20](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#SpecializationSection).
+
+| Scalar | Conversion from the finite `f64` input |
+| --- | --- |
+| Boolean | Zero becomes false. Any other finite value becomes true. Vulkan uses four-byte `VkBool32`. |
+| Signed or unsigned integer | Widths 8, 16, 32, and 64 check the raw value against bounds before truncation toward zero. |
+| Floating point | Widths 16, 32, and 64 check finite range before rounding to the destination type. |
+
+The 64-bit integer upper bounds are exclusive to reject overflow.
+Nonfinite values, out-of-range values, and unsupported scalar widths fail validation.
+Malformed SPIR-V returns the existing `SpirvMalformed` error.
+The specialization codec exposes named errors for key and scalar failures.
+Invalid input fails even when an otherwise matching pipeline already exists in the cache.
+
+Cache identity sorts entries by ID and records ID, scalar type, width, size, and little-endian value bits.
+For shared-ID families, the codec selects the minimum canonical type tag and width.
+This deterministic choice keeps numeric keys, aliases, and metadata order equivalent.
+The canonical bytes contain no ABI padding.
+Equivalent aliases, input order, and converted bits share a pipeline.
+Different converted bits produce different keys.
+Omission preserves encoded defaults. An explicit value equal to a default can still have a different key.
+
+Vulkan receives native-endian values at packed byte offsets.
+The map entries, data, and `VkSpecializationInfo` pointers stay valid through the native creation call.
+They do not borrow transient loop-local stage data.
+`spirv.reflect.Module.specialization_constants` owns its metadata array. Names borrow the shader words.
+`ShaderModule` takes ownership of that array without a copy.
+
+The nonempty codec uses three allocations: sorted scratch, map entries, and a payload buffer.
+The payload buffer holds native and canonical views.
+After scratch cleanup, the codec owns two buffers and releases each once during deinitialization.
+The raw-handle path must decode and reflect every compute module and graphics modules with nonempty constants.
+This is a cold-path cost description, not a measured speed or memory-performance claim.
+`docs/50-verification.md` records reviewed compute runtime proof, current scoped verification, and the graphics proof limit.
+
+**Phase-1 workgroup contract (source only).** M5 records `LocalSize`, `LocalSizeId`,
+and `WorkgroupSize` builtin metadata per entry point. The builtin takes precedence.
+The borrowed module words must remain immutable during resolution.
+`Module.resolveWorkgroupSizeCanonical` uses the specialization codec's canonical bytes.
+It does not convert scalar inputs again or rewrite shader words.
+Its bounded evaluator rejects missing, unsupported, cyclic, malformed, or excessive dependencies.
+It preserves signed two's-complement bit patterns.
+Supported scalar integer arithmetic wraps at the component width.
+Expression dependencies can use 8-, 16-, 32-, or 64-bit integers.
+Final workgroup axes require 32-bit integers.
+Opcode-specific rules determine valid operand types and widths.
+Shift counts can have an independent integer width.
+`UDiv` and `UMod` require the exact unsigned operand/result type.
+Literal `LocalSize` zero is malformed. Evaluated zero reaches M14's `AxisZero` policy error.
+
+M14 `prepareCompute` selects the `(name, .gl_compute)` pair before validation, keys, lookup, or native creation.
+A same-name vertex entry does not hide a compute entry, in either declaration order.
+A wrong-model error applies only when no matching compute entry exists.
+The descriptor requires caller-supplied `ComputeLimits` from the selected or negotiated device.
+The pipeline module has no engine dependency or default limit ceiling.
+It checks nonzero dimensions, axis limits, checked product overflow, and the invocation limit.
+`local_size_id_supported` defaults to false.
+`EntryPoint.has_local_size_id` records mode presence independently of the effective builtin size.
+M14 gates this presence before lookup or native creation, even when the builtin takes precedence.
+Vulkan [VUID-RuntimeSpirv-LocalSizeId-06434](https://docs.vulkan.org/refpages/latest/refpages/source/RuntimeSpirv.html#VUID-RuntimeSpirv-LocalSizeId-06434)
+requires enabled `maintenance4` whenever `LocalSizeId` is used.
+
+The integer contract follows SPIR-V's
+[integer types](https://registry.khronos.org/SPIR-V/specs/1.0/SPIRV.html#OpTypeInt),
+[constant bit patterns](https://registry.khronos.org/SPIR-V/specs/1.0/SPIRV.html#OpConstant),
+[addition operands](https://registry.khronos.org/SPIR-V/specs/1.0/SPIRV.html#OpIAdd),
+[unsigned division](https://registry.khronos.org/SPIR-V/specs/1.0/SPIRV.html#OpUDiv),
+and [shift operands](https://registry.khronos.org/SPIR-V/specs/1.0/SPIRV.html#OpShiftLeftLogical).
+The [no-wrap decorations](https://github.khronos.org/SPIRV-Registry/extensions/KHR/SPV_KHR_no_integer_wrap_decoration.html#_decorations)
+specify undefined behavior when their decorated operation wraps.
+This evaluator adds no `NoUnsignedWrap` or `NoSignedWrap` validation policy.
+Dependency decoding does not claim enabled native int8/int16/int64 features or full SPIR-V conformance.
+M5's decoder and evaluator are new code, not ports of Tint's reflection functions.
+Workgroup storage accounting, subgroup checks, and a public size getter remain open.
+Public async creation, object-cache integration, platform execution, and persistence remain separate open groups.
+Parent generation, builds, and runtime checks remain pending for phase 1.
+
+**Native render-pipeline contract.** The current path uses a traditional compatible
+render pass, not dynamic rendering.
+`RenderPipelineDescriptor.compatible_render_pass` in `src/pipeline/pipeline.zig`
+is required and borrowed through native creation.
+The pass must have compatible attachment formats and sample count at subpass zero.
+The raw handle is not part of cache identity.
+`createRenderPipeline` rejects a null handle with `CompatibleRenderPassMissing`.
 
 ### 7.4 `MemoryBlockAllocator`
 
@@ -2029,23 +2410,33 @@ The count/length pair (`view format count` and `view formats` at
 count is derivable. `AGENTS.md` §2 forbids two parameters of the same type, so
 the pair never becomes two function parameters.
 
-**The proc table.** `proc` is a `function pointer` with no args
-(`src/dawn/dawn.json:60-63`) and `get proc address` returns it
-(`src/dawn/dawn.json:64-70`). The generator emits:
+**The proc table.** `proc` is a generic function-pointer type with no arguments.
+`get proc address` returns it. It is not the return type of every method.
+The pinned Dawn template uses each method's declared return type
+(`docs/02-dawn-design.md` §2).
+
+`tools/gen_api.zig` uses `methodReturnType` for object methods and `ProcTable` fields.
+The chosen native projection returns `void` when the JSON has no return declaration.
+An explicit return becomes `errors.Error!T`, where `T` is the projected Zig type.
+Structured return declarations preserve schema nullability.
+A buffer return with `optional: true` becomes `errors.Error!?objects.Buffer`
+in both object methods and procedure-table fields.
+Mapped-pointer returns retain their existing single optional pointer, without a second optional layer.
+These source-contract examples require parent regeneration and verification:
 
 ```zig
-// src/api/proc.zig — GENERATED
-pub const Proc = *const fn () callconv(.c) void;
-
-pub const ProcTable = struct {
-    instance_request_adapter: *const fn (*const RequestAdapterOptions, ...) callconv(.c) Proc,
-    device_create_buffer: *const fn (*const BufferDescriptor, ...) callconv(.c) Proc,
-    // one entry per method; 205 in total
-};
+// Native Zig procedure-table field types.
+buffer_destroy: *const fn (objects.Buffer) void,
+adapter_get_instance: *const fn (objects.Adapter) errors.Error!objects.Instance,
+adapter_get_limits: *const fn (objects.Adapter, *descriptors.Limits) errors.Error!enums.Status,
 ```
 
-Dawn emits the same table as `dawn_proc_table.h`
-(`generator/templates/dawn_proc_table.h`).
+The table uses the native Zig calling convention, with no `callconv(.c)`.
+Its arguments remain ungrouped, unlike object-method options structs.
+`callbacks.Proc` remains `*const fn () callconv(.c) void`.
+That individual type does not give the generated package a Dawn-compatible C ABI.
+Generated descriptors, handles, slices, and error unions are native Zig contracts.
+Dawn's C proc table is the upstream reference, not an ABI promise.
 
 ### 8.2 The comptime exhaustiveness check
 
@@ -2176,6 +2567,75 @@ not something to transcribe by hand. It is data."); `AGENTS.md` §3;
 `generator/templates/api.h:127-132`, `generator/templates/api_cpp_chained_struct.h:47-56`,
 `generator/templates/dawn_proc_table.h`; JSON line references throughout.
 
+### 8.4 Canonical formats and typed block geometry
+
+**Status.** Canonical formats, typed block geometry, and consumer migration have
+landed and passed local behavior tests.
+The aggregate includes eight format-shard tests and root format cases.
+This does not establish support for every format on every device or a green final gate.
+See `docs/40-plan.md` §M7 and `docs/50-verification.md` "Present implementation and evidence limits".
+
+`FormatName` in `src/engine/format.zig` declares the canonical identity domain.
+It carries 101 physical API formats and eight prefixed Dawn entries.
+Undefined is separate and has no table slot. `FormatTable` has 109 rows.
+`buildFormatTable(enabled, out)` takes runtime `FeaturesSet` membership and a
+caller-owned `*FormatTable`. It allocates nothing and captures no device.
+Static metadata remains comptime data. Feature-dependent capabilities do not.
+There is no separate comptime-only `EnabledFeatures` type.
+Consumers use this canonical table, not a second format identity domain.
+
+`FeaturesSet` in `src/engine/features.zig` stores two `u64` words for 67
+representable feature names.
+`enable` and `isEnabled` operate on that domain.
+`fromApiName` converts a typed API name before membership.
+The implementation does not claim the upstream 91-name feature domain.
+It has no string-by-name membership method or 91-row feature-info table.
+`toSupportedFeatures` writes into caller-owned `[67]api.FeatureName` storage.
+
+**Source identity.** These references use Dawn
+`32f77c02294310054a660c393feded4bcb3f203c` at
+`~/.cache/dusk-research/research/dawn`.
+`src/dawn/dawn.json:4501-4508` lists eight raw Dawn values 0–7.
+`src/dawn/native/dawn_platform.h:135-136` defines prefix `0x00050000` and mask
+`0xffff0000`. `src/dawn/native/Format.cpp:172-198` maps prefixed formats after
+the physical API formats.
+The generator omits those eight names from `api.TextureFormat`.
+They are canonical internal entries, not restored API aliases.
+
+`computeFormatIndex` in `src/engine/format.zig` maps API identity to `?usize`.
+`computeCanonicalFormatIndex` also handles the prefixed entries.
+`fromApiFormat` widens retained API identity.
+`toApiFormat` returns `UnrepresentableFormat` for a prefixed identity.
+`UnsupportedReason` separates required features, compatibility mode, and excluded features.
+`UnavailableFeature` names excluded planar and unorm16 gates.
+Pixel-local-storage gates add no capability.
+No retained feature with a colliding raw tag substitutes for an excluded feature.
+
+**Aspect selection.** `Format.getAspectInfo` accepts API selection.
+`getAspectInfoForAspect` accepts an internal aspect.
+`AspectError` names `InvalidAspect`, `MultipleAspects`, and `AspectNotPresent`.
+Stencil metadata retains slot 1. Stencil-only `aspectCount` therefore returns 2.
+`sampleTypeBit` returns `UndefinedSampleType` for undefined selection.
+`UnsupportedReason.format` writes through `*std.Io.Writer`.
+
+**Native units.** `src/engine/block_info.zig` declares distinct `TexelCount`
+and `BlockCount` structs, each with a `u64` value.
+Typed origins and extents use those wrappers, not integer aliases.
+Origins default to zero. Extents default to width 0, height 1, and depth 1.
+Aggregate equality uses `std.meta.eql`, not aggregate `==` or invented wrapper methods.
+
+`TypedTexelBlockInfo` stores byte size and typed texel geometry.
+`fromTexelBlockInfo` imports untyped metadata.
+`toTexelBlockInfo`, `TexelOrigin3D.toOrigin3D`, and `TexelExtent3D.toExtent3D`
+reject API narrowing with `NarrowingOverflow`.
+`toBytes` multiplies block count by bytes per block.
+`bytesToBlocks`, `toBlockHeight`, and `toBlockWidth` require exact division.
+`toTexelWidth` and `toTexelHeight` check multiplication overflow.
+`ConversionError` names `InvalidBlockInfo`, `NonExactDivision`, and `Overflow`.
+Zero metadata is unset and arithmetic rejects it.
+Depth conversions are identities because blocks are two-dimensional.
+Origin and extent conversions preserve depth.
+
 ---
 
 ## 9. Threading
@@ -2205,9 +2665,9 @@ pub fn Device = struct {
     mutex: std.Io.Mutex = .init,
     timeline: Timeline,
     arena: std.heap.ArenaAllocator,
-    io: std.Io,
+    // Io is supplied by each operation, not stored.
 
-    /// Every public entry point. `io` is threaded, never global (AGENTS.md §3).
+    /// Illustrative recorded entry. Native lifetime admission is separate.
     pub fn writeBuffer(
         dev: *Device,
         io: std.Io,
@@ -2221,8 +2681,29 @@ pub fn Device = struct {
 };
 ```
 
-`AGENTS.md` §3 says public API calls never block; they enqueue. So the critical
-section is short: validate, append to the command stream, submit.
+The recorded surface validates and appends commands.
+Native resource creation instead calls synchronous factories.
+`Device.wait(io, serial)` explicitly waits for GPU completion.
+No enqueue-only rule covers every public entry.
+
+**Current native operation safety.** The example above does not describe the complete native lifetime contract.
+`src/engine/device.zig` pins each admitted operation before it accesses native context or waits for `DeviceMutex`.
+`destroy` refuses active pins without changing ownership or admission.
+A nonterminal completion failure keeps the stopped owner and GPU-referenced children live for a later retry.
+Successful completion or terminal Vulkan device loss permits child-before-parent retirement.
+Device loss supplies lifetime-only retirement permission, not a normal completed serial or valid readback.
+
+`Device.getQueue(io)` returns `OperationError!QueueLease`, not a bare queue pointer.
+The lease owns one device pin and the queue-operation gate. It stores no `Io`.
+Do not copy the lease, move its device, or independently deinitialize its queue.
+The queue borrow lasts until `lease.deinit(io)`.
+That call publishes real low-level submissions, releases the gate and pin, and leaves the receiver readable.
+Deinitialization is idempotent on the same lease, not on independent copies.
+High-level submit, unmap, and release refuse a live lease.
+
+BG134 passed 10/10 native safety tests in Debug and explicit ReleaseSafe, with exit 0 in 113.56 seconds.
+The five original BG131 regressions now pass, alongside queue-lease, loss, idle-failure, and mutex-wait pin tests.
+This component result alone does not establish native consumer integration, async Phase 3, or a full gate.
 
 ### 9.2 The serial timeline
 
@@ -2278,48 +2759,52 @@ Dawn has no fence-poll threads at this revision.
 
 ### 9.3 The worker pool
 
-Two jobs only: SPIR-V validation at shader-module creation, and pipeline
-creation when the caller asked for it asynchronously
-(`docs/10-architecture.md`). Dawn's pool is
-`src/dawn/platform/WorkerThread.h:87-89` with a default of two, and Dawn's
-shader validation runs on the calling thread
-(`src/dawn/native/SpirvValidation.cpp:37-79`, called directly).
+**Implemented substrate.** `src/platform/threads.zig` defines `Task` and `WorkerPool`.
+The pool owns two workers by default and allows one through eight workers.
+Its fixed queue holds at most `max_queued_task_count` (4096) tasks without allocation.
+The intended jobs are SPIR-V validation and requested asynchronous pipeline creation.
+This pool does not establish that those public async entry points exist.
 
-The port moves validation onto the pool, because it is the one CPU-bound step in
-shader-module creation and the port has no Tint to hide it:
+`Task.run` has type `*const fn (io: std.Io, context: *anyopaque) void`.
+`Task` also contains the borrowed context pointer.
+The submitter owns the context and keeps it alive until `Task.run` returns.
+Tasks run on pool threads, never on the submitting thread.
+`postTask` returns `Canceled` if mutex acquisition fails.
+Under the mutex, it rejects shutdown, worker exhaustion, and a full queue before acceptance.
+Those failures return `PoolShutDown`, `WorkerExhausted`, and `TaskQueueFull`, respectively.
+A failed post creates no borrow of the task context or `Io` backend state.
+An accepted post copies the exact supplied `Io` and task into `QueuedTask` and increments the posted count.
+The worker calls `queued_task.task.run(queued_task.io, queued_task.task.context)` outside the pool lock.
+The submitter keeps that `Io` backend state alive until the callback returns.
+The queued `Io` value does not transfer ownership of its backend state.
 
-```zig
-// src/pipeline/shader_module.zig
-pub fn createShaderModule(
-    dev: *Device,
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    desc: ShaderModuleDescriptor,
-) std.Io.ConcurrentError!std.Io.Future(ShaderModuleResult) {
-    return io.concurrent(validateAndCreate, .{ dev, alloc, desc });
-}
+`init` passes its `Io` explicitly to each worker's thread entry for worker synchronization.
+The caller keeps that synchronization `Io` backend state alive until `join` returns.
+The worker does not substitute its synchronization `Io` for the task's `Io`.
+Neither path uses a global or pool-stored `Io` fallback.
 
-fn validateAndCreate(
-    dev: *Device,
-    alloc: std.mem.Allocator,
-    desc: ShaderModuleDescriptor,
-) ShaderModuleResult {
-    // spirv.validate, then spirv.reflect, then vkCreateShaderModule on the
-    // caller's own words (docs/10-architecture.md "Shaders").
-}
-```
+`join` and `deinit` stop acceptance before they join the workers.
+Workers continue to execute accepted queued tasks after shutdown or exhaustion.
+They increment the completed count only after `run` returns.
+When `join` returns, every accepted task has returned and every worker has joined.
+Shutdown neither frees caller-owned contexts nor abandons queued tasks.
+Worker waits, queue access, completion accounting, and shutdown use uncancelable synchronization.
+Canceled `Io` cannot bypass this accepted-task drain.
+The drain depends on each task returning. It does not interrupt a task that fails to return.
 
-`io.concurrent` rather than `io.async`, because a shader module's caller must
-wait for it before submitting work: a validation failure has to reach the
-caller as an error, and `concurrent` refuses with
-`error.ConcurrencyUnavailable` (`lib/std/Io.zig:2352-2356`) rather than
-silently running inline. With `concurrent_limit` set to `.limited(2)`
-(`lib/std/Io/Threaded.zig:1592`, `Io.Limit.limited` at `lib/std/Io.zig:632`) a
-third concurrent validation returns that error, and the caller decides whether
-to retry or to fall back to inline validation. **The port chooses the explicit
-failure over Dawn's queue** (`std::queue` at
-`src/dawn/platform/WorkerThread.h:103`), and the cost is a call site that must
-handle a case Dawn never presents.
+Each worker has a normal bound of `max_worker_iteration_count` (`1 << 24`) loop iterations.
+At that bound, the worker sets `worker_exhausted` under the mutex before it drains the queued tail.
+All later posts fail before acceptance.
+The queue then contains at most `max_queued_task_count` tasks.
+Each worker allows at most that many additional iterations to drain accepted work.
+The total per-worker bound is the normal bound plus the queue bound.
+This is a runaway guard, not an accepted-task quota.
+Shutdown and exhaustion end a worker only after the queue is empty.
+
+Dawn's pool defaults to two workers (`src/dawn/platform/WorkerThread.h:87-89`).
+Dawn validates shaders on the calling thread
+(`src/dawn/native/SpirvValidation.cpp:37-79`).
+Moving validation onto this pool remains separate from its implemented acceptance and drain contract.
 
 ### 9.4 What is passed and what is reached for
 
@@ -2359,23 +2844,19 @@ order." `AGENTS.md` §3 requires `io` threading and no globals.
 - The mutex is not recursive, so a consumer calling a public entry point from
   inside a callback it registered must not already hold the lock. The tick
   releases it before step 5 for exactly this reason.
-- `io.concurrent` can return `error.ConcurrencyUnavailable` where Dawn's pool
-  would queue. A caller with three concurrent shader modules must handle it.
+- `postTask` rejects work before acceptance when the queue is full or the pool has stopped accepting tasks.
+  The caller must handle rejection and retain ownership of its context.
+- Shutdown waits for every accepted task to return.
+  The caller must keep borrowed contexts alive until completion, including during shutdown.
 
-**Counterchoice.** `std.Thread` plus a hand-rolled pool with its own
-`std.Thread.Mutex` and `std.Thread.Condition`, ignoring `Io` for the engine's
-internals. This genuinely wins in one setting: single-threaded embedding. If a
-consumer links `dusk` into a runtime that already owns its threads and refuses
-to hand over an `Io` — a game engine's job system, a browser's event loop —
-then threading `Io` through every signature is pure cost, and a pool built on
-`std.Thread` plugs into what the consumer already has. It also wins when the
-consumer needs more than two worker threads, because
-`std.Io.Threaded`'s `async_limit` grows the pool but a single-threaded `Io`
-implementation (`Io.Threaded.init_single_threaded`,
-`lib/std/Io/Threaded.zig:1674`) cannot.
+**Counterchoice.** Use `Io.Threaded` task scheduling instead of a fixed `std.Thread` pool.
+`Io.async` can run a task inline when its concurrency limit is reached.
+`Io.concurrent` can instead return `ConcurrencyUnavailable`.
+Neither behavior is the implemented bounded queue contract.
 
-`dusk` uses `Io` because `AGENTS.md` §3 makes it a house rule and because it
-gives cancellation (§3.2) and a deterministic test back end for free.
+The port uses `std.Thread` workers with explicit `io` for synchronization.
+This preserves worker-only execution and drains caller-owned borrowed contexts before shutdown returns.
+It does not add cancellation of accepted tasks.
 
 **Grade and origin.** Settled. `docs/10-architecture.md` "Threading";
 `AGENTS.md` §3. Upstream evidence: `src/dawn/native/ExecutionQueue.h:73`,
@@ -2650,10 +3131,10 @@ predictable branch, not a measurement.**
 
 Each entry names the alternative, why it lost, and what would change the answer.
 
-### 11.1 Per-object reference counting
+### 11.1 General reference counting for generated handles
 
-**Alternative.** `Ref<T>`-equivalent: intrusive refcount word, `retain` and
-`release` on every handle.
+**Alternative.** A `Ref<T>` equivalent with intrusive counts, `retain`, and `release` on every generated handle.
+This rejected alternative does not prohibit the typed native facade's dependency counts, operation pins, or explicit payload release.
 
 **Why it lost.** `AGENTS.md` §3 requires a failure to be injectable and a module
 to be deterministically drivable; a refcount bug is a use-after-free that a
@@ -2662,9 +3143,9 @@ cost: the `DeleteThis` override contract at
 `src/dawn/native/ObjectBase.h:176-186`, and the `LockAndDeleteThis` variant at
 `:188` that some classes must also override. The arena has no such invariant.
 
-**What would change the answer.** A requirement that objects outlive their
-device, or a measured peak-memory problem on a per-frame create/destroy loop.
-Both are listed in §1.2 as the setting where it genuinely wins.
+**What would change the answer.** A requirement for retained host objects after device teardown, or measured excess host-storage growth.
+Current native payload release does not provide that retained-host-object contract.
+See §1.1 and §1.2 for the separate native ownership policy.
 
 ### 11.2 Reimplement `Result<T, E>` in Zig
 
@@ -2766,20 +3247,18 @@ has no set to sweep.
 match on a Zig error set. §2.4 states this as the counterchoice's winning
 setting.
 
-### 11.9 `std.Thread` and a hand-rolled pool instead of `Io`
+### 11.9 `Io.Threaded` scheduling instead of the fixed worker pool
 
-**Alternative.** `std.Thread.spawn` (`lib/std/Thread.zig:344`),
-`std.Thread.Mutex`-equivalent primitives, and a hand-written two-thread pool
-with its own shutdown protocol.
+**Alternative.** Schedule tasks through `Io.async` or `Io.concurrent` instead of the queue in `src/platform/threads.zig`.
 
-**Why it lost.** `AGENTS.md` §3 requires `io` as a parameter on anything that
-can block. 0.16.0 has no `std.Thread.Mutex`; the mutex is `std.Io.Mutex`
-(`lib/std/Io.zig:1587`) and takes `io`. A hand-rolled pool would have to own its
-cancellation and its shutdown protocol, both of which `Io` already provides.
+**Why it lost for the worker substrate.** `Io.async` can run tasks inline.
+`Io.concurrent` rejects work when it cannot supply concurrency.
+The implemented pool instead queues accepted tasks and executes them only on worker threads.
+Its explicit shutdown protocol drains borrowed contexts through `run` return.
+It uses `Io` synchronization without canceling accepted tasks (§9.3).
 
-**What would change the answer.** A single-threaded embedding that will not
-supply an `Io`, or a consumer needing more worker threads than
-`std.Io.Threaded`'s `async_limit` allows. §9.5 states both.
+**What would change the answer.** A public async design could use `std.Io.Future`.
+That design remains separate from the implemented worker acceptance and shutdown contract (§3.2).
 
 ### 11.10 Recursive device mutex
 

@@ -952,10 +952,6 @@ pub fn loadInstanceProcs(
     gpa: std.mem.Allocator,
     options: InstanceLoadOptions,
 ) LoadError!*InstanceProcs {
-    const procs = try gpa.create(InstanceProcs);
-    errdefer gpa.destroy(procs);
-    procs.* = std.mem.zeroes(InstanceProcs);
-
     const get_instance_proc_addr = options.get_instance_proc_addr orelse
         return error.MissingInstanceProc;
     const instance = options.instance;
@@ -968,6 +964,11 @@ pub fn loadInstanceProcs(
         if (address == null) return error.MissingInstanceProc;
         @field(options.global, row.field) = asProc(Proc, address);
     }
+
+    // Allocation failure must leave vkDestroyInstance available for rollback.
+    const procs = try gpa.create(InstanceProcs);
+    errdefer gpa.destroy(procs);
+    procs.* = std.mem.zeroes(InstanceProcs);
 
     inline for (instance_fields) |row| {
         const Proc = @FieldType(InstanceProcs, row.field);

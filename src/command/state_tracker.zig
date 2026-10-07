@@ -138,7 +138,7 @@ pub const PipelineRequirements = struct {
     vertex_buffer_layouts: [constants.max_vertex_buffers]VertexBufferLayout = @splat(.{}),
     /// One bit per immediate slot the pipeline reads. Dawn's
     /// `GetUserImmediateSlots()`.
-    immediate_slot_mask: u32 = 0,
+    immediate_slot_mask: u64 = 0,
     /// The index format a strip topology needs to match. Dawn compares
     /// `mIndexFormat` against `GetStripIndexFormat()`
     /// (`CommandBufferStateTracker.cpp:583-589`).
@@ -146,8 +146,6 @@ pub const PipelineRequirements = struct {
     /// Whether the pipeline layout uses a resource table, which decides the
     /// `resource_tables` aspect.
     uses_resource_table: bool = false,
-    /// The pipeline's attachment state, interned, for the pass comparison.
-    attachment_state: commands.Ref = null,
 };
 
 /// One texture binding of a bind group, as the caller resolved it.
@@ -207,7 +205,7 @@ pub const Tracker = struct {
     immediate_data: [constants.max_immediate_data_bytes]u8 = @splat(0),
     /// One bit per four-byte slot that has been written. Dawn's
     /// `mImmediateDataMask`.
-    immediate_data_mask: u32 = 0,
+    immediate_data_mask: u64 = 0,
 
     has_resource_table: bool = false,
     resource_table: commands.Ref = null,
@@ -313,15 +311,30 @@ pub const Tracker = struct {
     /// writing more data can only make the check pass — and the port keeps
     /// that rule, which is the one place the table's "clears none" row is not
     /// a bug.
-    pub fn setImmediateData(self: *Tracker, offset: u32, bytes: []const u8) void {
-        const start = offset / constants.immediate_element_byte_size;
-        const end_slot = (offset + bytes.len) / constants.immediate_element_byte_size;
-        var slot = start;
-        while (slot < end_slot) : (slot += 1) {
-            self.immediate_data_mask |= @as(u32, 1) << @intCast(slot);
+    pub fn setImmediateData(
+        self: *Tracker,
+        offset: u32,
+        bytes: []const u8,
+    ) errors.Error!void {
+        if (offset % constants.immediate_element_byte_size != 0 or
+            bytes.len % constants.immediate_element_byte_size != 0)
+        {
+            return error.ImmediateDataUnaligned;
         }
-        if (offset + bytes.len > self.immediate_data.len) return;
+        if (offset > constants.max_immediate_data_bytes) return error.ImmediateDataTooLarge;
+        if (bytes.len > constants.max_immediate_data_bytes - offset) {
+            return error.ImmediateDataTooLarge;
+        }
+        const start = @divExact(offset, constants.immediate_element_byte_size);
+        if (bytes.len == 0) return;
+        const slot_count = @divExact(bytes.len, constants.immediate_element_byte_size);
+        const low_mask: u64 = if (slot_count == 64)
+            std.math.maxInt(u64)
+        else
+            @as(u64, std.math.maxInt(u64)) >> @as(u6, @intCast(64 - slot_count));
+        const written_mask = low_mask << @as(u6, @intCast(start));
         @memcpy(self.immediate_data[offset..][0..bytes.len], bytes);
+        self.immediate_data_mask |= written_mask;
     }
 
     /// Dawn's `End` (`:912-918`). Dawn clears the pipeline pointers and leaves
@@ -544,4 +557,49 @@ pub const Tracker = struct {
 /// narrowing is lossless and this is the one place it happens.
 fn bit(aspect: Aspect) u32 {
     return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(aspect)));
+}
+
+test "immediate requirements preserve word63 and the full mask" {
+    var tracker = Tracker.init(std.testing.allocator, false);
+    tracker.setComputePipeline(null, .{ .immediate_slot_mask = @as(u64, 1) << 63 });
+    try std.testing.expectError(error.MissingImmediateData, tracker.validateCanDispatch());
+    const upper_word = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    try tracker.setImmediateData(252, &upper_word);
+    try std.testing.expectEqual(@as(u64, 1) << 63, tracker.immediate_data_mask);
+    try std.testing.expectEqualSlices(u8, &upper_word, tracker.immediate_data[252..256]);
+    try tracker.validateCanDispatch();
+
+    tracker.setComputePipeline(null, .{ .immediate_slot_mask = std.math.maxInt(u64) });
+    try std.testing.expectError(error.MissingImmediateData, tracker.validateCanDispatch());
+    const full_data = [_]u8{0xa5} ** 256;
+    try tracker.setImmediateData(0, &full_data);
+    try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
+    try std.testing.expectEqualSlices(u8, &full_data, &tracker.immediate_data);
+    try tracker.validateCanDispatch();
+}
+
+test "immediate range refusal leaves tracker bytes masks and aspects unchanged" {
+    var tracker = Tracker.init(std.testing.allocator, false);
+    const initial_word = [_]u8{ 1, 2, 3, 4 };
+    try tracker.setImmediateData(16, &initial_word);
+    tracker.aspects.set(.immediate_data);
+    const initial_data = tracker.immediate_data;
+    const initial_mask = tracker.immediate_data_mask;
+    const initial_aspects = tracker.aspects.bits;
+    const cases = [_]struct { offset: u32, data: []const u8, expected: errors.Error }{
+        .{ .offset = 1, .data = &initial_word, .expected = error.ImmediateDataUnaligned },
+        .{ .offset = 0, .data = initial_word[0..3], .expected = error.ImmediateDataUnaligned },
+        .{ .offset = 256, .data = &initial_word, .expected = error.ImmediateDataTooLarge },
+        .{ .offset = 252, .data = &([_]u8{0} ** 8), .expected = error.ImmediateDataTooLarge },
+        .{ .offset = 0xffff_fffc, .data = &initial_word, .expected = error.ImmediateDataTooLarge },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(case.expected, tracker.setImmediateData(case.offset, case.data));
+        try std.testing.expectEqualSlices(u8, &initial_data, &tracker.immediate_data);
+        try std.testing.expectEqual(initial_mask, tracker.immediate_data_mask);
+        try std.testing.expectEqual(initial_aspects, tracker.aspects.bits);
+    }
+    try tracker.setImmediateData(256, &.{});
+    try std.testing.expectEqualSlices(u8, &initial_data, &tracker.immediate_data);
+    try std.testing.expectEqual(initial_mask, tracker.immediate_data_mask);
 }

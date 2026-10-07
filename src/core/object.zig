@@ -1,200 +1,385 @@
-//! The object header, the list that tracks live objects, and the arena that
-//! owns both.
+//! Guarded object identity, intrusive references, and the device's one arena.
 //!
-//! **What this file is.** The port of Dawn's `ObjectBase` and `ApiObjectList`
-//! (`src/dawn/native/ObjectBase.h:95-208`). There is no per-object free: the
-//! last reference marks the object destroyed and hands it back to the arena,
-//! and `ObjectArena.deinit` reclaims every block.
+//! Initialize with a stable caller-owned mutex, lock the list, create an
+//! unpublished header, initialize its payload, then attach it. Each reference
+//! is explicitly a user alias or an internal lease. Payload retirement does
+//! not consume references. Final release unlinks the header; its arena storage
+//! remains a tombstone until zero-reference `deinit`.
 //!
-//! **What this file does not claim.** It does not claim a memory figure. Dawn's
-//! refcount returns the allocation at the last release
-//! (`src/dawn/common/RefCounted.cpp:180-182`); the arena does not, so a caller
-//! that creates and destroys in a loop pays for the high-water mark of the
-//! device's life. `docs/30-port-design.md` §1.1 lists that as the cost.
+//! The arena, bound mutex, allocator backing state, and optional high owner
+//! must stay at stable addresses through final deinit. Pointer copies do not
+//! retain. Raw forged pointers and reads after arena deinit are not supported.
 
 const std = @import("std");
 const errors = @import("errors.zig");
 const handle = @import("handle.zig");
 
-/// Why an object is being destroyed.
-///
-/// Dawn carries the reason because its two callers mean different things
-/// (`src/dawn/native/ObjectBase.h:109-116`): a destructor can not leave a
-/// reference behind, and an early destroy is a decision the owner made.
+/// Whether retirement follows the last release or an explicit owner decision.
 pub const DestroyReason = enum {
-    /// The last reference is gone, so no further reference can be taken.
     last_reference_released,
-    /// The owner is destroying the object before the object goes away.
     early_destroy,
 };
 
-/// Where an object is in its life.
-///
-/// Dawn packs the initialized and error state into the reference-count word
-/// (`src/dawn/common/RefCounted.cpp:41-43`, values at
-/// `src/dawn/native/ObjectBase.cpp:60-62`) and reaches it through
-/// `PayloadFetchAnd` with relaxed ordering
-/// (`src/dawn/common/RefCounted.cpp:64-70`). An object is alive while the
-/// tracking list holds it (`src/dawn/native/ObjectBase.cpp:229-231`), not in a
-/// payload bit. The port gives each state a field, so a read is one assertion
-/// and not a bit-mask argument.
-///
-/// `failed` is not `error`: `error` is a Zig keyword and cannot name an enum
-/// member.
+/// Payload state. A destroyed header can still own user references and leases.
 pub const State = enum {
-    /// The header is written and the rest of the object is not.
     initializing,
-    /// The object is usable. `Object.attach` is the call that puts it in the
-    /// tracking list, so a caller reads `isAlive` from that call on.
     alive,
-    /// The object has been destroyed. Its memory is still in the arena.
     destroyed,
-    /// The object exists, but the call that made it failed.
     failed,
 };
 
-/// The back end's teardown for one object. `context` is the object header, so
-/// a rule never carries a pointer it could read off the object.
-pub const DestroyFn = *const fn (context: *anyopaque, reason: DestroyReason) void;
+/// A public owned alias or an internal dependency/job/GPU lifetime lease.
+pub const ReferenceClass = enum { user, lease };
 
-/// The header every arena object starts with.
+/// Checked ownership failures. Every failed retain/release leaves counts unchanged.
+pub const ReferenceError = error{
+    ResourceDestroyed,
+    ResourceDeviceMismatch,
+    ReferenceCountOverflow,
+    NoOwnedReference,
+};
+
+/// Final reclamation refuses references or a different storage allocator.
+pub const LifetimeError = error{ ResourceInUse, AllocatorMismatch };
+
+/// Factory failures leave no reference or published object behind.
+pub const CreateError = std.mem.Allocator.Error ||
+    error{ AllocatorMismatch, ResourceDestroyed, ReferenceCountOverflow };
+
+/// Holds the list's original mutex, without storing an Io capability.
 ///
-/// A type that lives in the arena names its first field `header` and
-/// publishes a `destroy` method. `ObjectArena.create` reads both, so a type
-/// that forgets one is a compile error.
+/// Do not copy, transfer between threads, or use after unlock. The guard's
+/// mutex must outlive unlock; unlock does not read the list, so it remains valid
+/// after a successful arena deinit under this guard.
+pub const ObjectGuard = struct {
+    objects: *ObjectList,
+    mutex: *std.Io.Mutex,
+    held: bool,
+
+    /// Blocks for the bound mutex; cancellation leaves the list unchanged.
+    pub fn lock(io: std.Io, objects: *ObjectList) error{Canceled}!ObjectGuard {
+        const mutex = objects.mutex;
+        try mutex.lock(io);
+        return .{ .objects = objects, .mutex = mutex, .held = true };
+    }
+
+    /// Blocks without cancellation, for cleanup that must consume owned refs.
+    pub fn lockUncancelable(io: std.Io, objects: *ObjectList) ObjectGuard {
+        const mutex = objects.mutex;
+        mutex.lockUncancelable(io);
+        return .{ .objects = objects, .mutex = mutex, .held = true };
+    }
+
+    /// Releases the captured mutex with the caller's still-live Io provider.
+    pub fn unlock(self: *ObjectGuard, io: std.Io) void {
+        std.debug.assert(self.held);
+        self.held = false;
+        self.mutex.unlock(io);
+    }
+
+    /// Programmer precondition: this uncopied guard holds this list's mutex.
+    pub fn assertOwns(self: *const ObjectGuard, objects: *const ObjectList) void {
+        std.debug.assert(self.held);
+        std.debug.assert(self.objects == objects);
+        std.debug.assert(self.mutex == objects.mutex);
+    }
+};
+
+/// Runs once on the retiring thread with the object guard held. Context points
+/// to the initialized arena owner and stays valid through the callback. It may
+/// release dependencies with this guard, but must not acquire the mutex again,
+/// run user callbacks, or reclaim arena/index storage.
+pub const DestroyFn = *const fn (
+    context: *anyopaque,
+    guard: *const ObjectGuard,
+    io: std.Io,
+    reason: DestroyReason,
+) void;
+
+/// Removes weak membership before payload retirement, under the same guard.
+/// Context/index/key storage must survive the call. The callback must not
+/// allocate, run user callbacks, or retire this object recursively.
+pub const CacheRemoveFn = *const fn (
+    context: *anyopaque,
+    guard: *const ObjectGuard,
+    object: *Object,
+) void;
+
+/// The sole reference authority and canonical identity of an arena object.
+///
+/// All payload/header access takes ObjectGuard except the immutable `tracking`
+/// locator, which can locate a bound high owner before a host operation pin.
+/// Total includes user aliases; leases equal total minus user. A retained dead
+/// header remains linked, but `isAlive` excludes it. Labels survive retirement.
 pub const Object = struct {
     kind: handle.Handle.Kind,
     state: State,
     reference_count: u32,
+    user_reference_count: u32,
     last_error: ?errors.ValidationError,
-    /// The label the caller gave the object. Dawn allocates an `ObjectLabel` on
-    /// first write (`src/dawn/native/ObjectBase.cpp:190`); the arena copies the
-    /// bytes once, at creation.
     label: []const u8,
     tracking: *ObjectList,
     node: ListNode = .{},
     destroy_callback: DestroyFn,
     context: *anyopaque,
+    /// Paired weak membership; null means no cache hook.
+    cache_context: ?*anyopaque = null,
+    remove_from_cache: ?CacheRemoveFn = null,
+    /// Once an additional reference escaped, construction rollback is invalid.
+    reference_escaped: bool = false,
 
-    /// Adds the object to the list that owns it. The caller runs this after it
-    /// has written every field of the object that follows its `header`.
-    ///
-    /// This is `ApiObjectList::Track` (`src/dawn/native/ObjectBase.cpp:109-115`)
-    /// at the point Dawn reaches for it: in the constructor body, once the
-    /// members exist. A list that is already destroyed takes the object in and
-    /// destroys it on this call, so the teardown reads bytes the caller wrote
-    /// and not arena fill. `ObjectArena.create` must not call it, because at
-    /// that point the caller has written nothing.
-    pub fn attach(self: *Object) void {
-        self.tracking.track(self);
+    /// Publishes a fully initialized payload. A retired list retires it at once
+    /// but preserves its initial reference and host identity for late release.
+    pub fn attach(self: *Object, guard: *const ObjectGuard, io: std.Io) void {
+        self.tracking.track(guard, io, self);
     }
 
-    /// The object is alive while the tracking list still holds it. Dawn's
-    /// `IsAlive` reads the same link state
-    /// (`src/dawn/native/ObjectBase.cpp:229-231`).
-    pub fn isAlive(self: *const Object) bool {
-        return self.node.linked;
+    /// Core liveness includes linked error objects, not only native-usable ones.
+    pub fn isAlive(self: *const Object, guard: *const ObjectGuard) bool {
+        guard.assertOwns(self.tracking);
+        return self.node.linked and (self.state == .alive or self.state == .failed);
     }
 
-    /// The object has finished being made. Dawn asserts the error state is set
-    /// once and only once (`src/dawn/native/ObjectBase.cpp:84-92`).
-    pub fn isInitialized(self: *const Object) bool {
+    /// Whether initialization finished, including failure and retirement.
+    pub fn isInitialized(self: *const Object, guard: *const ObjectGuard) bool {
+        guard.assertOwns(self.tracking);
         return self.state != .initializing;
     }
 
-    /// The object is initialized and the call that made it failed.
-    pub fn isFailed(self: *const Object) bool {
+    /// Whether the initialized object carries a validation failure.
+    pub fn isFailed(self: *const Object, guard: *const ObjectGuard) bool {
+        guard.assertOwns(self.tracking);
         return self.state == .failed;
     }
 
-    pub fn setInitializedNoError(self: *Object) void {
+    /// Completes initialization successfully, exactly once.
+    pub fn setInitializedNoError(self: *Object, guard: *const ObjectGuard) void {
+        guard.assertOwns(self.tracking);
         std.debug.assert(self.state == .initializing);
         std.debug.assert(self.last_error == null);
         self.state = .alive;
     }
 
-    pub fn setInitializedError(self: *Object, rule: errors.ValidationError) void {
+    /// Completes initialization with an owned diagnostic/error object.
+    pub fn setInitializedError(
+        self: *Object,
+        guard: *const ObjectGuard,
+        rule: errors.ValidationError,
+    ) void {
+        guard.assertOwns(self.tracking);
         std.debug.assert(self.state == .initializing);
         self.state = .failed;
         self.last_error = rule;
     }
 
-    pub fn retain(self: *Object) void {
-        std.debug.assert(self.reference_count != 0);
-        self.reference_count += 1;
+    /// Copies an already-owned user alias, even after payload retirement.
+    /// It never obtains the first user reference from an internal lease.
+    pub fn retainUserLocked(self: *Object, guard: *const ObjectGuard) ReferenceError!void {
+        try self.checkReferenceOwner(guard);
+        if (self.user_reference_count == 0) return error.NoOwnedReference;
+        try self.incrementReference(.user);
     }
 
-    /// Hands the object back to the arena when the last reference goes.
-    ///
-    /// The block stays in the arena, so a handle taken before this call reads
-    /// memory the arena still owns and finds `destroyed`. That is what makes a
-    /// stale handle a validation error and not undefined behaviour
-    /// (`docs/30-port-design.md` §1.1).
-    pub fn release(self: *Object) void {
+    /// Acquires a new owned cache/factory alias to a live payload. Unlike user
+    /// retain, this accepts a lease-only object, but never a retired payload.
+    pub fn acquireUserLocked(self: *Object, guard: *const ObjectGuard) ReferenceError!void {
+        try self.checkReferenceOwner(guard);
+        if (!self.isAlive(guard)) return error.ResourceDestroyed;
+        try self.incrementReference(.user);
+    }
+
+    /// Owns an internal lifetime lease to a live core payload. Native callers
+    /// must additionally require `.alive` before reading native payload fields.
+    pub fn retainLeaseLocked(self: *Object, guard: *const ObjectGuard) ReferenceError!void {
+        try self.checkReferenceOwner(guard);
+        if (!self.isAlive(guard)) return error.ResourceDestroyed;
+        try self.incrementReference(.lease);
+    }
+
+    /// Consumes one user alias without dependent/pending-work refusal. Retired
+    /// aliases use the same ledger and never run the payload destructor twice.
+    pub fn releaseUserLocked(
+        self: *Object,
+        guard: *const ObjectGuard,
+        io: std.Io,
+    ) ReferenceError!void {
+        try self.checkReferenceOwner(guard);
+        if (self.user_reference_count == 0) return error.NoOwnedReference;
+        std.debug.assert(self.node.linked or self.state == .destroyed);
+        self.user_reference_count -= 1;
+        self.tracking.user_reference_count -= 1;
+        self.releaseReference(guard, io);
+    }
+
+    /// Consumes an internal lease. A matching lease is a programmer invariant.
+    pub fn releaseLeaseLocked(self: *Object, guard: *const ObjectGuard, io: std.Io) void {
+        guard.assertOwns(self.tracking);
+        self.assertReferences();
+        std.debug.assert(self.reference_count > self.user_reference_count);
+        std.debug.assert(self.node.linked or self.state == .destroyed);
+        self.releaseReference(guard, io);
+    }
+
+    /// Binds one weak removal hook while its key-bearing payload is live.
+    pub fn setCacheRemovalLocked(
+        self: *Object,
+        guard: *const ObjectGuard,
+        context: *anyopaque,
+        callback: CacheRemoveFn,
+    ) void {
+        guard.assertOwns(self.tracking);
+        std.debug.assert(self.isAlive(guard));
+        std.debug.assert(self.remove_from_cache == null);
+        std.debug.assert(self.cache_context == null);
+        self.cache_context = context;
+        self.remove_from_cache = callback;
+    }
+
+    /// Retires once, evicting weak membership before the payload callback.
+    /// Counts remain authoritative. Zero-count unlink is deferred only during
+    /// the list's bounded retirement sweep.
+    pub fn retirePayloadLocked(
+        self: *Object,
+        guard: *const ObjectGuard,
+        io: std.Io,
+        reason: DestroyReason,
+    ) void {
+        guard.assertOwns(self.tracking);
+        self.assertReferences();
+        if (self.state != .destroyed) {
+            std.debug.assert(self.node.linked);
+            std.debug.assert(self.state != .initializing);
+            const remove = self.remove_from_cache;
+            const cache_context = self.cache_context;
+            std.debug.assert((remove == null) == (cache_context == null));
+            self.remove_from_cache = null;
+            self.cache_context = null;
+            if (remove) |callback| callback(cache_context.?, guard, self);
+            self.state = .destroyed;
+            self.destroy_callback(self.context, guard, io, reason);
+        }
+        self.finalizeZero(guard);
+    }
+
+    /// Construction rollback only. Caller first cleans initialized temporaries.
+    /// Rejects publication, cache membership, or escaped refs unchanged; success
+    /// consumes the initial ref without reading uninitialized payload fields.
+    pub fn discardUnpublishedLocked(
+        self: *Object,
+        guard: *const ObjectGuard,
+    ) error{ResourceInUse}!void {
+        guard.assertOwns(self.tracking);
+        self.assertReferences();
+        if (self.node.linked or self.reference_escaped) return error.ResourceInUse;
+        if (self.remove_from_cache != null or self.cache_context != null) {
+            return error.ResourceInUse;
+        }
+        if (self.reference_count != 1 or self.state == .destroyed) {
+            return error.ResourceInUse;
+        }
+        self.tracking.total_reference_count -= 1;
+        self.tracking.user_reference_count -= self.user_reference_count;
+        self.reference_count = 0;
+        self.user_reference_count = 0;
+        self.state = .destroyed;
+    }
+
+    fn checkReferenceOwner(self: *const Object, guard: *const ObjectGuard) ReferenceError!void {
+        std.debug.assert(guard.held);
+        if (guard.objects != self.tracking) return error.ResourceDeviceMismatch;
+        guard.assertOwns(self.tracking);
+        self.assertReferences();
+    }
+
+    fn assertReferences(self: *const Object) void {
+        std.debug.assert(self.user_reference_count <= self.reference_count);
+        std.debug.assert(self.tracking.user_reference_count <= self.tracking.total_reference_count);
+    }
+
+    fn incrementReference(self: *Object, class: ReferenceClass) ReferenceError!void {
+        std.debug.assert(self.reference_count != 0);
+        if (self.reference_count == std.math.maxInt(u32)) return error.ReferenceCountOverflow;
+        if (self.tracking.total_reference_count == std.math.maxInt(u64)) {
+            return error.ReferenceCountOverflow;
+        }
+        if (class == .user) {
+            if (self.user_reference_count == std.math.maxInt(u32)) {
+                return error.ReferenceCountOverflow;
+            }
+            if (self.tracking.user_reference_count == std.math.maxInt(u64)) {
+                return error.ReferenceCountOverflow;
+            }
+        }
+        self.reference_count += 1;
+        self.tracking.total_reference_count += 1;
+        if (class == .user) {
+            self.user_reference_count += 1;
+            self.tracking.user_reference_count += 1;
+        }
+        self.reference_escaped = true;
+        self.assertReferences();
+    }
+
+    fn releaseReference(self: *Object, guard: *const ObjectGuard, io: std.Io) void {
         std.debug.assert(self.reference_count != 0);
         self.reference_count -= 1;
-        if (self.reference_count != 0) return;
-        self.destroy(.last_reference_released);
+        self.tracking.total_reference_count -= 1;
+        if (self.reference_count == 0) {
+            self.retirePayloadLocked(guard, io, .last_reference_released);
+        }
+        self.assertReferences();
     }
 
-    /// Marks the object destroyed and runs the back end's teardown. A second
-    /// call does nothing, because the first call untracked the object.
-    pub fn destroy(self: *Object, reason: DestroyReason) void {
-        if (!self.tracking.untrack(self)) return;
-        self.state = .destroyed;
-        self.destroy_callback(self.context, reason);
+    fn finalizeZero(self: *Object, guard: *const ObjectGuard) void {
+        if (self.reference_count != 0) return;
+        std.debug.assert(self.user_reference_count == 0);
+        if (!self.tracking.payload_retirement_active) self.tracking.unlink(guard, self);
     }
 };
 
-// A handle names an `Object`, and `Handle.ptr` carries
-// `handle.object_alignment` because every arena object starts with this
-// header. The two must agree or the cast in `Device.resolveHeader` would
-// assert on every object, so the relationship is stated here where the header
-// is defined rather than assumed by the reader of the handle. Zig will not
-// attach a doc comment to a `comptime` block, so this one says why in a line
-// comment.
 comptime {
     if (@alignOf(Object) > handle.object_alignment) {
         @compileError("Handle.ptr is under-aligned for an Object header");
     }
 }
 
-/// The two links Dawn's `LinkNode<ApiObjectBase>`
-/// (`src/dawn/native/ObjectBase.h:147`) carries.
+/// One intrusive link per canonical header; no second retained-header list.
 pub const ListNode = struct {
     previous: ?*Object = null,
     next: ?*Object = null,
     linked: bool = false,
 };
 
-/// Every live object of one device. Dawn's `ApiObjectList`
-/// (`src/dawn/native/ObjectBase.h:119-145`).
-///
-/// The list is not locked. Dawn locks it with a `MutexProtected`
-/// (`src/dawn/native/ObjectBase.h:144`); the arena takes the device mutex at
-/// the milestone that adds threads, and nothing above `core` touches the list
-/// without that mutex.
+/// Retained canonical headers in newest-first order, sharing one owner mutex.
+/// Aggregate reference counts are derived from headers, including unpublished
+/// initial refs. They permit finite preflight without another allocation/list.
+/// The mutex and once-bound `high_owner` are immutable until final reclamation.
 pub const ObjectList = struct {
+    mutex: *std.Io.Mutex,
     head: ?*Object = null,
     tail: ?*Object = null,
     tracked_count: usize = 0,
     marked_destroyed: bool = false,
+    payload_retirement_active: bool = false,
+    total_reference_count: u64 = 0,
+    user_reference_count: u64 = 0,
+    /// Null for standalone core; otherwise the stable canonical high owner.
+    high_owner: ?*anyopaque = null,
 
-    /// Adds the object. A list that is already destroyed takes the object in
-    /// and destroys it at once, so an object never escapes a dead list alive
-    /// (`src/dawn/native/ObjectBase.cpp:109-115`).
-    pub fn track(self: *ObjectList, object: *Object) void {
-        if (self.marked_destroyed) {
-            object.state = .destroyed;
-            object.destroy_callback(object.context, .early_destroy);
-            return;
-        }
-
-        object.node = .{
-            .previous = null,
-            .next = self.head,
-            .linked = true,
-        };
+    /// Attaches once after all payload fields are written. A retired list may
+    /// receive an already-created object; it retires the payload immediately.
+    pub fn track(
+        self: *ObjectList,
+        guard: *const ObjectGuard,
+        io: std.Io,
+        object: *Object,
+    ) void {
+        guard.assertOwns(self);
+        std.debug.assert(object.tracking == self);
+        std.debug.assert(!object.node.linked);
+        std.debug.assert(object.reference_count != 0);
+        std.debug.assert(object.state == .alive or object.state == .failed);
+        object.node = .{ .next = self.head, .linked = true };
         if (self.head) |head| {
             head.node.previous = object;
         } else {
@@ -202,14 +387,15 @@ pub const ObjectList = struct {
         }
         self.head = object;
         self.tracked_count += 1;
+        if (self.marked_destroyed) object.retirePayloadLocked(guard, io, .early_destroy);
     }
 
-    /// Removes the object. The result is true when the list held it, which is
-    /// what makes a second destroy a no-op (`src/dawn/native/ObjectBase.cpp:251`).
-    pub fn untrack(self: *ObjectList, object: *Object) bool {
-        if (!object.node.linked) return false;
+    fn unlink(self: *ObjectList, guard: *const ObjectGuard, object: *Object) void {
+        guard.assertOwns(self);
         std.debug.assert(object.tracking == self);
-
+        std.debug.assert(object.reference_count == 0);
+        std.debug.assert(object.state == .destroyed);
+        if (!object.node.linked) return;
         if (object.node.previous) |previous| {
             previous.node.next = object.node.next;
         } else {
@@ -224,57 +410,74 @@ pub const ObjectList = struct {
         }
         object.node = .{};
         self.tracked_count -= 1;
-        return true;
     }
 
-    /// Destroys every object the list holds and marks the list destroyed.
-    ///
-    /// Dawn takes the list under a lock and unlinks each object before it runs
-    /// the back end (`src/dawn/native/ObjectBase.cpp:121-148`). The port walks
-    /// the same order without the lock.
-    pub fn destroy(self: *ObjectList, reason: DestroyReason) void {
+    /// Retires newest-first in two bounded passes. Dependency final releases
+    /// cannot unlink nodes while the first pass follows them. The second pass
+    /// unlinks zero ledgers only, leaving retained destroyed headers in place.
+    pub fn retirePayloadsLocked(
+        self: *ObjectList,
+        guard: *const ObjectGuard,
+        io: std.Io,
+        reason: DestroyReason,
+    ) void {
+        guard.assertOwns(self);
+        std.debug.assert(!self.payload_retirement_active);
         self.marked_destroyed = true;
-        // The bound is read before the first destroy, so a `destroy_callback`
-        // that creates an object cannot extend the loop: `track` sees
-        // `marked_destroyed` and destroys the newcomer at once.
+        self.payload_retirement_active = true;
         const bound = self.tracked_count;
+        var next = self.head;
         for (0..bound) |_| {
-            const object = self.tail orelse break;
-            object.destroy(reason);
+            const current = next orelse break;
+            next = current.node.next;
+            current.retirePayloadLocked(guard, io, reason);
         }
-        std.debug.assert(self.tracked_count == 0);
+        self.payload_retirement_active = false;
+        next = self.head;
+        const unlink_bound = self.tracked_count;
+        for (0..unlink_bound) |_| {
+            const current = next orelse break;
+            next = current.node.next;
+            if (current.reference_count == 0) self.unlink(guard, current);
+        }
     }
 
-    /// Calls `visit_callback` for every object, newest first.
-    ///
-    /// Dawn's `ApiObjectList::ForEach`
-    /// (`src/dawn/native/ObjectBase.h:130-138`) is a template, so the port
-    /// takes a function pointer and its context.
+    /// Visits retained headers newest-first under the guard. The calling-thread
+    /// callback borrows context/object/guard until return and must not change
+    /// list topology, acquire the same mutex, or run user callbacks.
     pub fn forEach(
         self: *const ObjectList,
+        guard: *const ObjectGuard,
         context: *anyopaque,
-        visit_callback: *const fn (context: *anyopaque, object: *Object) void,
+        visit_callback: *const fn (*anyopaque, *const ObjectGuard, *Object) void,
     ) void {
+        guard.assertOwns(self);
         const bound = self.tracked_count;
-        var index: usize = 0;
-        var object = self.head;
-        while (index < bound) : (index += 1) {
-            const current = object orelse break;
-            visit_callback(context, current);
-            object = current.node.next;
+        var next = self.head;
+        for (0..bound) |_| {
+            const current = next orelse break;
+            next = current.node.next;
+            visit_callback(context, guard, current);
         }
+    }
+
+    /// Refuses any user or internal owner, including an unpublished creator.
+    /// Nothing is retired, unlinked, or reset on refusal.
+    pub fn preflightDeinitLocked(
+        self: *const ObjectList,
+        guard: *const ObjectGuard,
+    ) error{ResourceInUse}!void {
+        guard.assertOwns(self);
+        if (self.user_reference_count != 0 or self.total_reference_count != 0) {
+            return error.ResourceInUse;
+        }
+        if (self.payload_retirement_active) return error.ResourceInUse;
+        std.debug.assert(self.tracked_count == 0);
+        std.debug.assert(self.head == null);
+        std.debug.assert(self.tail == null);
     }
 };
 
-/// The contract `ObjectArena.create` relies on. A type that breaks it is a
-/// compile error here and not a bad cast later.
-///
-/// `destroy` has to be public because `destroyTrampoline` calls it from this
-/// module. Zig privacy is module-scoped and `@hasDecl` reports only what the
-/// calling module can see, so a `destroy` private to the object's own module
-/// is invisible here and is unreachable from the trampoline that must run it.
-/// A type the arena reclaims in one block writes an empty `destroy` and says
-/// in a comment that there is nothing left to drop.
 fn assertHeader(comptime T: type) void {
     const info = @typeInfo(T);
     if (info != .@"struct") @compileError("an arena object must be a struct");
@@ -287,268 +490,681 @@ fn assertHeader(comptime T: type) void {
         @compileError("the header field of an arena object must be an Object");
     }
     if (!@hasDecl(T, "destroy")) {
-        @compileError("an arena object must implement destroy as a public method");
+        @compileError("arena objects require pub fn destroy(self, guard, io, reason) void");
     }
 }
 
-/// What `ObjectArena.create` needs. The type parameter is the object type, so
-/// the options carry no field the caller could get wrong.
+/// Header initialization. Ownership class is required; default state assumes a
+/// successfully initialized payload that the caller will write before attach.
 pub fn CreateOptions(comptime T: type) type {
     assertHeader(T);
     return struct {
         kind: handle.Handle.Kind,
-        /// The header starts in `alive` unless the caller says otherwise, so a
-        /// rule that cannot fail does not have to write a state.
+        initial_reference: ReferenceClass,
         state: State = .alive,
         label: []const u8 = "",
     };
 }
 
-/// The device's object heap.
-///
-/// One arena per device, `docs/10-architecture.md` "Object model". Nothing is
-/// freed here before `deinit`.
+/// One arena for all device headers and payload storage. Move only before first
+/// creation or publication of a borrow. Its child allocator/mutex remain live
+/// through zero-reference deinit. Storage grows with historical allocations;
+/// final individual release does not reclaim arena bytes.
 pub const ObjectArena = struct {
     memory: std.heap.ArenaAllocator,
     objects: ObjectList,
 
-    pub fn init(child_allocator: std.mem.Allocator) ObjectArena {
+    pub const InitOptions = struct {
+        object_mutex: *std.Io.Mutex,
+    };
+
+    /// Allocation-free initialization; captures no pointer into the returned value.
+    pub fn init(child_allocator: std.mem.Allocator, options: InitOptions) ObjectArena {
         return .{
             .memory = std.heap.ArenaAllocator.init(child_allocator),
-            .objects = .{},
+            .objects = .{ .mutex = options.object_mutex },
         };
     }
 
-    pub fn allocator(self: *ObjectArena) std.mem.Allocator {
+    /// Borrows the arena allocator; its backing storage dies at final deinit.
+    pub fn allocator(self: *ObjectArena, guard: *const ObjectGuard) std.mem.Allocator {
+        guard.assertOwns(&self.objects);
         return self.memory.allocator();
     }
 
-    /// The list of live objects. Every `Object` stores a pointer to this list,
-    /// so a module that checks ownership compares against this and does not
-    /// reach into `objects`.
+    /// Immutable lock/owner locator, valid only at the arena's final address.
     pub fn objectList(self: *ObjectArena) *ObjectList {
         return &self.objects;
     }
 
-    /// Allocates one object, writes its header and returns it untracked.
-    ///
-    /// **The contract.** `create` returns an object the tracking list does not
-    /// hold. The caller writes the bytes of `T` after its `header` — they are
-    /// undefined until it does, and `std.debug` fills them with `0xaa` in a
-    /// Debug build, so a caller that reads one has a loud defect and not a
-    /// quiet one — and then calls `Object.attach`. `attach` is the only thing
-    /// that tracks, so only an attached object is alive, counted by
-    /// `queryTrackedCount`, visited by `ObjectList.forEach` and torn down by
-    /// `deinit`.
-    ///
-    /// The order is the whole contract because `ObjectList.track` destroys an
-    /// object that arrives after the list is gone
-    /// (`src/dawn/native/ObjectBase.cpp:110-113`), and a teardown reads fields
-    /// the caller has not written. Dawn never runs that destroy on an unwritten
-    /// object: its constructors call `GetObjectTrackingList()->Track(this)` in
-    /// the constructor body, after the member initialiser list has filled
-    /// every member (`src/dawn/native/Buffer.cpp:505-507`), so `DestroyImpl`
-    /// reads initialised bytes. The arena has no member initialiser list to run
-    /// and the caller owns every field after the header, so the port splits
-    /// the two steps rather than guess the order.
-    ///
-    /// An object the caller never attaches keeps its block and never runs its
-    /// teardown: `deinit` reclaims the arena, and the list never held it.
+    /// Checks storage allocator identity before allocation or factory mutation.
+    pub fn checkAllocator(
+        self: *const ObjectArena,
+        guard: *const ObjectGuard,
+        child_allocator: std.mem.Allocator,
+    ) error{AllocatorMismatch}!void {
+        guard.assertOwns(&self.objects);
+        const owner = self.memory.child_allocator;
+        if (owner.ptr != child_allocator.ptr or owner.vtable != child_allocator.vtable) {
+            return error.AllocatorMismatch;
+        }
+    }
+
+    /// Allocates only the header/label and returns one unpublished initial ref.
+    /// Write every payload field, then attach. On later constructor failure,
+    /// clean initialized temporaries and discardUnpublishedLocked; never invoke
+    /// the destructor on unwritten fields. Refuses factories after retirement.
+    /// Count saturation refuses before any arena allocation or label copy.
     pub fn create(
         self: *ObjectArena,
+        child_allocator: std.mem.Allocator,
+        guard: *const ObjectGuard,
         comptime T: type,
         options: CreateOptions(T),
-    ) std.mem.Allocator.Error!*T {
+    ) CreateError!*T {
+        try self.checkAllocator(guard, child_allocator);
+        if (self.objects.marked_destroyed) return error.ResourceDestroyed;
+        std.debug.assert(options.state != .destroyed);
+        if (self.objects.total_reference_count == std.math.maxInt(u64)) {
+            return error.ReferenceCountOverflow;
+        }
+        if (options.initial_reference == .user) {
+            if (self.objects.user_reference_count == std.math.maxInt(u64)) {
+                return error.ReferenceCountOverflow;
+            }
+        }
         const arena_allocator = self.memory.allocator();
-
         const object = try arena_allocator.create(T);
         errdefer arena_allocator.destroy(object);
-
         const label = try arena_allocator.dupe(u8, options.label);
         errdefer arena_allocator.free(label);
-
+        const user_count: u32 = if (options.initial_reference == .user) 1 else 0;
         object.header = .{
             .kind = options.kind,
             .state = options.state,
             .reference_count = 1,
+            .user_reference_count = user_count,
             .last_error = null,
             .label = label,
             .tracking = &self.objects,
             .destroy_callback = destroyTrampoline(T),
             .context = object,
         };
+        self.objects.total_reference_count += 1;
+        self.objects.user_reference_count += user_count;
         return object;
     }
 
-    /// The bytes the arena holds right now.
-    ///
-    /// `deinit` poisons the receiver, so a read of this after it is a read of
-    /// poison. Where the blocks went is asked of the child allocator, which is
-    /// the ledger that outlives the arena: `test/object_arena.zig` hands the
-    /// device a child of its own and asserts that child reports no leak.
-    pub fn queryCapacity(self: *const ObjectArena) usize {
+    /// Committed arena bytes, not the number of live native payload bytes.
+    pub fn queryCapacity(self: *const ObjectArena, guard: *const ObjectGuard) usize {
+        guard.assertOwns(&self.objects);
         return self.memory.queryCapacity();
     }
 
-    /// The number of objects the arena still holds alive.
-    pub fn queryTrackedCount(self: *const ObjectArena) usize {
+    /// Retained linked headers, including payload-retired aliases.
+    pub fn queryTrackedCount(self: *const ObjectArena, guard: *const ObjectGuard) usize {
+        guard.assertOwns(&self.objects);
         return self.objects.tracked_count;
     }
 
-    /// Destroys every object and reclaims every block.
-    ///
-    /// After this a handle taken before it dangles and the receiver is poison.
-    /// That is the one case `docs/30-port-design.md` §1.1 says the model does
-    /// not cover.
-    pub fn deinit(self: *ObjectArena) void {
-        self.objects.destroy(.early_destroy);
-        // `free_all` always succeeds (`lib/std/heap/ArenaAllocator.zig:111`), and
-        // it is what nulls both node lists, so the capacity is zero from here to
-        // the poison line.
-        std.debug.assert(self.memory.reset(.free_all));
-        // Every block is back with the child allocator and nothing reads this
-        // value again, so the receiver is poison rather than a half-reset arena
-        // whose zero capacity is the only record of the reclamation.
+    /// Reclaims storage only with zero refs and matching allocator. Refusal is
+    /// unchanged; success invalidates every header and poisons this receiver.
+    /// The separately captured guard mutex remains available for unlock.
+    pub fn deinit(
+        self: *ObjectArena,
+        child_allocator: std.mem.Allocator,
+        guard: *const ObjectGuard,
+    ) LifetimeError!void {
+        try self.checkAllocator(guard, child_allocator);
+        try self.objects.preflightDeinitLocked(guard);
+        self.memory.deinit();
         self.* = undefined;
     }
 };
 
-/// The teardown of one object type. Zig has no virtual function, so the header
-/// carries the function that fills the slot Dawn declares pure virtual at
-/// `src/dawn/native/ObjectBase.h:200`.
 fn destroyTrampoline(comptime T: type) DestroyFn {
     const trampoline = struct {
-        fn run(context: *anyopaque, reason: DestroyReason) void {
-            ownerFrom(T, context).destroy(reason);
+        fn run(
+            context: *anyopaque,
+            guard: *const ObjectGuard,
+            io: std.Io,
+            reason: DestroyReason,
+        ) void {
+            const owner: *T = @ptrCast(@alignCast(context));
+            owner.destroy(guard, io, reason);
         }
     };
     return &trampoline.run;
 }
 
-/// The owner behind a header pointer. The trampoline above cannot name `T` in
-/// its own scope, because the type only reaches it through the nested
-/// function, so the cast lives here where `T` is a parameter.
-fn ownerFrom(comptime T: type, context: *anyopaque) *T {
-    const header: *Object = @ptrCast(@alignCast(context));
-    return @fieldParentPtr("header", header);
-}
+const LifetimeLog = struct {
+    destroyed: [8]u8 = @splat(0),
+    order: [8]u8 = @splat(0),
+    count: usize = 0,
+    cache_present: bool = false,
+    eviction_count: u8 = 0,
+    deferred_zero_links: u8 = 0,
+};
 
-const Counting = struct {
-    early_destroy_count: u64 = 0,
-    last_reference_released_count: u64 = 0,
+const LifetimeProbe = struct {
+    header: Object,
+    log: *LifetimeLog,
+    id: u8,
+    dependency: ?*Object,
 
-    fn total(self: *const Counting) u64 {
-        return self.early_destroy_count + self.last_reference_released_count;
+    pub fn destroy(
+        self: *LifetimeProbe,
+        guard: *const ObjectGuard,
+        io: std.Io,
+        reason: DestroyReason,
+    ) void {
+        _ = reason;
+        guard.assertOwns(self.header.tracking);
+        std.debug.assert(!self.log.cache_present);
+        self.log.destroyed[self.id] += 1;
+        self.log.order[self.log.count] = self.id;
+        self.log.count += 1;
+        if (self.dependency) |dependency| {
+            dependency.releaseLeaseLocked(guard, io);
+            if (self.header.tracking.payload_retirement_active) {
+                if (dependency.reference_count == 0 and dependency.node.linked) {
+                    self.log.deferred_zero_links += 1;
+                }
+            }
+        }
+        self.dependency = null;
     }
 };
 
-/// An arena object whose teardown only counts, because it owns nothing. Its
-/// `destroy` is public because the arena calls it from `destroyTrampoline`.
-const Probe = struct {
-    header: Object,
-    log: *Counting,
+fn lifetimeProbe(
+    arena: *ObjectArena,
+    guard: *const ObjectGuard,
+    log: *LifetimeLog,
+    id: u8,
+    initial_reference: ReferenceClass,
+) !*LifetimeProbe {
+    const probe = try arena.create(std.testing.allocator, guard, LifetimeProbe, .{
+        .kind = .buffer,
+        .initial_reference = initial_reference,
+    });
+    probe.log = log;
+    probe.id = id;
+    probe.dependency = null;
+    probe.header.attach(guard, std.testing.io);
+    return probe;
+}
 
-    pub fn destroy(self: *Probe, reason: DestroyReason) void {
-        switch (reason) {
-            .early_destroy => self.log.early_destroy_count += 1,
-            .last_reference_released => self.log.last_reference_released_count += 1,
+fn lifetimeEvict(context: *anyopaque, guard: *const ObjectGuard, header: *Object) void {
+    const log: *LifetimeLog = @ptrCast(@alignCast(context));
+    guard.assertOwns(header.tracking);
+    std.debug.assert(header.state == .alive);
+    std.debug.assert(log.cache_present);
+    log.cache_present = false;
+    log.eviction_count += 1;
+}
+
+test "user release leaves an internal lease alive until its final release" {
+    // A dependency is an owner, not an extra public alias.
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+    try probe.header.retainLeaseLocked(&guard);
+    try probe.header.releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u32, 1), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 0), probe.header.user_reference_count);
+    try std.testing.expect(probe.header.isAlive(&guard));
+    try std.testing.expectEqual(@as(usize, 0), log.count);
+    probe.header.releaseLeaseLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
+    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount(&guard));
+}
+
+test "object reference saturation accepts the last slot and refuses every retain atomically" {
+    // Use real linked payloads and restore synthetic counters before normal release.
+    inline for (.{
+        .{ .retain = Object.retainUserLocked, .class = ReferenceClass.user },
+        .{ .retain = Object.acquireUserLocked, .class = ReferenceClass.user },
+        .{ .retain = Object.retainLeaseLocked, .class = ReferenceClass.lease },
+    }) |operation| {
+        var mutex: std.Io.Mutex = .init;
+        var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+        var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+        defer guard.unlock(std.testing.io);
+        defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+        var log: LifetimeLog = .{ .cache_present = true };
+        const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+        probe.header.setCacheRemovalLocked(&guard, &log, lifetimeEvict);
+        defer {
+            probe.header.reference_count = 1;
+            probe.header.user_reference_count = 1;
+            arena.objects.total_reference_count = 1;
+            arena.objects.user_reference_count = 1;
+            probe.header.releaseUserLocked(&guard, std.testing.io) catch
+                @panic("owned reference lost");
+        }
+        const user_increment: u32 = if (operation.class == .user) 1 else 0;
+        probe.header.reference_count = std.math.maxInt(u32) - 1;
+        probe.header.user_reference_count = std.math.maxInt(u32) - 1;
+        arena.objects.total_reference_count = std.math.maxInt(u32) - 1;
+        arena.objects.user_reference_count = std.math.maxInt(u32) - 1;
+        try operation.retain(&probe.header, &guard);
+        try std.testing.expectEqual(std.math.maxInt(u32), probe.header.reference_count);
+        const expected_users = std.math.maxInt(u32) - 1 + user_increment;
+        try std.testing.expectEqual(expected_users, probe.header.user_reference_count);
+        try std.testing.expectEqual(
+            @as(u64, std.math.maxInt(u32)),
+            arena.objects.total_reference_count,
+        );
+        try std.testing.expectEqual(@as(u64, expected_users), arena.objects.user_reference_count);
+        const header_before = probe.header;
+        const list_before = arena.objects;
+        try std.testing.expectError(
+            error.ReferenceCountOverflow,
+            probe.header.retainUserLocked(&guard),
+        );
+        try std.testing.expectError(
+            error.ReferenceCountOverflow,
+            probe.header.acquireUserLocked(&guard),
+        );
+        try std.testing.expectError(
+            error.ReferenceCountOverflow,
+            probe.header.retainLeaseLocked(&guard),
+        );
+        try std.testing.expect(std.meta.eql(header_before, probe.header));
+        try std.testing.expect(std.meta.eql(list_before, arena.objects));
+        try std.testing.expect(log.cache_present);
+        try std.testing.expectEqual(@as(u8, 0), log.eviction_count);
+        try std.testing.expectEqual(@as(usize, 0), log.count);
+    }
+}
+
+test "aggregate reference saturation preflights aliases and leases before mutation" {
+    // Aggregate headroom belongs to the existing list, not a cache-specific ledger.
+    inline for (.{
+        .{ .retain = Object.retainUserLocked, .class = ReferenceClass.user },
+        .{ .retain = Object.acquireUserLocked, .class = ReferenceClass.user },
+        .{ .retain = Object.retainLeaseLocked, .class = ReferenceClass.lease },
+    }) |operation| {
+        var mutex: std.Io.Mutex = .init;
+        var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+        var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+        defer guard.unlock(std.testing.io);
+        defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+        var log: LifetimeLog = .{ .cache_present = true };
+        const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+        probe.header.setCacheRemovalLocked(&guard, &log, lifetimeEvict);
+        defer {
+            probe.header.reference_count = 1;
+            probe.header.user_reference_count = 1;
+            arena.objects.total_reference_count = 1;
+            arena.objects.user_reference_count = 1;
+            probe.header.releaseUserLocked(&guard, std.testing.io) catch
+                @panic("owned reference lost");
+        }
+        inline for (.{ @as(u64, 1), std.math.maxInt(u64) }) |users| {
+            arena.objects.total_reference_count = std.math.maxInt(u64);
+            arena.objects.user_reference_count = users;
+            const header_before = probe.header;
+            const list_before = arena.objects;
+            try std.testing.expectError(
+                error.ReferenceCountOverflow,
+                operation.retain(&probe.header, &guard),
+            );
+            try std.testing.expect(std.meta.eql(header_before, probe.header));
+            try std.testing.expect(std.meta.eql(list_before, arena.objects));
+        }
+        arena.objects.total_reference_count = std.math.maxInt(u64) - 1;
+        arena.objects.user_reference_count = std.math.maxInt(u64) - 1;
+        try operation.retain(&probe.header, &guard);
+        const user_increment: u64 = if (operation.class == .user) 1 else 0;
+        try std.testing.expectEqual(@as(u32, 2), probe.header.reference_count);
+        try std.testing.expectEqual(
+            @as(u32, 1) + @as(u32, @intCast(user_increment)),
+            probe.header.user_reference_count,
+        );
+        try std.testing.expectEqual(
+            std.math.maxInt(u64),
+            arena.objects.total_reference_count,
+        );
+        try std.testing.expectEqual(
+            std.math.maxInt(u64) - 1 + user_increment,
+            arena.objects.user_reference_count,
+        );
+        const header_before = probe.header;
+        const list_before = arena.objects;
+        try std.testing.expectError(
+            error.ReferenceCountOverflow,
+            operation.retain(&probe.header, &guard),
+        );
+        try std.testing.expect(std.meta.eql(header_before, probe.header));
+        try std.testing.expect(std.meta.eql(list_before, arena.objects));
+        try std.testing.expect(log.cache_present);
+        try std.testing.expectEqual(@as(u8, 0), log.eviction_count);
+        try std.testing.expectEqual(@as(usize, 0), log.count);
+    }
+}
+
+test "initial reference saturation refuses creation without allocator activity" {
+    // Check both empty storage and reused arena capacity before a nonempty label copy.
+    inline for (.{ false, true }) |warm_arena| {
+        var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = allocations.allocator();
+        var mutex: std.Io.Mutex = .init;
+        var arena = ObjectArena.init(allocator, .{ .object_mutex = &mutex });
+        var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+        defer guard.unlock(std.testing.io);
+        defer arena.deinit(allocator, &guard) catch @panic("references leaked");
+        defer {
+            arena.objects.total_reference_count = 0;
+            arena.objects.user_reference_count = 0;
+        }
+        if (warm_arena) {
+            const unpublished = try arena.create(allocator, &guard, LifetimeProbe, .{
+                .kind = .buffer,
+                .initial_reference = .lease,
+            });
+            try unpublished.header.discardUnpublishedLocked(&guard);
+        }
+        allocations.fail_index = allocations.alloc_index;
+        allocations.resize_fail_index = allocations.resize_index;
+        const allocation_count = allocations.alloc_index;
+        const resize_count = allocations.resize_index;
+        const deallocation_count = allocations.deallocations;
+        const memory_before = arena.memory.state;
+        const capacity_before = arena.queryCapacity(&guard);
+        inline for (.{ ReferenceClass.user, ReferenceClass.lease }) |class| {
+            inline for (.{ @as(u64, 0), std.math.maxInt(u64) }) |users| {
+                arena.objects.total_reference_count = std.math.maxInt(u64);
+                arena.objects.user_reference_count = users;
+                const list_before = arena.objects;
+                try std.testing.expectError(
+                    error.ReferenceCountOverflow,
+                    arena.create(allocator, &guard, LifetimeProbe, .{
+                        .kind = .buffer,
+                        .initial_reference = class,
+                        .label = "must not allocate or copy this label",
+                    }),
+                );
+                try std.testing.expect(std.meta.eql(list_before, arena.objects));
+                try std.testing.expect(std.meta.eql(memory_before, arena.memory.state));
+                try std.testing.expectEqual(capacity_before, arena.queryCapacity(&guard));
+                try std.testing.expectEqual(allocation_count, allocations.alloc_index);
+                try std.testing.expectEqual(resize_count, allocations.resize_index);
+                try std.testing.expectEqual(deallocation_count, allocations.deallocations);
+                try std.testing.expect(!allocations.has_induced_failure);
+            }
         }
     }
-};
+}
 
-test "an object outlives nothing: the last release destroys it and deinit reclaims it" {
-    const object_count: usize = 64;
-    var log: Counting = .{};
-    // The arena takes its blocks from a child of its own, so where they went is
-    // a question the child answers after `deinit` has poisoned the arena.
-    var child: std.heap.DebugAllocator(.{}) = .{};
-    defer std.testing.expect(child.deinit() == .ok) catch @panic("arena block leaked");
-    var arena: ObjectArena = .init(child.allocator());
-
-    for (0..object_count) |_| {
-        const probe = try arena.create(Probe, .{ .kind = .buffer, .label = "probe" });
-        probe.log = &log;
-        probe.header.attach();
-        probe.header.retain();
-        probe.header.release();
-        try std.testing.expect(probe.header.isAlive());
-        probe.header.release();
-        try std.testing.expect(!probe.header.isAlive());
+test "initial users and leases consume only their own aggregate headroom" {
+    // Unpublished rollback must restore each representable max-minus-one boundary.
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    defer {
+        arena.objects.total_reference_count = 0;
+        arena.objects.user_reference_count = 0;
     }
-
-    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount());
-    try std.testing.expect(arena.queryCapacity() > 0);
-
-    arena.deinit();
-
-    // The teardown count says every object ran; the child says every block came
-    // home. Neither is a read of the arena, which is poison from here on.
-    try std.testing.expectEqual(@as(u64, @intCast(object_count)), log.total());
+    inline for (.{ ReferenceClass.user, ReferenceClass.lease }) |class| {
+        arena.objects.total_reference_count = std.math.maxInt(u64) - 1;
+        arena.objects.user_reference_count = std.math.maxInt(u64) - 1;
+        const unpublished = try arena.create(std.testing.allocator, &guard, LifetimeProbe, .{
+            .kind = .buffer,
+            .initial_reference = class,
+        });
+        defer unpublished.header.discardUnpublishedLocked(&guard) catch
+            @panic("unpublished reference escaped");
+        const user_increment: u32 = if (class == .user) 1 else 0;
+        try std.testing.expectEqual(@as(u32, 1), unpublished.header.reference_count);
+        try std.testing.expectEqual(user_increment, unpublished.header.user_reference_count);
+        try std.testing.expectEqual(
+            std.math.maxInt(u64),
+            arena.objects.total_reference_count,
+        );
+        try std.testing.expectEqual(
+            std.math.maxInt(u64) - 1 + @as(u64, user_increment),
+            arena.objects.user_reference_count,
+        );
+        try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount(&guard));
+    }
 }
 
-test "a list that is already destroyed destroys the object that arrives late" {
-    var log: Counting = .{};
+test "cache acquisition owns a user reference to a live lease-only object" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const probe = try lifetimeProbe(&arena, &guard, &log, 0, .lease);
+    try std.testing.expectError(error.NoOwnedReference, probe.header.retainUserLocked(&guard));
+    try std.testing.expectError(
+        error.NoOwnedReference,
+        probe.header.releaseUserLocked(&guard, std.testing.io),
+    );
+    try probe.header.acquireUserLocked(&guard);
+    try std.testing.expectEqual(@as(u32, 2), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), probe.header.user_reference_count);
+    try probe.header.releaseUserLocked(&guard, std.testing.io);
+    probe.header.releaseLeaseLocked(&guard, std.testing.io);
+    try std.testing.expectError(error.ResourceDestroyed, probe.header.acquireUserLocked(&guard));
+    try std.testing.expectError(
+        error.NoOwnedReference,
+        probe.header.releaseUserLocked(&guard, std.testing.io),
+    );
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
+}
 
-    var arena: ObjectArena = .init(std.testing.allocator);
-    defer arena.deinit();
+test "weak eviction precedes payload destruction exactly once" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{ .cache_present = true };
+    const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+    probe.header.setCacheRemovalLocked(&guard, &log, lifetimeEvict);
+    try probe.header.releaseUserLocked(&guard, std.testing.io);
+    probe.header.retirePayloadLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectEqual(@as(u8, 1), log.eviction_count);
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
+    try std.testing.expect(probe.header.remove_from_cache == null);
+    try std.testing.expect(probe.header.cache_context == null);
+}
 
-    const probe = try arena.create(Probe, .{ .kind = .buffer });
-    probe.log = &log;
-    probe.header.attach();
+test "explicit retirement preserves alias counts and late releases destroy no payload twice" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+    try probe.header.retainUserLocked(&guard);
+    probe.header.retirePayloadLocked(&guard, std.testing.io, .early_destroy);
+    probe.header.retirePayloadLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectEqual(@as(u32, 2), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 2), probe.header.user_reference_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.queryTrackedCount(&guard));
+    try std.testing.expect(!probe.header.isAlive(&guard));
+    try std.testing.expectError(error.ResourceDestroyed, probe.header.retainLeaseLocked(&guard));
+    try std.testing.expectError(error.ResourceDestroyed, probe.header.acquireUserLocked(&guard));
+    try probe.header.retainUserLocked(&guard);
+    try std.testing.expectError(error.ResourceInUse, arena.deinit(std.testing.allocator, &guard));
+    try std.testing.expectEqual(@as(u32, 3), probe.header.reference_count);
+    for (0..3) |_| try probe.header.releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
+    try std.testing.expectEqual(@as(u64, 0), arena.objects.total_reference_count);
+    try std.testing.expectEqual(@as(u64, 0), arena.objects.user_reference_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount(&guard));
+}
 
-    var seen: usize = 0;
-    const list = arena.objectList();
-    list.forEach(@ptrCast(&seen), countVisit);
-    try std.testing.expectEqual(@as(usize, 1), seen);
+test "bounded reverse retirement drops dependencies past retained dead headers" {
+    // Newest-first traversal must not repeatedly visit a retained destroyed head.
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const oldest = try lifetimeProbe(&arena, &guard, &log, 0, .lease);
+    const middle = try lifetimeProbe(&arena, &guard, &log, 1, .lease);
+    middle.dependency = &oldest.header;
+    const newest = try lifetimeProbe(&arena, &guard, &log, 2, .user);
+    newest.dependency = &middle.header;
+    const dead_head = try lifetimeProbe(&arena, &guard, &log, 3, .user);
+    dead_head.header.retirePayloadLocked(&guard, std.testing.io, .early_destroy);
+    arena.objects.retirePayloadsLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 2, 1, 0 }, log.order[0..log.count]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1 }, log.destroyed[0..4]);
+    try std.testing.expectEqual(@as(u8, 2), log.deferred_zero_links);
+    try std.testing.expectEqual(@as(usize, 2), arena.queryTrackedCount(&guard));
+    try std.testing.expectEqual(@as(u64, 2), arena.objects.total_reference_count);
+    try std.testing.expectEqual(@as(u64, 2), arena.objects.user_reference_count);
+    try std.testing.expect(!oldest.header.node.linked);
+    try std.testing.expect(!middle.header.node.linked);
+    arena.objects.retirePayloadsLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectEqual(@as(usize, 4), log.count);
+    try newest.header.releaseUserLocked(&guard, std.testing.io);
+    try dead_head.header.releaseUserLocked(&guard, std.testing.io);
+}
 
-    list.destroy(.early_destroy);
-    try std.testing.expect(!probe.header.isAlive());
-    try std.testing.expectEqual(@as(u64, 1), log.early_destroy_count);
+test "constructor rollback consumes an unpublished reference without reading payload" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    inline for (.{ ReferenceClass.user, ReferenceClass.lease }) |class| {
+        const probe = try arena.create(std.testing.allocator, &guard, LifetimeProbe, .{
+            .kind = .buffer,
+            .initial_reference = class,
+        });
+        try std.testing.expectError(error.ResourceInUse, arena.deinit(std.testing.allocator, &guard));
+        try probe.header.discardUnpublishedLocked(&guard);
+        try std.testing.expectEqual(@as(u32, 0), probe.header.reference_count);
+        try std.testing.expectEqual(State.destroyed, probe.header.state);
+    }
+}
 
-    // The late object is written in full before it reaches the list, so the
-    // teardown the dead list runs reads a `log` and not `0xaa` fill. This is
-    // the case that faults when `create` tracks: the header is tracked, the
-    // dead list destroys it, and `destroy` dereferences `log` before the line
-    // below writes it.
-    const late = try arena.create(Probe, .{ .kind = .buffer });
+test "allocator mismatch rejects a factory before storage and reference mutation" {
+    // Equal vtables with different allocator state are not the same owner.
+    var first_buffer: [4096]u8 = undefined;
+    var second_buffer: [4096]u8 = undefined;
+    var first = std.heap.FixedBufferAllocator.init(&first_buffer);
+    var second = std.heap.FixedBufferAllocator.init(&second_buffer);
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(first.allocator(), .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(first.allocator(), &guard) catch @panic("references leaked");
+    try std.testing.expectError(
+        error.AllocatorMismatch,
+        arena.create(second.allocator(), &guard, LifetimeProbe, .{
+            .kind = .buffer,
+            .initial_reference = .user,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), first.end_index);
+    try std.testing.expectEqual(@as(usize, 0), second.end_index);
+    try std.testing.expectEqual(@as(u64, 0), arena.objects.total_reference_count);
+    try std.testing.expectEqual(@as(u64, 0), arena.objects.user_reference_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount(&guard));
+    try std.testing.expectError(error.AllocatorMismatch, arena.deinit(second.allocator(), &guard));
+}
+
+test "late attachment retires initialized payload while rejecting new factories" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const late = try arena.create(std.testing.allocator, &guard, LifetimeProbe, .{
+        .kind = .buffer,
+        .initial_reference = .user,
+    });
+    arena.objects.retirePayloadsLocked(&guard, std.testing.io, .early_destroy);
     late.log = &log;
-    late.header.attach();
-    try std.testing.expect(!late.header.isAlive());
-    try std.testing.expectEqual(@as(u64, 2), log.early_destroy_count);
+    late.id = 0;
+    late.dependency = null;
+    late.header.attach(&guard, std.testing.io);
+    try std.testing.expect(!late.header.isAlive(&guard));
+    try std.testing.expectEqual(@as(u32, 1), late.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), late.header.user_reference_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.queryTrackedCount(&guard));
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
+    try std.testing.expectError(
+        error.ResourceDestroyed,
+        arena.create(std.testing.allocator, &guard, LifetimeProbe, .{
+            .kind = .buffer,
+            .initial_reference = .lease,
+        }),
+    );
+    try late.header.releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
 }
 
-test "an object the caller never attaches is in no list and runs no teardown" {
-    var log: Counting = .{};
-    // The child is the ledger that outlives the arena, so it is where the
-    // block is checked after `deinit` has poisoned the receiver.
-    var child: std.heap.DebugAllocator(.{}) = .{};
-    defer std.testing.expect(child.deinit() == .ok) catch @panic("arena block leaked");
-    var arena: ObjectArena = .init(child.allocator());
-
-    const probe = try arena.create(Probe, .{ .kind = .buffer });
-    probe.log = &log;
-
-    // The header `create` wrote is whole, and the list has not seen it. This is
-    // the window the contract names, and it is the one thing `create` must not
-    // leave the object in alone.
-    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount());
-    try std.testing.expect(!probe.header.isAlive());
-    try std.testing.expectEqual(@as(u64, 0), log.total());
-
-    // The block is real before the teardown runs, so the leak check above has
-    // something to catch and is not vacuous.
-    try std.testing.expect(arena.queryCapacity() > 0);
-
-    // `deinit` reclaims the block without a teardown, because the list never
-    // held the object. A caller that forgets `attach` pays that, and the two
-    // halves of the price are on either side of this line: no teardown ran,
-    // and the child still reports no leak.
-    arena.deinit();
-    try std.testing.expectEqual(@as(u64, 0), log.total());
+test "rollback refuses published and cached references without invoking callbacks" {
+    var mutex: std.Io.Mutex = .init;
+    var arena = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &mutex });
+    var guard = ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer arena.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{ .cache_present = true };
+    const probe = try lifetimeProbe(&arena, &guard, &log, 0, .user);
+    probe.header.setCacheRemovalLocked(&guard, &log, lifetimeEvict);
+    try std.testing.expectError(error.ResourceInUse, probe.header.discardUnpublishedLocked(&guard));
+    try std.testing.expectEqual(@as(u32, 1), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), probe.header.user_reference_count);
+    try std.testing.expect(log.cache_present);
+    try std.testing.expectEqual(@as(u8, 0), log.eviction_count);
+    try std.testing.expectEqual(@as(usize, 0), log.count);
+    try probe.header.releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u8, 1), log.eviction_count);
+    try std.testing.expectEqual(@as(u8, 1), log.destroyed[0]);
 }
 
-fn countVisit(context: *anyopaque, object: *Object) void {
-    const seen: *usize = @ptrCast(@alignCast(context));
-    std.debug.assert(object.isAlive());
-    seen.* += 1;
+test "a foreign object guard cannot consume or acquire references" {
+    var first_mutex: std.Io.Mutex = .init;
+    var second_mutex: std.Io.Mutex = .init;
+    var first = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &first_mutex });
+    var second = ObjectArena.init(std.testing.allocator, .{ .object_mutex = &second_mutex });
+    var first_guard = ObjectGuard.lockUncancelable(std.testing.io, first.objectList());
+    defer first_guard.unlock(std.testing.io);
+    defer first.deinit(std.testing.allocator, &first_guard) catch @panic("references leaked");
+    var second_guard = ObjectGuard.lockUncancelable(std.testing.io, second.objectList());
+    defer second_guard.unlock(std.testing.io);
+    defer second.deinit(std.testing.allocator, &second_guard) catch @panic("references leaked");
+    var log: LifetimeLog = .{};
+    const probe = try lifetimeProbe(&first, &first_guard, &log, 0, .user);
+    try std.testing.expectError(
+        error.ResourceDeviceMismatch,
+        probe.header.retainUserLocked(&second_guard),
+    );
+    try std.testing.expectError(
+        error.ResourceDeviceMismatch,
+        probe.header.acquireUserLocked(&second_guard),
+    );
+    try std.testing.expectError(
+        error.ResourceDeviceMismatch,
+        probe.header.retainLeaseLocked(&second_guard),
+    );
+    try std.testing.expectError(
+        error.ResourceDeviceMismatch,
+        probe.header.releaseUserLocked(&second_guard, std.testing.io),
+    );
+    try std.testing.expectEqual(@as(u32, 1), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), probe.header.user_reference_count);
+    try std.testing.expectEqual(@as(u64, 1), first.objects.total_reference_count);
+    try std.testing.expectEqual(@as(u64, 0), second.objects.total_reference_count);
+    try std.testing.expectEqual(@as(usize, 0), log.count);
+    try probe.header.releaseUserLocked(&first_guard, std.testing.io);
 }

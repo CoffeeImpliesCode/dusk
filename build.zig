@@ -14,11 +14,13 @@
 //! build must never mutate a checked-in file without being asked.
 //! `test/gen_dispatch_drift.zig` fails when the two disagree.
 //!
-//! **What the `test` step runs.** The published module in Debug and in
-//! ReleaseSafe, the generated dispatch table in both modes, the drift test, and
-//! one acceptance shard per file under `test/`. A test file is its own module
-//! with the library as an import, so a file that stops compiling fails alone
-//! and its step name says which file it was.
+//! **What the `test` step runs.** Explicit Debug and ReleaseSafe library
+//! graphs, the generated dispatch table in both modes, the drift test, and
+//! one Debug acceptance shard per file under `test/`, plus ReleaseSafe shards
+//! for native ownership, GPU execution, SPIR-V, pipeline-cache, asynchronous
+//! completion, core lifetimes, error scopes, object arenas and API regressions. A test
+//! file is its own module with the library as an import, so a file that stops
+//! compiling fails alone and its step name says which file it was.
 //!
 //! **How the library's own tests get in.** The two shards that root
 //! `src/root.zig` are also what runs every `test` block under `src/`: the test
@@ -92,6 +94,7 @@ const dispatch_name = "dispatch.zig";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     // The published values reach source through an options module, so a
     // consumer reads them from `@import("dusk")` rather than parsing the
@@ -110,6 +113,11 @@ pub fn build(b: *std.Build) void {
     // cannot serve both modes, and there must be exactly one per mode.
     const vulkan_debug = addVulkanModule(b, target, .Debug);
     const vulkan_release = addVulkanModule(b, target, .ReleaseSafe);
+    const vulkan_published = switch (optimize) {
+        .Debug => vulkan_debug,
+        .ReleaseSafe => vulkan_release,
+        .ReleaseFast, .ReleaseSmall => addVulkanModule(b, target, optimize),
+    };
 
     // The published module. Consumers import `@import("dusk")`. The `vulkan`
     // import is what lets `src/vk/dispatch.zig` reach the bindings without a
@@ -126,8 +134,22 @@ pub fn build(b: *std.Build) void {
     // inherits the system loader path, so the flag restores upstream's
     // behaviour rather than inventing one. It reaches every compilation that
     // includes this Module (`lib/std/Build/Step/Compile.zig:1055`), so this one
-    // declaration covers the Debug shard and every shard importing `dusk`.
+    // declaration covers every consumer importing the published module.
     const mod = b.addModule("dusk", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "build_options", .module = options.createModule() },
+            .{ .name = "vulkan", .module = vulkan_published },
+        },
+    });
+
+    // The published module follows the consumer's optimize option. Acceptance
+    // graphs remain explicitly Debug and ReleaseSafe regardless of that option,
+    // and each graph shares exactly one matching Vulkan module instance.
+    const debug_mod = if (optimize == .Debug) mod else b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .Debug,
@@ -137,38 +159,32 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulkan", .module = vulkan_debug },
         },
     });
-
-    // Library tests, once per safety mode. Both modes belong to the gate
-    // because the house gate runs a plain `zig build test` with no
-    // `-Doptimize`, so an optimized-only failure cannot slip past a Debug-only
-    // run. The Debug shard is the published module itself, so a change that
-    // breaks `dep.module("dusk")` breaks the gate. A module's mode is fixed at
-    // creation, so ReleaseSafe needs a private equivalent. That is a different
-    // Module object from the published one and imports only `vulkan`, so the
-    // published Module's `link_libc` never reaches this compilation; this one
-    // roots `src/root.zig` and so needs the flag in its own right.
+    const release_mod = if (optimize == .ReleaseSafe) mod else b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "build_options", .module = options.createModule() },
+            .{ .name = "vulkan", .module = vulkan_release },
+        },
+    });
     const test_step = b.step(
         "test",
         "Run the library tests in Debug and ReleaseSafe, and one acceptance shard per test file",
     );
+    addFetchDawnStep(b, test_step);
+    addNativeKernelSteps(b, test_step);
 
     const debug_tests = b.addTest(.{
         .name = "test-Debug",
-        .root_module = mod,
+        .root_module = debug_mod,
     });
     test_step.dependOn(&addCeilingedRun(b, "test-Debug", debug_tests).step);
 
     const release_tests = b.addTest(.{
         .name = "test-ReleaseSafe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "build_options", .module = options.createModule() },
-                .{ .name = "vulkan", .module = vulkan_release },
-            },
-        }),
+        .root_module = release_mod,
     });
     test_step.dependOn(&addCeilingedRun(b, "test-ReleaseSafe", release_tests).step);
 
@@ -212,28 +228,50 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&addCeilingedRun(b, "test-gen-dispatch-drift", drift_tests).step);
 
-    // One shard per file under `test/`, one safety mode each. The two shards
-    // above already run the published module in Debug and ReleaseSafe; an
-    // acceptance shard is a separate module, so one file that stops compiling
+    // One Debug shard per file under `test/`, plus the core in-file regressions.
+    // The two shards above run the published module in both safety modes; a shard
+    // is a separate module, so one file that stops compiling
     // fails alone and names itself in the step graph. The drift test is the one
     // file with no entry here: it needs the generator and its options module
     // rather than the library, so it is declared where those are.
     const acceptance_shards = [_]struct { name: []const u8, sub_path: []const u8 }{
         .{ .name = "test-api-conformance", .sub_path = "test/api_conformance.zig" },
+        .{ .name = "test-async-registry", .sub_path = "test/async_registry.zig" },
+        .{ .name = "test-async-root-requests", .sub_path = "test/async_root_requests.zig" },
         .{ .name = "test-bind-group", .sub_path = "test/bind_group.zig" },
         .{ .name = "test-blit", .sub_path = "test/blit.zig" },
         .{ .name = "test-buffer", .sub_path = "test/buffer.zig" },
+        .{ .name = "test-cache-artifact", .sub_path = "test/cache_artifact.zig" },
         .{ .name = "test-color-space", .sub_path = "test/color_space.zig" },
+        .{ .name = "test-command-replay", .sub_path = "test/command_replay.zig" },
         .{ .name = "test-command-stream", .sub_path = "test/command_stream.zig" },
+        .{ .name = "test-compute-specialization", .sub_path = "test/compute_specialization.zig" },
         .{ .name = "test-compatibility", .sub_path = "test/compatibility.zig" },
+        // CoreDevice's in-file tests also root ObjectArena and error regressions.
+        .{ .name = "test-core-regressions", .sub_path = "src/core/device.zig" },
         .{ .name = "test-error-scope", .sub_path = "test/error_scope.zig" },
         .{ .name = "test-error-sets", .sub_path = "test/error_sets.zig" },
         .{ .name = "test-formats", .sub_path = "test/formats.zig" },
         .{ .name = "test-limits", .sub_path = "test/limits.zig" },
         .{ .name = "test-memory", .sub_path = "test/memory.zig" },
         .{ .name = "test-null-device", .sub_path = "test/null_device.zig" },
+        .{ .name = "test-native-async-descriptors", .sub_path = "test/native_async_descriptors.zig" },
+        .{ .name = "test-native-async-device", .sub_path = "test/native_async_device.zig" },
+        .{ .name = "test-native-async-map-queue", .sub_path = "test/native_async_map_queue.zig" },
+        .{ .name = "test-native-async-pipeline", .sub_path = "test/native_async_pipeline.zig" },
+        .{ .name = "test-native-async-scope-info", .sub_path = "test/native_async_scope_info.zig" },
+        .{ .name = "test-native-device", .sub_path = "test/native_device.zig" },
+        .{ .name = "test-native-resource-store", .sub_path = "test/native_resource_store.zig" },
+        .{ .name = "test-native-sampler", .sub_path = "test/native_sampler.zig" },
+        .{ .name = "test-native-attachment-state", .sub_path = "test/native_attachment_state.zig" },
+        .{ .name = "test-native-full256-immediate", .sub_path = "test/native_full256_immediate.zig" },
+        .{ .name = "test-native-weak-index", .sub_path = "src/native_weak_index_test.zig" },
+        .{ .name = "test-native-attachment-store", .sub_path = "src/native_attachment_store_test.zig" },
+        .{ .name = "test-native-render-state", .sub_path = "src/native_render_state_test.zig" },
         .{ .name = "test-object-arena", .sub_path = "test/object_arena.zig" },
         .{ .name = "test-pipeline-cache", .sub_path = "test/pipeline_cache.zig" },
+        .{ .name = "test-pipeline-canonical-layout", .sub_path = "test/pipeline_canonical_layout.zig" },
+        .{ .name = "test-pipeline-entry-point", .sub_path = "test/pipeline_entry_point.zig" },
         .{ .name = "test-query-set", .sub_path = "test/query_set.zig" },
         .{ .name = "test-render-pipeline", .sub_path = "test/render_pipeline.zig" },
         .{ .name = "test-serial-timeline", .sub_path = "test/serial_timeline.zig" },
@@ -247,7 +285,176 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-worker-pool", .sub_path = "test/worker_pool.zig" },
     };
     for (acceptance_shards) |shard| {
-        addAcceptanceShard(b, test_step, shard.name, shard.sub_path, target, mod, vulkan_debug);
+        addAcceptanceShard(b, test_step, shard.name, shard.sub_path, target, .Debug, debug_mod, vulkan_debug);
+    }
+    // ReleaseSafe acceptance must compile the test root, library, and bindings
+    // in the same safety mode; a second step pointing at a Debug run proves
+    // nothing about ReleaseSafe execution.
+    const release_acceptance_shards = [_]struct { name: []const u8, sub_path: []const u8 }{
+        .{
+            .name = "test-async-registry-release-safe",
+            .sub_path = "test/async_registry.zig",
+        },
+        .{
+            .name = "test-async-root-requests-release-safe",
+            .sub_path = "test/async_root_requests.zig",
+        },
+        .{
+            .name = "test-cache-artifact-release-safe",
+            .sub_path = "test/cache_artifact.zig",
+        },
+        .{
+            .name = "test-core-regressions-release-safe",
+            .sub_path = "src/core/device.zig",
+        },
+        .{
+            .name = "test-error-scope-release-safe",
+            .sub_path = "test/error_scope.zig",
+        },
+        .{
+            .name = "test-object-arena-release-safe",
+            .sub_path = "test/object_arena.zig",
+        },
+        .{
+            .name = "test-compute-specialization-release-safe",
+            .sub_path = "test/compute_specialization.zig",
+        },
+        .{
+            .name = "test-render-pipeline-release-safe",
+            .sub_path = "test/render_pipeline.zig",
+        },
+        .{
+            .name = "test-triangle-release-safe",
+            .sub_path = "test/triangle.zig",
+        },
+        .{
+            .name = "test-spirv-release-safe",
+            .sub_path = "test/spirv.zig",
+        },
+        .{
+            .name = "test-pipeline-cache-release-safe",
+            .sub_path = "test/pipeline_cache.zig",
+        },
+        .{
+            .name = "test-pipeline-entry-point-release-safe",
+            .sub_path = "test/pipeline_entry_point.zig",
+        },
+        .{
+            .name = "test-api-conformance-release-safe",
+            .sub_path = "test/api_conformance.zig",
+        },
+        .{
+            .name = "test-native-async-descriptors-release-safe",
+            .sub_path = "test/native_async_descriptors.zig",
+        },
+        .{
+            .name = "test-native-async-device-release-safe",
+            .sub_path = "test/native_async_device.zig",
+        },
+        .{
+            .name = "test-native-async-map-queue-release-safe",
+            .sub_path = "test/native_async_map_queue.zig",
+        },
+        .{
+            .name = "test-native-async-pipeline-release-safe",
+            .sub_path = "test/native_async_pipeline.zig",
+        },
+        .{
+            .name = "test-native-async-scope-info-release-safe",
+            .sub_path = "test/native_async_scope_info.zig",
+        },
+        .{
+            .name = "test-native-device-release-safe",
+            .sub_path = "test/native_device.zig",
+        },
+        .{
+            .name = "test-null-device-release-safe",
+            .sub_path = "test/null_device.zig",
+        },
+        .{
+            .name = "test-limits-release-safe",
+            .sub_path = "test/limits.zig",
+        },
+        .{
+            .name = "test-worker-pool-release-safe",
+            .sub_path = "test/worker_pool.zig",
+        },
+        .{ .name = "test-native-resource-store-release-safe", .sub_path = "test/native_resource_store.zig" },
+        .{ .name = "test-native-sampler-release-safe", .sub_path = "test/native_sampler.zig" },
+        .{ .name = "test-native-attachment-state-release-safe", .sub_path = "test/native_attachment_state.zig" },
+        .{ .name = "test-native-full256-immediate-release-safe", .sub_path = "test/native_full256_immediate.zig" },
+        .{ .name = "test-native-weak-index-release-safe", .sub_path = "src/native_weak_index_test.zig" },
+        .{ .name = "test-native-attachment-store-release-safe", .sub_path = "src/native_attachment_store_test.zig" },
+        .{ .name = "test-native-render-state-release-safe", .sub_path = "src/native_render_state_test.zig" },
+        .{ .name = "test-pipeline-canonical-layout-release-safe", .sub_path = "test/pipeline_canonical_layout.zig" },
+    };
+    for (release_acceptance_shards) |shard| {
+        addAcceptanceShard(
+            b,
+            test_step,
+            shard.name,
+            shard.sub_path,
+            target,
+            .ReleaseSafe,
+            release_tests.root_module,
+            vulkan_release,
+        );
+    }
+
+    const native_utilities_debug = b.step(
+        "test-native-utilities-debug",
+        "Run all native utility acceptance shards in Debug",
+    );
+    const native_utilities_release = b.step(
+        "test-native-utilities-release-safe",
+        "Run all native utility acceptance shards in ReleaseSafe",
+    );
+    test_step.dependOn(native_utilities_debug);
+    test_step.dependOn(native_utilities_release);
+    const native_utility_shards = [_]struct { name: []const u8, sub_path: []const u8 }{
+        .{ .name = "test-native-kernels", .sub_path = "test/native_kernels.zig" },
+        .{ .name = "test-native-indirect", .sub_path = "test/native_indirect.zig" },
+        .{ .name = "test-native-timestamps", .sub_path = "test/native_timestamps.zig" },
+        .{ .name = "test-native-blit", .sub_path = "test/native_blit.zig" },
+        .{ .name = "test-native-external-texture", .sub_path = "test/native_external_texture.zig" },
+        .{ .name = "test-native-internal-buffers", .sub_path = "test/native_internal_buffers.zig" },
+        .{ .name = "test-native-derived-roots", .sub_path = "test/native_derived_roots.zig" },
+        .{
+            .name = "test-native-internal-resources",
+            .sub_path = "test/native_internal_resources.zig",
+        },
+        .{ .name = "test-native-utility-device", .sub_path = "test/native_utility_device.zig" },
+        .{
+            .name = "test-native-utility-capabilities",
+            .sub_path = "test/native_utility_capabilities.zig",
+        },
+        .{ .name = "test-native-utility-frontend", .sub_path = "test/native_utility_frontend.zig" },
+        .{
+            .name = "test-native-combined-reflection",
+            .sub_path = "test/native_combined_reflection.zig",
+        },
+    };
+    for (native_utility_shards) |shard| {
+        addAcceptanceShard(
+            b,
+            native_utilities_debug,
+            shard.name,
+            shard.sub_path,
+            target,
+            .Debug,
+            debug_mod,
+            vulkan_debug,
+        );
+        addAcceptanceShard(
+            b,
+            native_utilities_release,
+            b.fmt("{s}-release-safe", .{shard.name}),
+            shard.sub_path,
+            target,
+            .ReleaseSafe,
+            release_mod,
+            vulkan_release,
+        );
     }
 
     // The foreign matrix. This step runs the Debug shard through the build
@@ -271,9 +478,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = .Debug,
-            // The same private root as the ReleaseSafe shard above, for the
-            // same reason: it roots `src/root.zig` instead of importing the
-            // published Module, so it declares `link_libc` itself.
+            // An explicit Debug root keeps cross-test independent of the
+            // published module's consumer-selected optimize mode.
             .link_libc = true,
             .imports = &.{
                 .{ .name = "build_options", .module = options.createModule() },
@@ -389,9 +595,9 @@ fn addGenerateStep(b: *std.Build) void {
     translate_c.addArg(header_dir);
     translate_c.addArg(b.pathJoin(&.{ header_dir, vulkan_header_sub_path }));
     const bindings = translate_c.captureStdOut(.{ .basename = vulkan_name });
-    generate_step.dependOn(&std.Build.Step.CheckFile.create(b, bindings, .{
+    const pin_check = std.Build.Step.CheckFile.create(b, bindings, .{
         .expected_matches = &.{pinned_header_version_line},
-    }).step);
+    });
 
     // The dispatch table. The generator prints the file on standard output and
     // the step captures it, so the same bytes reach the source tree here and
@@ -405,9 +611,114 @@ fn addGenerateStep(b: *std.Build) void {
     });
 
     const update = b.addUpdateSourceFiles();
+    // Gate publication of both files on the pin check. Aggregate siblings can
+    // run independently, so a failed check alone cannot prevent source writes.
+    update.step.dependOn(&pin_check.step);
     update.addCopyFileToSource(bindings, vulkan_zig_sub_path);
     update.addCopyFileToSource(rendered, dispatch_zig_sub_path);
     generate_step.dependOn(&update.step);
+}
+
+fn addFetchDawnStep(b: *std.Build, aggregate_tests: *std.Build.Step) void {
+    const step = b.step("fetch-dawn", "Fetch the pinned Dawn source reference (explicit network step)");
+    const destination = b.option(
+        []const u8,
+        "dawn-dir",
+        "Destination for the pinned Dawn source checkout",
+    ) orelse blk: {
+        if (b.graph.environ_map.get("DUSK_DAWN_SRC")) |source| {
+            if (source.len != 0) break :blk source;
+        }
+        if (b.graph.environ_map.get("buildhost_SCRATCH_ROOT")) |scratch| {
+            if (scratch.len != 0) break :blk b.pathJoin(&.{ scratch, "research", "dawn" });
+        }
+        const home = b.graph.environ_map.get("HOME") orelse {
+            const missing = std.Build.Step.Fail.create(
+                b,
+                "fetch-dawn requires HOME or an explicit -Ddawn-dir=<destination>",
+            );
+            step.dependOn(&missing.step);
+            return;
+        };
+        break :blk b.pathJoin(&.{ home, ".cache", "dusk-research", "research", "dawn" });
+    };
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/fetch_dawn.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const executable = b.addExecutable(.{ .name = "fetch-dawn", .root_module = module });
+    const run = b.addRunArtifact(executable);
+    run.addArg(destination);
+    run.has_side_effects = true;
+    step.dependOn(&run.step);
+
+    const tests = b.addTest(.{ .name = "test-dawn-pin", .root_module = module });
+    const test_step = b.step("test-dawn-pin", "Test Dawn pin and checkout safety validation");
+    const test_run = addCeilingedRun(b, "test-dawn-pin", tests);
+    test_step.dependOn(&test_run.step);
+    aggregate_tests.dependOn(&test_run.step);
+}
+
+fn addNativeKernelSteps(b: *std.Build, aggregate_tests: *std.Build.Step) void {
+    const tint_path = b.option(
+        []const u8,
+        "tint-path",
+        "External pinned Tint executable (overrides DUSK_TINT for explicit kernel steps)",
+    );
+    const debug_module = b.createModule(.{
+        .root_source_file = b.path("tools/gen_native_kernels.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const release_module = b.createModule(.{
+        .root_source_file = b.path("tools/gen_native_kernels.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const tool_test_shards = [_]struct { name: []const u8, module: *std.Build.Module }{
+        .{ .name = "test-gen-native-kernels", .module = debug_module },
+        .{ .name = "test-gen-native-kernels-release-safe", .module = release_module },
+    };
+    for (tool_test_shards) |shard| {
+        const tests = b.addTest(.{ .name = shard.name, .root_module = shard.module });
+        const run = addCeilingedRun(b, shard.name, tests);
+        run.setCwd(b.path("."));
+        const step = b.step(shard.name, "Test the std-only native kernel generator");
+        step.dependOn(&run.step);
+        aggregate_tests.dependOn(&run.step);
+    }
+
+    // Only explicit source steps can invoke Tint or replace committed artifacts.
+    const executable = b.addExecutable(.{
+        .name = "gen-native-kernels",
+        .root_module = release_module,
+    });
+    const source_steps = [_]struct {
+        name: []const u8,
+        description: []const u8,
+        argument: []const u8,
+    }{
+        .{
+            .name = "generate-native-kernels",
+            .description = "Regenerate committed native kernels with external pinned Tint",
+            .argument = "--regen",
+        },
+        .{
+            .name = "check-native-kernels",
+            .description = "Check committed native kernels with external pinned Tint",
+            .argument = "--check",
+        },
+    };
+    for (source_steps) |source_step| {
+        const run = b.addRunArtifact(executable);
+        run.addArg(source_step.argument);
+        run.setCwd(b.path("."));
+        run.has_side_effects = true;
+        if (tint_path) |path| run.setEnvironmentVariable("DUSK_TINT", path);
+        const step = b.step(source_step.name, source_step.description);
+        step.dependOn(&run.step);
+    }
 }
 
 /// Native runs retain the address-space ceiling that bounds a runaway test.
@@ -426,9 +737,8 @@ fn addCeilingedRun(
 }
 
 /// One acceptance shard: the test file is the module root and the library is
-/// the import. The name is the step name, so `zig build test -- --list` and a
-/// failure report both name the file.
-///
+/// the import. Its named step and the aggregate `test` step share one runner.
+/// `zig build test-memory` selects only that shard. A failure names its file.
 /// **Why both imports.** They answer two ways a shard can reach the library, and
 /// the difference is a module boundary rather than a preference. A shard that
 /// writes `@import("dusk")` resolves `@import("vulkan")` through `dusk`'s own
@@ -458,6 +768,7 @@ fn addAcceptanceShard(
     name: []const u8,
     sub_path: []const u8,
     target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
     library: *std.Build.Module,
     vulkan: *std.Build.Module,
 ) void {
@@ -466,7 +777,7 @@ fn addAcceptanceShard(
         .root_module = b.createModule(.{
             .root_source_file = b.path(sub_path),
             .target = target,
-            .optimize = .Debug,
+            .optimize = optimize,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "dusk", .module = library },
@@ -474,5 +785,8 @@ fn addAcceptanceShard(
             },
         }),
     });
-    test_step.dependOn(&addCeilingedRun(b, name, compile).step);
+    const run = addCeilingedRun(b, name, compile);
+    test_step.dependOn(&run.step);
+    const shard_step = b.step(name, b.fmt("Run acceptance shard {s}", .{sub_path}));
+    shard_step.dependOn(&run.step);
 }

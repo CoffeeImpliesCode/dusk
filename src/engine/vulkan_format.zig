@@ -21,9 +21,11 @@
 //! that enables either toggle needs a `vkFormat` that takes the toggle set; the
 //! two arms say which.
 
-const vulkan = @import("vulkan");
-const api = @import("../api/api.zig");
+const std = @import("std");
 
+const vulkan = @import("vulkan");
+
+const api = @import("../api/api.zig");
 pub const TextureFormat = api.enums.TextureFormat;
 pub const LoadOp = api.enums.LoadOp;
 pub const StoreOp = api.enums.StoreOp;
@@ -35,13 +37,13 @@ pub const k_supported_sample_count = [_]u32{ 1, 4 };
 
 /// What a depth-stencil attachment needs to resolve to one layout.
 ///
-/// Three named booleans rather than three positional ones, because
-/// `AGENTS.md` §2 makes two parameters of the same type one struct and
-/// `read_only` is not independent of the other two.
+/// Aspect presence and access are independent. Ignore access flags for absent
+/// aspects. At least one aspect must be present.
 pub const DepthStencilLayout = struct {
     has_depth: bool,
     has_stencil: bool,
-    read_only: bool,
+    depth_read_only: bool = false,
+    stencil_read_only: bool = false,
 };
 
 /// The Vulkan format for a WebGPU format.
@@ -236,27 +238,31 @@ pub const SampleCountError = error{SampleCountNotSupported};
 /// The layout a depth-stencil attachment is in for one pass
 /// (`vulkan/TextureVk.cpp:822-837`).
 ///
-/// Dawn reaches the four cases through `MergeDepthStencilUsage` and a
-/// device-dependent `VulkanImageLayout`. No device extension moves a
-/// depth-stencil attachment between these, so the three booleans decide; the
-/// two `depth24plus` arms are the only rows that would change if a device
-/// enabled a layout extension, and none is enabled at this milestone.
+/// The device does not enable `separateDepthStencilLayouts`. Single-aspect
+/// images therefore use combined layouts too. Mixed access uses Vulkan 1.1
+/// layouts, which do not require that feature.
 pub fn vkImageLayoutForDepthStencilAttachment(options: DepthStencilLayout) vulkan.VkImageLayout {
-    const attachment: c_int = switch (options.has_depth) {
-        true => switch (options.has_stencil) {
-            true => vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            false => vulkan.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        },
-        false => vulkan.VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
-    };
-    const read_only: c_int = switch (options.has_depth) {
-        true => switch (options.has_stencil) {
-            true => vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            false => vulkan.VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-        },
-        false => vulkan.VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
-    };
-    return @intCast(if (options.read_only) read_only else attachment);
+    std.debug.assert(options.has_depth or options.has_stencil);
+    if (options.has_depth and options.has_stencil) {
+        if (options.depth_read_only) {
+            return @intCast(if (options.stencil_read_only)
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            else
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL);
+        }
+        return @intCast(if (options.stencil_read_only)
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL
+        else
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    }
+    const read_only = if (options.has_depth)
+        options.depth_read_only
+    else
+        options.stencil_read_only;
+    return @intCast(if (read_only)
+        vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+    else
+        vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 }
 
 comptime {
@@ -276,4 +282,84 @@ comptime {
     if (k_supported_sample_count.len != 2) {
         @compileError("vkSampleCount names one bit per supported sample count");
     }
+}
+
+test "depth-only attachment layouts ignore absent stencil read-only state" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |stencil_read_only| {
+        for ([_]bool{ false, true }) |depth_read_only| {
+            const expected: vulkan.VkImageLayout = @intCast(if (depth_read_only)
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            else
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            try testing.expectEqual(expected, vkImageLayoutForDepthStencilAttachment(.{
+                .has_depth = true,
+                .has_stencil = false,
+                .depth_read_only = depth_read_only,
+                .stencil_read_only = stencil_read_only,
+            }));
+        }
+    }
+}
+
+test "stencil-only attachment layouts ignore absent depth read-only state" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |depth_read_only| {
+        for ([_]bool{ false, true }) |stencil_read_only| {
+            const expected: vulkan.VkImageLayout = @intCast(if (stencil_read_only)
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            else
+                vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            try testing.expectEqual(expected, vkImageLayoutForDepthStencilAttachment(.{
+                .has_depth = false,
+                .has_stencil = true,
+                .depth_read_only = depth_read_only,
+                .stencil_read_only = stencil_read_only,
+            }));
+        }
+    }
+}
+
+test "combined depth stencil attachment layouts preserve matching read-only states" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |read_only| {
+        const expected: vulkan.VkImageLayout = @intCast(if (read_only)
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+        else
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        try testing.expectEqual(expected, vkImageLayoutForDepthStencilAttachment(.{
+            .has_depth = true,
+            .has_stencil = true,
+            .depth_read_only = read_only,
+            .stencil_read_only = read_only,
+        }));
+    }
+}
+
+test "combined depth read-only stencil writable attachment uses Vulkan 1.1 layout" {
+    try std.testing.expectEqual(
+        @as(vulkan.VkImageLayout, @intCast(
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL,
+        )),
+        vkImageLayoutForDepthStencilAttachment(.{
+            .has_depth = true,
+            .has_stencil = true,
+            .depth_read_only = true,
+            .stencil_read_only = false,
+        }),
+    );
+}
+
+test "combined depth writable stencil read-only attachment uses Vulkan 1.1 layout" {
+    try std.testing.expectEqual(
+        @as(vulkan.VkImageLayout, @intCast(
+            vulkan.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+        )),
+        vkImageLayoutForDepthStencilAttachment(.{
+            .has_depth = true,
+            .has_stencil = true,
+            .depth_read_only = false,
+            .stencil_read_only = true,
+        }),
+    );
 }

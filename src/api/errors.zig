@@ -3,11 +3,7 @@
 
 const enums = @import("enums.zig");
 
-/// Every failure a generated entry point reports.
-///
-/// The set follows the `error type` enum in dawn.json, minus `no error`.
-/// `core` owns the object model, so this file declares the set and the
-/// mapping both ways, and nothing else.
+/// Upstream error values, without `no error`.
 pub const Error = error{
     Validation,
     OutOfMemory,
@@ -36,3 +32,55 @@ pub fn fromErrorType(kind: enums.ErrorType) ?Error {
         .unknown => error.Unknown,
     };
 }
+
+/// Native support failures; not upstream `ErrorType` values.
+pub const AsyncStartError = error{
+    OutOfMemory,
+    Canceled,
+    MissingFutureNamespaceSource,
+    FutureNamespaceExhausted,
+    FutureNamespaceContention,
+    FutureIdExhausted,
+    AsyncCapacityExceeded,
+    InvalidAsyncCapacity,
+    InvalidCallbackMode,
+    InvalidOwner,
+    OwnerStopped,
+    InstanceShutDown,
+    TaskQueueFull,
+    PoolShutDown,
+    WorkerExhausted,
+    ConcurrencyUnavailable,
+    InvalidRequest,
+    ReferenceCountOverflow,
+};
+
+/// Native support failures; not upstream `ErrorType` values.
+pub const FutureWaitError = error{
+    Canceled,
+    MissingFutureNamespaceSource,
+    InvalidFutureId,
+    FutureInstanceMismatch,
+    FutureCountMismatch,
+    WaitCountExceeded,
+    ReentrantWait,
+    InstanceShutDown,
+    TimedWaitUnavailable,
+    WaitIterationExhausted,
+    WaitEpochExhausted,
+    ReferenceCountOverflow,
+};
+
+/// Native support failures; not upstream `ErrorType` values.
+pub const CallbackControlError = error{
+    Canceled,
+    MissingFutureNamespaceSource,
+    DeviceNotAlive,
+    InvalidOwner,
+};
+
+/// Native support failures; not upstream `ErrorType` values.
+pub const ProcessEventsError = error{
+    InstanceShutDown,
+    ReferenceCountOverflow,
+};

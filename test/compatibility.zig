@@ -33,16 +33,10 @@
 //! nine live outside the eight re-gated files, and the checklist records the
 //! real site.
 //!
-//! **Two rows prove a narrower rule than §M16 states.** Row 7 drives
-//! `error.TextureViewFormatIncompatible` through `Texture.createView`, but the
-//! port raises that error from one check and the check is the unconditional
-//! base-format one (`src/engine/texture.zig:1197`): Dawn's compatibility-gated
-//! "viewFormat must match format" (`Texture.cpp:66-68`) has no counterpart, so
-//! a core device refuses the same view with the same error and row 7 proves
-//! M11's format rule. Row 9 drives the texture-to-buffer direction only
-//! (`CommandEncoder.cpp:413`), because `command_encoder.zig` has no
-//! `copyTextureToTexture` and `:422` is unproven. `docs/40-plan.md` §M16's
-//! "Two rows this milestone does not fully re-gate" records both.
+//! **Two rows have narrower coverage.** Row 7 requests an sRGB view that the
+//! texture did not declare in `view_formats`. Canonical linear and sRGB formats
+//! share a view family, so this test does not establish the compatibility-only
+//! declared-view restriction. Row 9 drives only texture-to-buffer copies.
 
 const std = @import("std");
 
@@ -122,7 +116,7 @@ const restrictions = [_]Restriction{
     .{
         .number = 7,
         .upstream_site = "Texture.cpp:66",
-        .failure = error.TextureViewFormatIncompatible,
+        .failure = error.TextureViewFormatNotInList,
     },
     .{
         .number = 8,
@@ -144,11 +138,10 @@ const restrictions = [_]Restriction{
 /// `init` takes a `*Harness` for that reason and never returns one by value.
 const Harness = struct {
     instance: engine.Instance,
-    /// The enumeration the device's adapter points into. `Instance` allocates
-    /// nothing, so the adapter list is the only member here that owns memory,
-    /// and `deinit` releases it rather than the instance.
+    /// The device borrows the adapter list, which borrows the instance.
     adapters: engine.AdapterList,
     device: engine.Device,
+    object_mutex: std.Io.Mutex = .init,
     /// The compatibility rules in this shard return their error to the caller.
     /// None reports one through the device's error sink, so a non-zero count
     /// here means a rule double-reported: an `expectError` could then pass on an
@@ -173,8 +166,9 @@ const Harness = struct {
             // field while it is still undefined.
             .device = undefined,
         };
+        errdefer self.instance.deinit(allocator, std.testing.io) catch @panic("compatibility instance rollback failed");
 
-        self.adapters = try self.instance.enumerateAdapters(allocator, .{
+        self.adapters = try self.instance.enumerateAdapters(allocator, std.testing.io, .{
             .feature_level = level,
             .power_preference = .undefined_,
             // The instance was built on the null back end, and
@@ -185,25 +179,34 @@ const Harness = struct {
         });
         // The device holds a pointer into the list, so a device the adapter
         // refuses must still release it.
-        errdefer self.adapters.deinit();
+        errdefer self.adapters.deinit(std.testing.io) catch @panic("compatibility adapter rollback failed");
 
         // The null back end always reports exactly one (`DeviceNull.cpp:147-158`),
         // so any other count is a port defect, not an environment to tolerate.
         if (self.adapters.items.len != 1) return error.UnexpectedAdapterCount;
 
-        self.device = try self.adapters.items[0].createDevice(allocator, .{
+        self.device = try self.adapters.items[0].createDevice(allocator, std.testing.io, .{
             .adapter = &self.adapters.items[0],
+            .object_mutex = &self.object_mutex,
             .feature_level = level,
             .uncaptured_context = @ptrCast(self),
             .uncaptured_callback = recordUncapturedError,
         });
     }
 
+    fn lockObjects(self: *Harness) core.ObjectGuard {
+        const host = self.device.coreDevice();
+        const guard = core.ObjectGuard.lockUncancelable(std.testing.io, host.borrow().objects);
+        host.bindTrackingOwner(&guard, @ptrCast(&self.device));
+        return guard;
+    }
+
     fn deinit(self: *Harness, allocator: std.mem.Allocator) void {
         std.debug.assert(self.uncaptured_error_count == 0);
         // The device first: it points into the adapter list it was built from.
-        self.device.deinit(allocator);
-        self.adapters.deinit();
+        self.device.deinit(allocator, std.testing.io) catch @panic("compatibility device teardown failed");
+        self.adapters.deinit(std.testing.io) catch @panic("compatibility adapter teardown failed");
+        self.instance.deinit(allocator, std.testing.io) catch @panic("compatibility instance teardown failed");
         self.* = undefined;
     }
 
@@ -216,8 +219,9 @@ const Harness = struct {
     /// so the cast back to the harness is here.
     fn recordUncapturedError(
         allocator: std.mem.Allocator,
+        _: std.Io,
         context: *anyopaque,
-        data: *const core.ErrorData,
+        data: core.ErrorView,
     ) void {
         const self: *Harness = @ptrCast(@alignCast(context));
         // Field by field because Zig 0.16.0 has no `==` for a struct. `ptr`
@@ -323,6 +327,26 @@ test "a compatibility device is derived from the absent core feature, not set" {
         compat_fragment_storage_buffer_limit,
         compat_limits.max_storage_buffers_in_fragment_stage,
     );
+}
+
+test "device format rows use enabled features rather than adapter capabilities" {
+    var compat: Harness = undefined;
+    try compat.init(std.testing.allocator, .compatibility);
+    defer compat.deinit(std.testing.allocator);
+    var core_harness: Harness = undefined;
+    try core_harness.init(std.testing.allocator, .core);
+    defer core_harness.deinit(std.testing.allocator);
+
+    const compat_info = compat.device.formatInfo(.bgra8_unorm_srgb) orelse
+        return error.FormatRowMissing;
+    const core_info = core_harness.device.formatInfo(.bgra8_unorm_srgb) orelse
+        return error.FormatRowMissing;
+    try std.testing.expect(!compat_info.isSupported());
+    try std.testing.expect(compat_info.unsupported_reason == .compatibility_mode);
+    try std.testing.expect(core_info.isSupported());
+    try std.testing.expect(compat_info != core_info);
+    try std.testing.expect(compat.device.formatInfo(.undefined_) == null);
+    try std.testing.expect(core_harness.device.formatInfo(.undefined_) == null);
 }
 
 test "restriction 1: a fragment-stage storage buffer above the ceiling is refused" {
@@ -517,22 +541,26 @@ test "restriction 6: a cube-array texture view is refused" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
 
-    const info = rgba8UnormFormatInfo();
+    const info = compat.device.formatInfo(.rgba8_unorm) orelse return error.FormatRowMissing;
     // Twelve layers so a cube-array view is in range: Dawn requires the array
     // layer count of a cube-array view to be a multiple of six
     // (`Texture.cpp:183`). A view outside the texture's layers would be refused
     // by a different rule, and then this test would prove nothing.
-    const source = try texture.Texture.create(compat.device.coreDevice(), .{
+    const source = try texture.Texture.create(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), .{
         .descriptor = .{
             .usage = .{ .texture_binding = true },
             .size = .{ .width = 4, .height = 4, .depth_or_array_layers = 12 },
             .format = .rgba8_unorm,
         },
-        .format_info = &info,
+        .format_info = info,
         .limits = textureLimits(&compat.device),
         .compatibility_mode = compat.compatibility(),
     });
+    const source_texture = try texture.resolveTexture(compat.device.coreDevice(), &guard, source);
+    defer source_texture.header.releaseUserLocked(&guard, std.testing.io) catch @panic("compatibility texture reference release failed");
 
     // Dawn checks this twice: `Texture.cpp:133` in
     // `IsTextureViewDimensionCompatibleWithTextureDimension` and `:269` in
@@ -542,14 +570,14 @@ test "restriction 6: a cube-array texture view is refused" {
     // why `restrictions[5].upstream_site` still cites it.
     try std.testing.expectError(
         restrictions[5].failure,
-        texture.Texture.createView(compat.device.coreDevice(), source, .{
+        texture.Texture.createView(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), source, .{
             .descriptor = .{
                 .format = .rgba8_unorm,
                 .dimension = .cube_array,
                 .base_array_layer = 0,
                 .array_layer_count = 12,
             },
-            .format_info = &info,
+            .format_info = info,
             .compatibility_mode = compat.compatibility(),
         }),
     );
@@ -559,36 +587,37 @@ test "restriction 7: a view whose format differs from the texture is refused" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
 
-    const info = rgba8UnormFormatInfo();
-    const srgb_info = rgba8UnormSrgbFormatInfo();
-    const source = try texture.Texture.create(compat.device.coreDevice(), .{
+    const info = compat.device.formatInfo(.rgba8_unorm) orelse return error.FormatRowMissing;
+    const srgb_info = compat.device.formatInfo(.rgba8_unorm_srgb) orelse
+        return error.FormatRowMissing;
+    const source = try texture.Texture.create(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), .{
         .descriptor = .{
             .usage = .{ .texture_binding = true },
             .size = .{ .width = 4, .height = 4, .depth_or_array_layers = 1 },
             .format = .rgba8_unorm,
         },
-        .format_info = &info,
+        .format_info = info,
         .limits = textureLimits(&compat.device),
         .compatibility_mode = compat.compatibility(),
     });
+    const source_texture = try texture.resolveTexture(compat.device.coreDevice(), &guard, source);
+    defer source_texture.header.releaseUserLocked(&guard, std.testing.io) catch @panic("compatibility texture reference release failed");
 
-    // The base-format rule, not the compatibility rule. `Texture.cpp:61-64` is
-    // the unconditional comparison and `Texture.cpp:66-68` above it is the one
-    // §M16 names; the port merged the two into one check that takes no
-    // compatibility flag (`src/engine/texture.zig:1197`). The same error runs
-    // at `Texture.create` over the declared `view_formats` list (`:838`), which
-    // is where upstream reaches its compatibility half.
+    // Canonical sRGB and linear rows share a view family. This descriptor still
+    // refuses sRGB because the texture did not declare it in `view_formats`.
     try std.testing.expectError(
         restrictions[6].failure,
-        texture.Texture.createView(compat.device.coreDevice(), source, .{
+        texture.Texture.createView(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), source, .{
             .descriptor = .{
                 .format = .rgba8_unorm_srgb,
                 .dimension = ._2d,
                 .base_array_layer = 0,
                 .array_layer_count = 1,
             },
-            .format_info = &srgb_info,
+            .format_info = srgb_info,
             .compatibility_mode = compat.compatibility(),
         }),
     );
@@ -598,43 +627,58 @@ test "restriction 7: a view whose format matches the texture is accepted" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
 
-    const info = rgba8UnormFormatInfo();
-    const source = try texture.Texture.create(compat.device.coreDevice(), .{
+    const info = compat.device.formatInfo(.rgba8_unorm) orelse return error.FormatRowMissing;
+    const source = try texture.Texture.create(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), .{
         .descriptor = .{
             .usage = .{ .texture_binding = true },
             .size = .{ .width = 4, .height = 4, .depth_or_array_layers = 1 },
             .format = .rgba8_unorm,
         },
-        .format_info = &info,
+        .format_info = info,
         .limits = textureLimits(&compat.device),
         .compatibility_mode = compat.compatibility(),
     });
+    const source_texture = try texture.resolveTexture(compat.device.coreDevice(), &guard, source);
+    defer source_texture.header.releaseUserLocked(&guard, std.testing.io) catch @panic("compatibility texture reference release failed");
 
     // Resolved rather than dropped: "accepted" is a claim about the view the
     // descriptor asked for, so the accepted view is read back and its format
     // and dimension are the ones asserted.
     const view = try texture.resolveTextureView(
         compat.device.coreDevice(),
-        try texture.Texture.createView(compat.device.coreDevice(), source, .{
+        &guard,
+        try texture.Texture.createView(std.testing.allocator, std.testing.io, &guard, compat.device.coreDevice(), source, .{
             .descriptor = .{
                 .format = .rgba8_unorm,
                 .dimension = ._2d,
                 .base_array_layer = 0,
                 .array_layer_count = 1,
             },
-            .format_info = &info,
+            .format_info = info,
             .compatibility_mode = compat.compatibility(),
         }),
     );
-    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, view.getFormat());
-    try std.testing.expectEqual(api.TextureViewDimension._2d, view.getDimension());
+    defer view.header.releaseUserLocked(&guard, std.testing.io) catch @panic("compatibility view reference release failed");
+    try std.testing.expectEqual(api.TextureFormat.rgba8_unorm, view.getFormat(&guard));
+    try std.testing.expectEqual(api.TextureViewDimension._2d, view.getDimension(&guard));
 }
 
 test "restriction 8: two views of one texture in one draw are refused" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
+    const attachment = try createColorAttachmentState(
+        std.testing.allocator,
+        compat.device.coreDevice(),
+        &guard,
+    );
+    defer attachment.header.releaseUserLocked(&guard, std.testing.io) catch
+        @panic("compatibility attachment reference release failed");
 
     // Dawn gates this on `HasFlexibleTextureViews()` rather than on
     // `IsCompatibilityMode()` (`Device.cpp:2746-2749`), and the device here does
@@ -642,28 +686,31 @@ test "restriction 8: two views of one texture in one draw are refused" {
     // reaches it from the draw (`CommandBufferStateTracker.cpp:370`, through
     // `:513`) and never from the bind group record, so the error belongs to the
     // draw below and not to `setBindGroup`.
-    var encoder = command.CommandEncoder.init(std.testing.allocator, .{
-        .compatibility_mode = compat.compatibility(),
-    });
-    defer encoder.deinit(std.testing.allocator);
+    var encoder = command.CommandEncoder.init(
+        std.testing.allocator,
+        compat.device.coreDevice().borrow(),
+        .{ .compatibility_mode = compat.compatibility() },
+    );
+    defer encoder.deinit(std.testing.allocator, std.testing.io, &guard);
 
-    var pass = try encoder.beginRenderPass(.{
+    var pass = try encoder.beginRenderPass(std.testing.io, &guard, attachment, .{
         .color_attachments = &.{.{
             .view = @ptrCast(&color_target),
             .load_op = .load,
             .store_op = .store,
         }},
     });
+    defer pass.deinit(std.testing.io, &guard);
     // The draw under test is refused, so the pass closes with nothing recorded.
     // `end()`'s own rules are M15's shard to assert, but a pass that cannot
     // close is a defect this shard would otherwise hide, so the refusal names
     // itself and fails the test rather than passing quietly.
-    defer pass.end() catch |err| std.debug.panic(
+    defer pass.end(std.testing.io, &guard) catch |err| std.debug.panic(
         "M16: the render pass refused to end after the refused draw: {s}",
         .{@errorName(err)},
     );
 
-    try bindPipelineWithoutRequirements(&pass);
+    try bindPipelineWithoutRequirements(&pass, &guard, attachment);
 
     // `var` because every one of these is named by a `commands.Ref`
     // (`src/command/commands.zig:63`), which is `?*anyopaque` and cannot carry
@@ -698,29 +745,41 @@ test "restriction 8: one view of one texture in a draw is accepted" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
+    const attachment = try createColorAttachmentState(
+        std.testing.allocator,
+        compat.device.coreDevice(),
+        &guard,
+    );
+    defer attachment.header.releaseUserLocked(&guard, std.testing.io) catch
+        @panic("compatibility attachment reference release failed");
 
-    var encoder = command.CommandEncoder.init(std.testing.allocator, .{
-        .compatibility_mode = compat.compatibility(),
-    });
-    defer encoder.deinit(std.testing.allocator);
+    var encoder = command.CommandEncoder.init(
+        std.testing.allocator,
+        compat.device.coreDevice().borrow(),
+        .{ .compatibility_mode = compat.compatibility() },
+    );
+    defer encoder.deinit(std.testing.allocator, std.testing.io, &guard);
 
-    var pass = try encoder.beginRenderPass(.{
+    var pass = try encoder.beginRenderPass(std.testing.io, &guard, attachment, .{
         .color_attachments = &.{.{
             .view = @ptrCast(&color_target),
             .load_op = .load,
             .store_op = .store,
         }},
     });
+    defer pass.deinit(std.testing.io, &guard);
     // The draw under test is accepted, so the pass closes with a real command
     // in it. Same rule as the refused-draw test above: the close is cleanup,
     // but a pass that cannot close is a defect, so the refusal names itself
     // and fails the test rather than passing quietly.
-    defer pass.end() catch |err| std.debug.panic(
+    defer pass.end(std.testing.io, &guard) catch |err| std.debug.panic(
         "M16: the render pass refused to end after the accepted draw: {s}",
         .{@errorName(err)},
     );
 
-    try bindPipelineWithoutRequirements(&pass);
+    try bindPipelineWithoutRequirements(&pass, &guard, attachment);
 
     // `var` for the reason at `:668`.
     var texture_object: TextureObject = .{};
@@ -748,16 +807,20 @@ test "restriction 9: a compressed format cannot be a copy source" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
 
     // Dawn's `CommandEncoder.cpp:413` for the texture-to-buffer direction and
     // `:422` for texture-to-texture. The port writes one of the two, inside
     // `copyTextureToBuffer`, so this row proves the texture-to-buffer half and
     // the texture-to-texture half is unproven. The port keys the rule off the
     // format recorded on the copy, because that is the field a replay reads.
-    var encoder = command.CommandEncoder.init(std.testing.allocator, .{
-        .compatibility_mode = compat.compatibility(),
-    });
-    defer encoder.deinit(std.testing.allocator);
+    var encoder = command.CommandEncoder.init(
+        std.testing.allocator,
+        compat.device.coreDevice().borrow(),
+        .{ .compatibility_mode = compat.compatibility() },
+    );
+    defer encoder.deinit(std.testing.allocator, std.testing.io, &guard);
 
     // `var` for the reason at `:668`: the copy names both by a `Ref`.
     var source: TextureObject = .{};
@@ -784,11 +847,15 @@ test "restriction 9: an uncompressed format is accepted as a copy source" {
     var compat: Harness = undefined;
     try compat.init(std.testing.allocator, .compatibility);
     defer compat.deinit(std.testing.allocator);
+    var guard = compat.lockObjects();
+    defer guard.unlock(std.testing.io);
 
-    var encoder = command.CommandEncoder.init(std.testing.allocator, .{
-        .compatibility_mode = compat.compatibility(),
-    });
-    defer encoder.deinit(std.testing.allocator);
+    var encoder = command.CommandEncoder.init(
+        std.testing.allocator,
+        compat.device.coreDevice().borrow(),
+        .{ .compatibility_mode = compat.compatibility() },
+    );
+    defer encoder.deinit(std.testing.allocator, std.testing.io, &guard);
 
     // `var` for the reason at `:668`.
     var source: TextureObject = .{};
@@ -843,6 +910,35 @@ const BufferObject = struct {
     marker: u8 = 0,
 };
 
+fn createColorAttachmentState(
+    allocator: std.mem.Allocator,
+    device: *core.Device,
+    guard: *const core.ObjectGuard,
+) !*command.attachment_state.CanonicalAttachmentState {
+    const value = try command.attachment_state.AttachmentState.fromRenderPipeline(.{
+        .color_formats = &.{@intFromEnum(api.TextureFormat.rgba8_unorm)},
+        .depth_stencil_format = 0,
+        .sample_count = 1,
+        .expand_resolve = .{},
+        .pls = null,
+    }, .{
+        .max_color_attachments = 8,
+        .max_storage_attachments = 4,
+        .max_pls_bytes = 16,
+    });
+    const attachment = try device.create(
+        allocator,
+        guard,
+        command.attachment_state.CanonicalAttachmentState,
+        .{ .kind = .attachment_state, .initial_reference = .user },
+    );
+    attachment.value = value;
+    attachment.cache_hash = 0;
+    attachment.cache_next = null;
+    attachment.header.attach(guard, std.testing.io);
+    return attachment;
+}
+
 /// The render pass attachment's view. Nothing reads it past the non-null check
 /// in `beginRenderPass`, but it must be a real pointer, and the attachment's
 /// `view` is a `Ref`, so it is a `var`.
@@ -869,32 +965,14 @@ var color_pipeline_object: PipelineObject = .{};
 /// on `MissingBindGroup` one line earlier instead.
 fn bindPipelineWithoutRequirements(
     pass: *command.render_encoder_base.RenderEncoderBase,
+    guard: *const core.ObjectGuard,
+    attachment: *command.attachment_state.CanonicalAttachmentState,
 ) command.Error!void {
-    try pass.setPipeline(.{
+    try pass.setPipeline(guard, .{
         .pipeline = @ptrCast(&color_pipeline_object),
         .requirements = .{},
+        .attachment_state = attachment,
     });
-}
-
-fn rgba8UnormFormatInfo() texture.FormatInfo {
-    return .{
-        .format = .rgba8_unorm,
-        .base_format = .rgba8_unorm,
-        .block_byte_size = 4,
-        .aspects = .{ .color = 1 },
-    };
-}
-
-fn rgba8UnormSrgbFormatInfo() texture.FormatInfo {
-    return .{
-        .format = .rgba8_unorm_srgb,
-        // A distinct base format is the point: `ViewCompatibleWith` compares
-        // base formats (`Format.cpp:135-138`), so this is what makes the view
-        // incompatible rather than another name for the same format.
-        .base_format = .rgba8_unorm_srgb,
-        .block_byte_size = 4,
-        .aspects = .{ .color = 1 },
-    };
 }
 
 fn textureLimits(device: *const engine.Device) texture.TextureLimits {

@@ -27,7 +27,7 @@ pub const Error = error{
     /// The reserved schema word is not zero.
     SpirvSchemaNotZero,
     /// A structural rule failed: a word count, an id, an id bound, a
-    /// decoration, or a literal string.
+    /// decoration, a specialization declaration, or a literal string.
     SpirvMalformed,
     /// The module declares no entry point, so it has nothing to run.
     SpirvNoEntryPoint,

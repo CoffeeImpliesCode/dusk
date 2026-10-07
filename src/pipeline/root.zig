@@ -37,6 +37,8 @@ pub const pipeline_backend = @import("pipeline_backend.zig");
 /// "same pipeline or a new one", and the bounded set of `VkPipelineCache`
 /// handles.
 pub const cache = @import("cache.zig");
+/// `cache_artifact.zig`: bounded pipeline-cache envelopes and identity checks.
+pub const cache_artifact = @import("cache_artifact.zig");
 /// `cache_key.zig`: the bytes a cache entry is found by.
 pub const cache_key = @import("cache_key.zig");
 
@@ -53,6 +55,8 @@ pub const pipeline_binding_info = @import("pipeline_binding_info.zig");
 pub const pipeline_render = @import("pipeline_render.zig");
 /// `pipeline_compute.zig`: the compute half.
 pub const pipeline_compute = @import("pipeline_compute.zig");
+/// Scalar override conversion, canonical identity, and owned Vulkan payloads.
+pub const specialization = @import("specialization.zig");
 
 // --- the shader modules -----------------------------------------------------
 

@@ -207,6 +207,8 @@ const instance_fields = [_]ProcRow{
         .field = "get_physical_device_external_semaphore_properties",
         .symbol = "vkGetPhysicalDeviceExternalSemaphoreProperties",
     },
+    // Native capability discovery queries a Features2 chain. This is required
+    // by the Vulkan 1.1 admission floor, not an optional extension proc.
     .{
         .field = "get_physical_device_features2",
         .symbol = "vkGetPhysicalDeviceFeatures2",

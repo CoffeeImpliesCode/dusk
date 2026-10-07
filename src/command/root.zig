@@ -16,9 +16,9 @@
 //! the stream alone.
 //!
 //! **What it does not claim either.** It does not claim wire compatibility with
-//! Dawn's `Commands.h`, which is the file header of `commands.zig`, and it does
-//! not claim Dawn's `Ref<T>`: the device arena owns every object until the
-//! device is destroyed, so a payload holds a pointer and nothing else.
+//! Dawn's `Commands.h`. Ordinary resource references are borrowed until native
+//! admission; stable arena headers alone do not keep their payloads alive.
+//! Render usages own canonical attachment leases and move them into Finished.
 //!
 //! **How to read this file.** Every sibling is re-exported under its own file
 //! name, so the whole surface of a file is reachable as `command.<file_name>`
@@ -37,8 +37,7 @@ pub const constants = @import("constants.zig");
 
 // --- the recorded values ---------------------------------------------------
 
-/// `commands.zig`: the 38-value tag enum, the payload of each tag, and the two
-/// exhaustive switches over them.
+/// `commands.zig`: the command tags, their payloads, and exhaustive traversal.
 pub const commands = @import("commands.zig");
 
 /// `errors.zig`: the validation rules only this module can raise, and what a
@@ -60,6 +59,13 @@ pub const programmable_encoder = @import("programmable_encoder.zig");
 /// `render_encoder_base.zig`: the render half of a pass encoder, with the
 /// pipelines, the vertex and index buffers and the six draw forms.
 pub const render_encoder_base = @import("render_encoder_base.zig");
+/// Validated compute-pass producers and per-dispatch resource usage.
+pub const compute_encoder = @import("compute_encoder.zig");
+pub const ComputeEncoder = compute_encoder.ComputeEncoder;
+/// Render-bundle producers and immutable recorded bundles.
+pub const render_bundle = @import("render_bundle.zig");
+pub const RenderBundleEncoder = render_bundle.RenderBundleEncoder;
+pub const RenderBundle = render_bundle.RenderBundle;
 
 // --- the top-level door into the stream -------------------------------------
 
@@ -74,9 +80,9 @@ pub const CommandEncoder = command_encoder.CommandEncoder;
 /// `state_tracker.zig`: the cache that answers "may this command run, given the
 /// state the pass is in".
 pub const state_tracker = @import("state_tracker.zig");
-/// `attachment_state.zig`: what a render pass renders into, as a value two
-/// pipelines can be compared against.
+/// Pure render compatibility metadata and its canonical core owner.
 pub const attachment_state = @import("attachment_state.zig");
+pub const CanonicalAttachmentState = attachment_state.CanonicalAttachmentState;
 /// `usage.zig`: which resources a pass touches and how, so a back end can raise
 /// barriers without re-deriving it.
 pub const usage = @import("usage.zig");

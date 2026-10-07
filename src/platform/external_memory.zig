@@ -95,6 +95,9 @@ pub const MemoryImportParams = struct {
 /// be handed over.
 pub const Descriptor = struct {
     allocation_size: vulkan.VkDeviceSize,
+    /// For OPAQUE_FD this is the exporting Vulkan allocation's type index.
+    /// The exporter and importer must have compatible physical-device and
+    /// driver properties. vkGetMemoryFdPropertiesKHR cannot query OPAQUE_FD.
     memory_type_index: u32,
     dedicated_allocation: NeedsDedicatedAllocation = .detect,
 };
@@ -144,6 +147,8 @@ pub const Error = dispatch.Error || dispatch.LoadError || error{
     /// descriptor, so no negative value is one; Dawn checks this at
     /// `MemoryServiceImplementationOpaqueFD.cpp:126`.
     InvalidMemoryHandle,
+    /// The exporting allocation's type must also be accepted by the image.
+    InvalidMemoryType,
 };
 
 /// Ports `ServiceImplementationOpaqueFD::CheckSupport`
@@ -285,6 +290,11 @@ pub const Service = struct {
         var requirements: vulkan.VkMemoryRequirements = undefined;
         get_requirements(self.options.device, image, &requirements);
         if (requirements.size > params.allocation_size) return error.AllocationTooSmall;
+        if (params.memory_type_index >= 32 or
+            requirements.memoryTypeBits & (@as(u32, 1) << @intCast(params.memory_type_index)) == 0)
+        {
+            return error.InvalidMemoryType;
+        }
 
         var import_info: vulkan.VkImportMemoryFdInfoKHR = .{
             .sType = vulkan.VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
@@ -472,17 +482,11 @@ test "every member of the error set is named" {
     for (@typeInfo(Error).error_set.?) |member| {
         try std.testing.expect(member.name.len > 0);
     }
-    // The `dispatch.Error` members are swept in `src/vk/dispatch.zig`, by the
-    // table that names the error every `VkResult` produces (`:1327`), and the
-    // four `dispatch.LoadError` members by the loader beside it. The two this
-    // file adds are the pair the two import tests below drive, so a third
-    // member added with no raise behind it is what makes this count fail.
-    for (@typeInfo(Error).error_set.?) |member| {
-        try std.testing.expect(member.name.len > 0);
-    }
+    // Dispatch sweeps driver and loader errors. The three service guards
+    // (allocation size, handle, and memory type) are exercised below.
     try std.testing.expect(
         @typeInfo(Error).error_set.?.len ==
-            @typeInfo(dispatch.Error).error_set.?.len + 6,
+            @typeInfo(dispatch.Error).error_set.?.len + 7,
     );
 }
 
@@ -561,6 +565,7 @@ fn stubGetImageMemoryRequirements(
     std.debug.assert(device == null);
     std.debug.assert(image == null);
     p_memory_requirements.*.size = stub_requirement_size;
+    p_memory_requirements.*.memoryTypeBits = 1;
 }
 
 test "an allocation below the requirement is refused before it allocates" {
@@ -601,4 +606,18 @@ test "a negative handle is refused before any proc is reached" {
             .dedicated_allocation = false,
         }, null),
     );
+}
+
+test "an incompatible memory type is refused before allocation" {
+    var procs = empty_device_procs;
+    procs.get_image_memory_requirements = stubGetImageMemoryRequirements;
+    var service = device_free_service;
+    service.options.device_procs = &procs;
+    for ([_]u32{ 1, 32, std.math.maxInt(u32) }) |index| {
+        try std.testing.expectError(error.InvalidMemoryType, service.importMemory(0, .{
+            .allocation_size = stub_requirement_size,
+            .memory_type_index = index,
+            .dedicated_allocation = false,
+        }, null));
+    }
 }

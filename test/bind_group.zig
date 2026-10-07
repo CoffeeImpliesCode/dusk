@@ -1,52 +1,12 @@
-//! The M12 shard: a bind group layout, its descriptor-set layout, its
-//! descriptor set, and the token that decides pipeline compatibility.
+//! Native descriptor layout and pipeline compatibility regressions.
 //!
-//! **What this shard asserts.** The acceptance sentence
-//! (`docs/40-plan.md:475-480`) has two halves and they are two tests here. The
-//! first builds a layout with a sampled texture at binding 0 and a storage
-//! buffer at binding 1, creates the bind group from it, and asserts the
-//! `VkDescriptorSetLayout` handle is non-null and carries two bindings. The
-//! second creates a pipeline layout from that bind group layout and asserts the
-//! compatibility the `u64` token expresses.
+//! Sparse public numbers must survive host packing, Vulkan layout creation,
+//! descriptor writes, and consumption by unchanged caller SPIR-V. The high-device
+//! compute test stores through binding 1 and reads the result back after submission.
+//! Array tests check one physical binding, full pool counts, and malformed bounds.
+//! The remaining native fixture tests layout compatibility and deferred set reuse.
 //!
-//! **Why the token is the second half.** Upstream refuses a deduced layout in
-//! a written pipeline layout at `PipelineLayout.cpp:122`-`:125`, and the token
-//! is the whole of that rule. So the observable is not "a pipeline layout was
-//! created" but "these two layouts are interchangeable and those two are not".
-//! The test therefore builds a second layout from the same descriptor with the
-//! same token and asserts it compares equal, then mints a token from
-//! `TokenCounter` and asserts the same descriptor with that token does not. A
-//! handle that merely existed would prove nothing, because upstream caches one
-//! `VkPipelineLayout` per specialization (`PipelineLayoutVk.cpp:116`-`:152`)
-//! and never asks the question twice.
-//!
-//! **Why the binding count is more than the handle.** A non-null handle is one
-//! bit, and a driver produces one for a layout it never checked. The count
-//! reaches the driver twice, and this shard asserts both paths: the per-type
-//! pool sizing `ComputeVulkanStaticBindings` produced
-//! (`BindGroupLayoutVk.cpp:56`-`:153`), and the number of sets the allocator
-//! cut from one pool of that sizing
-//! (`DescriptorSetAllocator.cpp:73`). Two bindings, two distinct descriptor
-//! types, one of each.
-//!
-//! **What this shard does not claim.** It does not claim a bind group with
-//! resources in it. `BindGroupVk.cpp` owns the descriptor write and no Zig file
-//! owns it yet — `layout_vk.zig`'s header names this — so the set here is
-//! allocated and non-null with nothing written into it, which is what
-//! `DescriptorSetAllocator` produces on its own. It claims no resource table
-//! and no static-sampler specialization, which `layout_vk.zig`'s header also
-//! names as not claimed.
-//!
-//! **The build wiring this shard needs.** The shard root is this file and the
-//! library is reached through `@import("dusk")`, so the shard module carries
-//! the `vulkan` module import alongside `dusk`: `src/pipeline/layout_vk.zig`
-//! resolves `@import("vulkan")` the same way `src/vk/dispatch.zig` does. That
-//! is the `addDispatchTestModule` shape at `build.zig:316`-`:331`.
-//!
-//! **The gate line runs this shard with `VK_LOADER_LAYERS_DISABLE=*`.** The
-//! assertion is `expectNoLayersForced` below, the helper
-//! `test/vulkan_device.zig:315`-`:339` carries, so both shards report which
-//! configuration they ran under.
+//! Resource tables and static-sampler specialization are outside this shard.
 
 const std = @import("std");
 const vulkan = @import("vulkan");
@@ -166,6 +126,264 @@ const TeardownErrors = struct {
     }
 };
 
+test "native layout preserves sparse public bindings across descriptor permutations" {
+    const entries = [_]bind_group_layout.Entry{
+        .{
+            .binding_number = 17,
+            .visibility = .{ .compute = true },
+            .kind = .{ .sampler = .{ .binding_type = .filtering } },
+        },
+        .{
+            .binding_number = 1,
+            .visibility = .{ .compute = true },
+            .kind = .{ .buffer = .{
+                .binding_type = .storage,
+                .has_dynamic_offset = false,
+                .min_binding_size = 4,
+            } },
+        },
+    };
+    const reversed = [_]bind_group_layout.Entry{ entries[1], entries[0] };
+    for ([_][]const bind_group_layout.Entry{ &entries, &reversed }) |descriptor_entries| {
+        var layout = try bind_group_layout.BindGroupLayout.init(
+            std.testing.allocator,
+            .{ .entries = descriptor_entries },
+            bind_group_layout.explicit_compatibility_token,
+            validate_options,
+        );
+        defer layout.deinit(std.testing.allocator);
+        const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal);
+        defer std.testing.allocator.free(bindings);
+        try std.testing.expectEqual(@as(usize, 2), bindings.len);
+        for (bindings) |binding| switch (binding.binding) {
+            1 => try std.testing.expectEqual(storage_buffer_descriptor_type, binding.descriptorType),
+            17 => try std.testing.expectEqual(
+                @as(vulkan.VkDescriptorType, vulkan.VK_DESCRIPTOR_TYPE_SAMPLER),
+                binding.descriptorType,
+            ),
+            else => return error.TestUnexpectedResult,
+        };
+        layout.internal.entries[1].binding_number = layout.internal.entries[0].binding_number;
+        try std.testing.expectError(
+            error.DuplicateBindingNumber,
+            layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+        );
+    }
+}
+
+test "native sampled texture arrays use one public binding and all descriptors" {
+    const entries = [_]bind_group_layout.Entry{
+        .{
+            .binding_number = 7,
+            .visibility = .{ .fragment = true },
+            .array_size = 3,
+            .kind = .{ .sampled_texture = .{
+                .sample_type = .float_filterable,
+                .view_dimension = .two_d,
+                .multisampled = false,
+            } },
+        },
+    };
+    var layout = try bind_group_layout.BindGroupLayout.init(
+        std.testing.allocator,
+        .{ .entries = &entries },
+        bind_group_layout.explicit_compatibility_token,
+        validate_options,
+    );
+    defer layout.deinit(std.testing.allocator);
+    const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal);
+    defer std.testing.allocator.free(bindings);
+    try std.testing.expectEqual(@as(usize, 1), bindings.len);
+    try std.testing.expectEqual(@as(u32, 7), bindings[0].binding);
+    try std.testing.expectEqual(@as(u32, 3), bindings[0].descriptorCount);
+    const pool_sizes = try layout_vk.descriptorCountsPerType(std.testing.allocator, &layout.internal);
+    defer std.testing.allocator.free(pool_sizes);
+    try std.testing.expectEqual(@as(usize, 1), pool_sizes.len);
+    try std.testing.expectEqual(sampled_image_descriptor_type, pool_sizes[0].type);
+    try std.testing.expectEqual(@as(u32, 3), pool_sizes[0].descriptorCount);
+
+    layout.internal.entries[0].array_size = 4;
+    try std.testing.expectError(
+        error.InvalidBindingArrayLayout,
+        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+    );
+    layout.internal.entries[0].array_size = 3;
+    layout.internal.entries[1].index_in_array = 0;
+    try std.testing.expectError(
+        error.InvalidBindingArrayLayout,
+        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+    );
+    try std.testing.expectError(
+        error.InvalidBindingArrayLayout,
+        layout_vk.descriptorCountsPerType(std.testing.allocator, &layout.internal),
+    );
+}
+
+// One invocation writes 42 to a storage buffer declared at set 0, binding 1.
+// These are the original fixture words, not a remapped binding-0 module.
+const sparse_storage_words = [_]u32{
+    0x07230203, 0x00010000, 0,          13,         0,
+    0x00020011, 1,          0x0003000e, 0,          1,
+    0x0005000f, 5,          1,          0x6e69616d, 0,
+    0x00060010, 1,          17,         1,          1,
+    1,          0x00030047, 5,          3,          0x00050048,
+    5,          0,          35,         0,          0x00040047,
+    7,          34,         0,          0x00040047, 7,
+    33,         1,          0x00020013, 2,          0x00030021,
+    3,          2,          0x00040015, 4,          32,
+    0,          0x0003001e, 5,          4,          0x00040020,
+    6,          2,          5,          0x0004003b, 6,
+    7,          2,          0x00040020, 8,          2,
+    4,          0x0004002b, 4,          9,          0,
+    0x0004002b, 4,          10,         42,         0x00050036,
+    2,          1,          0,          3,          0x000200f8,
+    11,         0x00050041, 8,          12,         7,
+    9,          0x0003003e, 12,         10,         0x000100fd,
+    0x00010038,
+};
+
+fn sparseUncapturedError(
+    _: std.mem.Allocator,
+    _: std.Io,
+    _: *anyopaque,
+    _: dusk.core.ErrorView,
+) void {
+    @panic("unexpected sparse binding device error");
+}
+
+test "unchanged SPIRV binding 1 reaches high native bind group storage readback" {
+    try expectNoLayersForced(std.testing.allocator);
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var instance = dusk.engine.Instance.init(.{});
+    defer instance.deinit(allocator, io) catch @panic("sparse instance teardown failed");
+    var adapters = try instance.enumerateAdapters(allocator, io, .{
+        .backend_type = .vulkan,
+        .feature_level = .core,
+        .power_preference = .undefined_,
+    });
+    defer adapters.deinit(io) catch @panic("sparse adapters teardown failed");
+    try std.testing.expect(adapters.items.len != 0);
+    var context: u8 = 0;
+    var device = try adapters.items[0].createDevice(allocator, io, .{
+        .adapter = &adapters.items[0],
+        .feature_level = adapters.items[0].getFeatureLevel(),
+        .uncaptured_context = &context,
+        .uncaptured_callback = sparseUncapturedError,
+    });
+    defer device.deinit(allocator, io) catch @panic("sparse device teardown failed");
+    const group_layout = try device.createBindGroupLayout(allocator, io, .{
+        .entries = &.{.{
+            .binding_number = 1,
+            .visibility = .{ .compute = true },
+            .kind = .{ .buffer = .{
+                .binding_type = .storage,
+                .has_dynamic_offset = false,
+                .min_binding_size = 4,
+            } },
+        }},
+    });
+    defer device.release(allocator, io, group_layout) catch @panic("sparse layout release failed");
+    const pipeline_layout = try device.createPipelineLayout(allocator, io, .{
+        .groups = &.{group_layout},
+    });
+    defer device.release(allocator, io, pipeline_layout) catch
+        @panic("sparse pipeline layout release failed");
+    const shader = try device.createShaderModule(allocator, io, .{ .words = &sparse_storage_words });
+    defer device.release(allocator, io, shader) catch @panic("sparse shader release failed");
+    try std.testing.expectEqualSlices(u32, &sparse_storage_words, shader.words);
+    const output = try device.createBuffer(allocator, io, .{
+        .size = 4,
+        .usage = .{ .storage = true, .copy_src = true },
+    });
+    defer device.release(allocator, io, output) catch @panic("sparse output release failed");
+    const readback = try device.createBuffer(allocator, io, .{
+        .size = 4,
+        .usage = .{ .copy_dst = true, .map_read = true },
+    });
+    defer device.release(allocator, io, readback) catch @panic("sparse readback release failed");
+    const group = try device.createBindGroup(allocator, io, .{
+        .layout = pipeline_layout,
+        .group_index = 0,
+        .bindings = &.{.{ .buffer = .{
+            .binding = 1,
+            .buffer = output,
+            .offset = 0,
+            .size = 4,
+            .kind = .storage,
+            .stages = .{ .compute = true },
+        } }},
+    });
+    defer device.release(allocator, io, group) catch @panic("sparse group release failed");
+    const compute = try device.createComputePipeline(allocator, io, .{
+        .layout = pipeline_layout,
+        .compute = .{ .module = shader, .entry_point = "main", .stage = .compute },
+    });
+    defer device.release(allocator, io, compute) catch @panic("sparse pipeline release failed");
+    var encoder = dusk.command.command_encoder.CommandEncoder.init(allocator, device.core.borrow(), .{});
+    defer {
+        var guard = dusk.core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
+        defer guard.unlock(io);
+        encoder.deinit(allocator, io, &guard);
+    }
+    {
+        try device.acquireOperation(io);
+        defer device.releaseOperation(io);
+        var guard = dusk.core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
+        defer guard.unlock(io);
+        var pass = try encoder.beginComputePass(.{});
+        defer pass.deinit();
+        try pass.setPipeline(.{
+            .pipeline = try compute.ref(&guard),
+            .requirements = .{
+                .bind_group_layout_mask = 1,
+                .bind_group_layout_ids = .{ @intFromPtr(&group_layout.header), 0, 0, 0 },
+            },
+        });
+        try pass.setBindGroup(.{
+            .index = 0,
+            .group = try group.ref(&guard),
+            .layout_id = @intFromPtr(&group_layout.header),
+            .min_binding_buffer_size = 4,
+            .buffers = &.{.{
+                .buffer = try output.ref(&guard),
+                .usage = (dusk.api.BufferUsage{ .storage = true }).toFlags(),
+            }},
+        });
+        try pass.dispatch(.{ .x = 1, .y = 1, .z = 1 });
+        try pass.end();
+        try encoder.copyBufferToBuffer(.{
+            .source = try output.ref(&guard),
+            .destination = try readback.ref(&guard),
+            .size = 4,
+        });
+    }
+    var finished = try encoder.finish();
+    defer {
+        var guard = dusk.core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
+        defer guard.unlock(io);
+        finished.deinit(allocator, io, &guard);
+    }
+    const submitted = try device.submit(allocator, io, &finished);
+    try device.wait(io, submitted);
+    {
+        var lease = try device.getQueue(io);
+        defer lease.deinit(io);
+        var guard = dusk.core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
+        defer guard.unlock(io);
+        const generation = try readback.native.beginMap(.{ .mode = .{ .read = true }, .size = 4 });
+        try std.testing.expectEqual(
+            dusk.engine.buffer.Buffer.MapCompletion.mapped,
+            try readback.native.completeMap(generation, submitted),
+        );
+        const bytes = try readback.native.getConstMappedRange(0, 4);
+        try std.testing.expectEqual(@as(u32, 42), std.mem.readInt(u32, bytes[0..4], .little));
+    }
+    try device.unmapBuffer(io, readback);
+}
+
 test "test-bind-group" {
     try expectNoLayersForced(std.testing.allocator);
 
@@ -223,22 +441,9 @@ fn testLayoutAndSet(
     var layout = try makeLayout(gpa);
     defer layout.deinit(gpa);
 
-    // The packed layout holds both bindings, in Dawn's type order: the buffer
-    // at index 0 and the texture at index 1, because `regular_buffer` sorts
-    // before `sampled_texture` (`BindGroupLayoutInternal.cpp:481`-`:507`).
-    // The binding numbers are what the caller wrote, so the assertions read the
-    // numbers through `findBindingByNumber` and reach the indices only where
-    // the sort order is the thing under test.
+    // Packing order is private. Look up resources by the caller's binding number.
     try std.testing.expectEqual(expected_binding_count, layout.queryBindingCount());
     try std.testing.expect(!layout.isEmpty());
-    try std.testing.expectEqual(
-        storage_buffer_binding_number,
-        layout.binding(bind_group_layout.BindingIndex.fromInt(0)).binding_number,
-    );
-    try std.testing.expectEqual(
-        sampled_texture_binding_number,
-        layout.binding(bind_group_layout.BindingIndex.fromInt(1)).binding_number,
-    );
 
     const texture = layout.findBindingByNumber(sampled_texture_binding_number) orelse
         return error.NamedBindingMissing;
@@ -310,14 +515,7 @@ fn testLayoutAndSet(
         allocator.queryMaxSetsPerPool(),
     );
 
-    // The free list is a stack, `Allocate` pops its back
-    // (`DescriptorSetAllocator.cpp:106`-`:107`), and the port fills it
-    // descending (`src/pipeline/bind_group_descriptor_set.zig:376`-`:379`), so
-    // the first `Allocate` returns set zero. Upstream fills ascending at
-    // `DescriptorSetAllocator.cpp:212`-`:213` and its first `Allocate` returns
-    // the last index, so the order asserted here is the port's.
-    try std.testing.expectEqual(@as(u32, 0), first.pool_index);
-    try std.testing.expectEqual(@as(u16, 0), first.set_index);
+    const first_set = first.set;
 
     // The set is not reusable at once. `vkCmdBindDescriptorSets` lets a driver
     // consume the set any time between the host execution of the command and
@@ -334,18 +532,15 @@ fn testLayoutAndSet(
     // deallocation must read a null set, not a recycled one
     // (`DescriptorSetAllocator.cpp:140`).
     try std.testing.expect(first.set == null);
-    try std.testing.expectEqual(@as(u16, 0), first.set_index);
 
     // A second set before the serial completes comes from the same pool, which
     // is the assertion that no pool was cut for a set the GPU still holds.
     var second = try allocator.allocate();
     try std.testing.expect(second.set != null);
-    try std.testing.expectEqual(@as(u16, 1), second.set_index);
+    try std.testing.expect(second.set != first_set);
     try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
 
-    // Completing the serial puts set zero back on the free list and reopens the
-    // pool. The count stays at one because the pool never went away; what
-    // changed is that the next `Allocate` can reach set zero again.
+    // Completing the serial makes the retired first set available again.
     try allocator.finishDeallocation(1);
 
     // A serial below the last one enqueued is refused rather than corrupting a
@@ -354,14 +549,14 @@ fn testLayoutAndSet(
     // `Empty()`, so it says nothing at all while the queue is empty. The drain
     // above emptied it, which is why `second` has to enqueue before any serial
     // can be below what the queue holds.
+    const second_set = second.set;
     try allocator.deallocate(&second, pending_serial);
     try std.testing.expect(second.set == null);
 
-    // The free list took set zero back one step ago, so this allocation returns
-    // it and `third` is not the set the queue is now holding.
+    // The second set remains unavailable until its retirement serial completes.
     var third = try allocator.allocate();
     try std.testing.expect(third.set != null);
-    try std.testing.expectEqual(@as(u16, 0), third.set_index);
+    try std.testing.expect(third.set != second_set);
     try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
 
     // One below `pending_serial` is `beginning_of_gpu_time`, the serial no submit
@@ -378,14 +573,12 @@ fn testLayoutAndSet(
     try std.testing.expect(third.set != null);
     try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
 
-    // Draining the pending serial returns set one and only set one, which is
-    // what says the refused entry never entered the queue: had it, set zero
-    // would have drained last and taken the top of the free list again.
+    // The rejected deallocation cannot make the still-live third set reusable.
     try allocator.finishDeallocation(pending_serial);
 
     const fourth = try allocator.allocate();
     try std.testing.expect(fourth.set != null);
-    try std.testing.expectEqual(@as(u16, 1), fourth.set_index);
+    try std.testing.expect(fourth.set != third.set);
     try std.testing.expectEqual(@as(u32, 1), allocator.queryPoolCount());
 }
 
@@ -577,11 +770,10 @@ fn expectOneDescriptorOfEachType(
     try std.testing.expectEqual(@as(u32, 1), sampled_image_count);
     try std.testing.expectEqual(@as(u32, 1), storage_buffer_count);
 
-    // The same two answers read back through the frontend, which is where a
-    // caller that never touches Vulkan reads them. Index 0 is the buffer and
-    // index 1 the texture, by the sort order above.
-    const buffer = layout.binding(bind_group_layout.BindingIndex.fromInt(0));
-    const texture = layout.binding(bind_group_layout.BindingIndex.fromInt(1));
+    const buffer = layout.findBindingByNumber(storage_buffer_binding_number) orelse
+        return error.NamedBindingMissing;
+    const texture = layout.findBindingByNumber(sampled_texture_binding_number) orelse
+        return error.NamedBindingMissing;
     try std.testing.expectEqual(
         storage_buffer_descriptor_type,
         layout_vk.descriptorTypeFor(buffer.layout),

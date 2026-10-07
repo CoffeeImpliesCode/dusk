@@ -4,13 +4,13 @@
 //! Ports `src/dawn/native/PhysicalDevice.{h,cpp}`. `docs/40-plan.md` §3.3
 //! `#### M8` holds the row table, one row per upstream definition.
 //!
-//! **What this file does not claim.** It does not claim a back end. The null
-//! back end is `null_backend.zig` and the Vulkan one lands at M9; what is here
-//! is the state `PhysicalDeviceBase` owns, which is what both back ends fill.
+//! Native capability mapping lives in `native_capabilities.zig`; this record
+//! retains the backend identity needed to create the corresponding native device.
 
 const api = @import("../api/api.zig");
 const features = @import("features.zig");
 const limits = @import("limits.zig");
+const native = @import("vulkan_device.zig");
 
 /// The back end a physical device came from. Dawn reaches it through
 /// `BackendConnection::GetType` (`BackendConnection.cpp:37-39`); the port
@@ -76,6 +76,13 @@ pub const PhysicalDevice = struct {
     /// The defaults for the best level this device serves, which is
     /// `GetDefaultLimitsForSupportedFeatureLevel` (`PhysicalDevice.cpp:139-144`).
     limits: limits.CombinedLimits,
+    /// Borrows the Instance backend, including cached queue-family storage.
+    /// Null physical devices have no native payload.
+    native_adapter: ?native.Adapter = null,
+    maintenance4_supported: bool = false,
+    maintenance4_extension: bool = false,
+    /// Devices retaining this physical row, including standalone Adapter users.
+    live_device_count: u64 = 0,
 
     pub fn getBackendType(self: *const PhysicalDevice) BackendType {
         return self.backend_type;

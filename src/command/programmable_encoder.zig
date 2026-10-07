@@ -104,12 +104,19 @@ pub const ProgrammableEncoder = struct {
     allocator: std.mem.Allocator,
     /// Dawn's `mEnded` (`ProgrammableEncoder.h:86`).
     ended: bool = false,
+    /// Groups open on the parent are outside this encoder's stack.
+    initial_debug_depth: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
         context: *encoding_context.Context,
     ) ProgrammableEncoder {
-        return .{ .context = context, .id = context.enterPass(), .allocator = allocator };
+        return .{
+            .context = context,
+            .id = context.enterPass(),
+            .allocator = allocator,
+            .initial_debug_depth = context.debugGroupDepth(),
+        };
     }
 
     /// Dawn's `ValidateProgrammableEncoderEnd`
@@ -118,7 +125,9 @@ pub const ProgrammableEncoder = struct {
     /// error sink; the port returns it, because the caller is `engine` and
     /// owns the sink.
     pub fn validateProgrammableEncoderEnd(self: *const ProgrammableEncoder) errors.Error!void {
-        if (self.context.debugGroupDepth() != 0) return error.DebugGroupUnbalanced;
+        if (self.context.debugGroupDepth() != self.initial_debug_depth) {
+            return error.DebugGroupUnbalanced;
+        }
     }
 
     /// Dawn's `ValidateSetBindGroup` (`ProgrammableEncoder.cpp:146-224`). The
@@ -191,11 +200,15 @@ pub const ProgrammableEncoder = struct {
         _: *const ProgrammableEncoder,
         options: SetImmediatesOptions,
     ) errors.Error!void {
-        if (options.offset % constants.immediate_element_byte_size != 0) {
+        if (options.offset % constants.immediate_element_byte_size != 0 or
+            options.data.len % constants.immediate_element_byte_size != 0)
+        {
             return error.ImmediateDataUnaligned;
         }
-        const end = @as(u64, options.offset) + options.data.len;
-        if (end > constants.max_immediate_data_bytes) return error.ImmediateDataTooLarge;
+        if (options.offset > constants.max_immediate_data_bytes) return error.ImmediateDataTooLarge;
+        if (options.data.len > constants.max_immediate_data_bytes - options.offset) {
+            return error.ImmediateDataTooLarge;
+        }
     }
 
     /// Dawn's `RecordSetImmediates` (`ProgrammableEncoder.cpp:244-259`). Dawn
@@ -209,16 +222,18 @@ pub const ProgrammableEncoder = struct {
         tracker: *state_tracker.Tracker,
         options: SetImmediatesOptions,
     ) errors.Error!void {
-        tracker.setImmediateData(options.offset, options.data);
+        try self.validateSetImmediates(options);
         if (options.data.len == 0) return;
-        const cmd = try self.context.encode(
+        try self.context.validateCanEncodeOn(self.id, false);
+        const record = try self.context.pendingAllocator().allocateCommandWithData(
             commands.SetImmediatesCmd,
-            self.id,
-            .set_immediates,
+            @intFromEnum(commands.Tag.set_immediates),
+            options.data.len,
         );
-        cmd.* = .{ .offset = options.offset, .size = @intCast(options.data.len) };
-        const out = try self.context.encodeData(u8, options.data.len);
-        @memcpy(out, options.data);
+        record.command.* = .{ .offset = options.offset, .size = @intCast(options.data.len) };
+        @memcpy(record.data, options.data);
+        // Validation above proves this infallible. Commit only after the complete record exists.
+        tracker.setImmediateData(options.offset, options.data) catch unreachable;
     }
 
     pub fn setImmediates(
@@ -226,7 +241,6 @@ pub const ProgrammableEncoder = struct {
         tracker: *state_tracker.Tracker,
         options: SetImmediatesOptions,
     ) errors.Error!void {
-        try self.validateSetImmediates(options);
         try self.recordSetImmediates(tracker, options);
     }
 
@@ -237,6 +251,7 @@ pub const ProgrammableEncoder = struct {
             self.id,
             .push_debug_group,
         );
+        errdefer self.context.status = .error_in_recording;
         var length: u32 = 0;
         try commands.addNullTerminatedString(self.context.pendingAllocator(), label, &length);
         cmd.* = .{ .length = length };
@@ -245,6 +260,10 @@ pub const ProgrammableEncoder = struct {
 
     /// Dawn's `APIPopDebugGroup` (`ProgrammableEncoder.cpp:95-110`).
     pub fn popDebugGroup(self: *ProgrammableEncoder) errors.Error!void {
+        try self.context.validateCanEncodeOn(self.id, false);
+        if (self.context.debugGroupDepth() <= self.initial_debug_depth) {
+            return error.DebugGroupUnbalanced;
+        }
         _ = try self.context.encode(commands.PopDebugGroupCmd, self.id, .pop_debug_group);
         try self.context.popDebugGroupLabel();
     }
@@ -256,8 +275,194 @@ pub const ProgrammableEncoder = struct {
             self.id,
             .insert_debug_marker,
         );
+        errdefer self.context.status = .error_in_recording;
         var length: u32 = 0;
         try commands.addNullTerminatedString(self.context.pendingAllocator(), label, &length);
         cmd.* = .{ .length = length };
     }
 };
+
+const ImmediateFixture = struct {
+    mutex: std.Io.Mutex = .init,
+    device: @import("../core/root.zig").Device = undefined,
+    context: encoding_context.Context = undefined,
+
+    fn init(self: *ImmediateFixture, allocator: std.mem.Allocator) errors.Error!void {
+        const core = @import("../core/root.zig");
+        self.device = core.Device.init(allocator, .{
+            .object_mutex = &self.mutex,
+            .uncaptured_context = self,
+            .uncaptured_callback = unexpectedError,
+        });
+        self.context = try encoding_context.Context.init(allocator, self.device.borrow(), 4096, false);
+        _ = self.context.open();
+    }
+
+    fn unexpectedError(
+        _: std.mem.Allocator,
+        _: std.Io,
+        _: *anyopaque,
+        _: @import("../core/errors.zig").ErrorView,
+    ) void {
+        @panic("unexpected immediate fixture device error");
+    }
+
+    fn deinit(self: *ImmediateFixture, allocator: std.mem.Allocator) void {
+        const core = @import("../core/root.zig");
+        var guard = core.ObjectGuard.lockUncancelable(std.testing.io, self.device.arena.objectList());
+        defer guard.unlock(std.testing.io);
+        self.context.deinit(std.testing.io, &guard);
+        self.device.deinit(allocator, &guard) catch @panic("immediate fixture references leaked");
+    }
+};
+
+test "programmable immediates record full256 and word63 at their user offsets" {
+    var fixture: ImmediateFixture = .{};
+    try fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var encoder = ProgrammableEncoder.init(std.testing.allocator, &fixture.context);
+    var tracker = state_tracker.Tracker.init(std.testing.allocator, false);
+    var full_data: [256]u8 = undefined;
+    for (&full_data, 0..) |*byte, index| byte.* = @intCast(index);
+    try encoder.setImmediates(&tracker, .{ .offset = 0, .data = &full_data });
+    const upper_word = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    try encoder.setImmediates(&tracker, .{ .offset = 252, .data = &upper_word });
+    try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
+    try std.testing.expectEqualSlices(u8, full_data[0..252], tracker.immediate_data[0..252]);
+    try std.testing.expectEqualSlices(u8, &upper_word, tracker.immediate_data[252..256]);
+
+    const stream = @import("allocator.zig");
+    var iterator = stream.Iterator.init(std.testing.allocator, fixture.context.pending.blocks);
+    try std.testing.expectEqual(commands.Tag.set_immediates, (try iterator.nextTag()).?);
+    const first = try iterator.nextCommand(commands.SetImmediatesCmd);
+    try std.testing.expectEqual(@as(u32, 0), first.offset);
+    try std.testing.expectEqual(@as(u32, 256), first.size);
+    try std.testing.expectEqualSlices(u8, &full_data, try iterator.nextData(u8, 256));
+    try std.testing.expectEqual(commands.Tag.set_immediates, (try iterator.nextTag()).?);
+    const second = try iterator.nextCommand(commands.SetImmediatesCmd);
+    try std.testing.expectEqual(@as(u32, 252), second.offset);
+    try std.testing.expectEqual(@as(u32, 4), second.size);
+    try std.testing.expectEqualSlices(u8, &upper_word, try iterator.nextData(u8, 4));
+    try std.testing.expectEqual(@as(?commands.Tag, null), try iterator.nextTag());
+}
+
+test "programmable immediate validation refuses alignment and overflowing ranges without recording" {
+    var fixture: ImmediateFixture = .{};
+    try fixture.init(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+    var encoder = ProgrammableEncoder.init(std.testing.allocator, &fixture.context);
+    var tracker = state_tracker.Tracker.init(std.testing.allocator, false);
+    const word = [_]u8{ 1, 2, 3, 4 };
+    const excessive: []const u8 = @as([*]const u8, &word)[0 .. std.math.maxInt(usize) - 3];
+    const cases = [_]struct { options: SetImmediatesOptions, expected: errors.Error }{
+        .{ .options = .{ .offset = 1, .data = &word }, .expected = error.ImmediateDataUnaligned },
+        .{ .options = .{ .offset = 0, .data = word[0..3] }, .expected = error.ImmediateDataUnaligned },
+        .{ .options = .{ .offset = 256, .data = &word }, .expected = error.ImmediateDataTooLarge },
+        .{ .options = .{ .offset = 252, .data = &([_]u8{0} ** 8) }, .expected = error.ImmediateDataTooLarge },
+        .{ .options = .{ .offset = 0xffff_fffc, .data = &word }, .expected = error.ImmediateDataTooLarge },
+        .{ .options = .{ .offset = 4, .data = excessive }, .expected = error.ImmediateDataTooLarge },
+    };
+    const initial_data = tracker.immediate_data;
+    for (cases) |case| {
+        try std.testing.expectError(case.expected, encoder.setImmediates(&tracker, case.options));
+        try std.testing.expect(fixture.context.pending.isEmpty());
+        try std.testing.expectEqualSlices(u8, &initial_data, &tracker.immediate_data);
+        try std.testing.expectEqual(@as(u64, 0), tracker.immediate_data_mask);
+    }
+    try encoder.setImmediates(&tracker, .{ .offset = 256, .data = &.{} });
+    try std.testing.expect(fixture.context.pending.isEmpty());
+    try std.testing.expectEqual(@as(u64, 0), tracker.immediate_data_mask);
+}
+
+test "programmable immediate allocation failures leave tracker and stream unchanged" {
+    var reached_success = false;
+    for (0..8) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        const allocator = failing.allocator();
+        var fixture: ImmediateFixture = .{};
+        try fixture.init(allocator);
+        defer fixture.deinit(allocator);
+        var encoder = ProgrammableEncoder.init(allocator, &fixture.context);
+        var tracker = state_tracker.Tracker.init(allocator, false);
+        tracker.aspects.set(.immediate_data);
+        const initial_aspects = tracker.aspects.bits;
+        const initial_data = tracker.immediate_data;
+        const full_data = [_]u8{0xa5} ** 256;
+        if (encoder.setImmediates(&tracker, .{ .offset = 0, .data = &full_data })) |_| {
+            try std.testing.expectEqualSlices(u8, &full_data, &tracker.immediate_data);
+            try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(fixture.context.pending.isEmpty());
+            try std.testing.expectEqualSlices(u8, &initial_data, &tracker.immediate_data);
+            try std.testing.expectEqual(@as(u64, 0), tracker.immediate_data_mask);
+            try std.testing.expectEqual(initial_aspects, tracker.aspects.bits);
+        }
+    }
+    try std.testing.expect(reached_success);
+}
+
+test "programmable immediate rollover failure preserves existing records and the block tail" {
+    var reached_success = false;
+    for (0..8) |fail_offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        var fixture: ImmediateFixture = .{};
+        try fixture.init(allocator);
+        defer fixture.deinit(allocator);
+        var encoder = ProgrammableEncoder.init(allocator, &fixture.context);
+        var tracker = state_tracker.Tracker.init(allocator, false);
+        const label = [_]u8{'x'} ** (4096 - 64);
+        try encoder.insertDebugMarker(&label);
+        var filled_block_count: usize = 1;
+        while (fixture.context.pending.blocks.items.len < fixture.context.pending.blocks.capacity and
+            filled_block_count < 16) : (filled_block_count += 1)
+        {
+            try encoder.insertDebugMarker(&label);
+        }
+        const pending = fixture.context.pendingAllocator();
+        try std.testing.expectEqual(pending.blocks.capacity, pending.blocks.items.len);
+        const old_index = pending.current_index;
+        const old_count = pending.blocks.items.len;
+        const old_len = pending.blocks.items[old_index].len;
+        const tail = pending.blocks.items[old_index].bytes[old_len..][0..4];
+        std.mem.writeInt(u32, tail, 0x1234_5678, .little);
+        const saved_bytes = try std.testing.allocator.dupe(
+            u8,
+            pending.blocks.items[old_index].bytes[0 .. old_len + 4],
+        );
+        defer std.testing.allocator.free(saved_bytes);
+        const initial_word = [_]u8{ 1, 2, 3, 4 };
+        try tracker.setImmediateData(16, &initial_word);
+        const saved_data = tracker.immediate_data;
+        const saved_mask = tracker.immediate_data_mask;
+        const full_data = [_]u8{0xa5} ** 256;
+        failing.fail_index = failing.alloc_index + fail_offset;
+        failing.resize_fail_index = failing.resize_index;
+        const recorded = encoder.setImmediates(&tracker, .{ .offset = 0, .data = &full_data });
+        failing.fail_index = std.math.maxInt(usize);
+        if (recorded) |_| {
+            try std.testing.expectEqualSlices(u8, &full_data, &tracker.immediate_data);
+            try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(old_index, pending.current_index);
+            try std.testing.expectEqual(old_count, pending.blocks.items.len);
+            try std.testing.expectEqual(old_len, pending.blocks.items[old_index].len);
+            try std.testing.expectEqualSlices(
+                u8,
+                saved_bytes,
+                pending.blocks.items[old_index].bytes[0 .. old_len + 4],
+            );
+            try std.testing.expectEqualSlices(u8, &saved_data, &tracker.immediate_data);
+            try std.testing.expectEqual(saved_mask, tracker.immediate_data_mask);
+        }
+    }
+    try std.testing.expect(reached_success);
+}

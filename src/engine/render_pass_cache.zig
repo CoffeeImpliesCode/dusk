@@ -358,14 +358,29 @@ pub fn initializePassInfo(
     }
 
     if (query.has_depth_stencil) {
+        const native_format = vk_format.vkFormat(query.depth_stencil_format);
+        const aspects: struct { has_depth: bool, has_stencil: bool } = switch (native_format) {
+            vulkan.VK_FORMAT_D16_UNORM,
+            vulkan.VK_FORMAT_X8_D24_UNORM_PACK32,
+            vulkan.VK_FORMAT_D32_SFLOAT,
+            => .{ .has_depth = true, .has_stencil = false },
+            vulkan.VK_FORMAT_S8_UINT => .{ .has_depth = false, .has_stencil = true },
+            vulkan.VK_FORMAT_D16_UNORM_S8_UINT,
+            vulkan.VK_FORMAT_D24_UNORM_S8_UINT,
+            vulkan.VK_FORMAT_D32_SFLOAT_S8_UINT,
+            => .{ .has_depth = true, .has_stencil = true },
+            // The validated query must name a depth-stencil attachment format.
+            else => unreachable,
+        };
         const layout = vk_format.vkImageLayoutForDepthStencilAttachment(.{
-            .has_depth = true,
-            .has_stencil = true,
-            .read_only = query.depth_read_only and query.stencil_read_only,
+            .has_depth = aspects.has_depth,
+            .has_stencil = aspects.has_stencil,
+            .depth_read_only = query.depth_read_only,
+            .stencil_read_only = query.stencil_read_only,
         });
         holder.attachment_descs[attachment_count] = .{
             .flags = 0,
-            .format = vk_format.vkFormat(query.depth_stencil_format),
+            .format = native_format,
             .samples = sample_count,
             .loadOp = vk_format.attachmentLoadOp(query.depth_load_op),
             .storeOp = vk_format.attachmentStoreOp(query.depth_store_op),
@@ -560,6 +575,8 @@ pub const RenderPassCache = struct {
 
     /// `RenderPassCache::GetRenderPass` (`:408-420`): lock, look up, and on a
     /// miss create then insert.
+    /// Returned native passes belong to the cache. Failed insertion destroys
+    /// the unpublished pass before releasing the lock.
     ///
     /// The `unique_id` is stamped inside the create (`:425`), so a create that
     /// fails never consumes one and two failures never collide.
@@ -573,7 +590,9 @@ pub const RenderPassCache = struct {
 
         if (self.entries.get(query)) |found| return found;
 
+        const destroy_render_pass = self.device.procs.destroy_render_pass orelse unreachable;
         const created = try self.createRenderPassForQuery(query);
+        errdefer destroy_render_pass(self.device.vk_device, created.render_pass, null);
         try self.entries.put(self.allocator, query, created);
         return created;
     }
@@ -634,5 +653,52 @@ comptime {
     // what a caller names instead of `api.enums.TextureFormat`.
     if (@typeInfo(api.enums.TextureFormat) != .@"enum") {
         @compileError("TextureFormat stopped being an enumeration");
+    }
+}
+
+test "render pass depth stencil layouts use present format aspects and both read-only flags" {
+    const attachment = vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    const read_only = vulkan.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    const depth_read_only = vulkan.VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+    const stencil_read_only = vulkan.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
+    const cases = [_]struct {
+        format: vk_format.TextureFormat,
+        layouts: [4]c_int,
+    }{
+        .{ .format = .depth16_unorm, .layouts = .{ attachment, attachment, read_only, read_only } },
+        .{ .format = .depth24_plus, .layouts = .{ attachment, attachment, read_only, read_only } },
+        .{ .format = .depth32_float, .layouts = .{ attachment, attachment, read_only, read_only } },
+        .{ .format = .stencil8, .layouts = .{ attachment, read_only, attachment, read_only } },
+        .{
+            .format = .depth24_plus_stencil8,
+            .layouts = .{ attachment, stencil_read_only, depth_read_only, read_only },
+        },
+        .{
+            .format = .depth32_float_stencil8,
+            .layouts = .{ attachment, stencil_read_only, depth_read_only, read_only },
+        },
+    };
+    for (cases) |case| {
+        for (case.layouts, 0..) |expected_layout, index| {
+            var query: RenderPassCacheQuery = .{};
+            query.setSampleCount(1);
+            query.setDepthStencil(.{
+                .format = case.format,
+                .depth_load_op = .load,
+                .depth_store_op = .store,
+                .depth_read_only = index & 2 != 0,
+                .stencil_load_op = .load,
+                .stencil_store_op = .store,
+                .stencil_read_only = index & 1 != 0,
+            });
+            var holder = RenderPassCreateInfo.init();
+            try initializePassInfo(&holder, query);
+            const expected: vulkan.VkImageLayout = @intCast(expected_layout);
+            try std.testing.expectEqual(expected, holder.attachment_descs[0].initialLayout);
+            try std.testing.expectEqual(expected, holder.attachment_descs[0].finalLayout);
+            try std.testing.expectEqual(expected, holder.depth_stencil_attachment_ref.layout);
+            try std.testing.expectEqual(index & 2 != 0, query.depth_read_only);
+            try std.testing.expectEqual(index & 1 != 0, query.stencil_read_only);
+        }
     }
 }

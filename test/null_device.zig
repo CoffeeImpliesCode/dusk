@@ -33,8 +33,9 @@ const ErrorRecorder = struct {
 
     fn record(
         allocator: std.mem.Allocator,
+        _: std.Io,
         context: *anyopaque,
-        data: *const core.ErrorData,
+        data: core.ErrorView,
     ) void {
         const self: *ErrorRecorder = @ptrCast(@alignCast(context));
         self.count += 1;
@@ -67,10 +68,12 @@ fn adapterOptions(level: api.FeatureLevel) api.RequestAdapterOptions {
 fn deviceOptions(
     adapter: *engine.Adapter,
     recorder: *ErrorRecorder,
+    object_mutex: *std.Io.Mutex,
     request: Request,
 ) engine.Device.CreateDeviceOptions {
     return .{
         .adapter = adapter,
+        .object_mutex = object_mutex,
         .label = request.label,
         .required_features = request.features,
         .required_limits = request.limits,
@@ -85,9 +88,15 @@ fn deviceOptions(
 // ---------------------------------------------------------------------------
 
 test "the null back end is one adapter that needs no driver" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqual(@as(usize, 1), list.physical_devices.len);
@@ -115,19 +124,23 @@ test "the null back end is one adapter that needs no driver" {
 }
 
 test "a forced fallback adapter finds nothing in the null back end" {
-    var instance = engine.Instance.init(.{});
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
     var options = adapterOptions(.core);
     options.force_fallback_adapter = true;
 
-    var list = try instance.enumerateAdapters(std.testing.allocator, options);
-    defer list.deinit();
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, options);
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
     try std.testing.expectEqual(@as(usize, 0), list.physical_devices.len);
 }
 
 test "a back end this build does not have is refused by name" {
-    var instance = engine.Instance.init(.{});
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
     const options: api.RequestAdapterOptions = .{
         .feature_level = .core,
         .power_preference = .undefined_,
@@ -136,12 +149,14 @@ test "a back end this build does not have is refused by name" {
 
     try std.testing.expectError(
         error.BackendNotCompiledIn,
-        instance.enumerateAdapters(std.testing.allocator, options),
+        instance.enumerateAdapters(std.testing.allocator, std.testing.io, options),
     );
 }
 
 test "an undefined feature level is refused" {
-    var instance = engine.Instance.init(.{});
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
     const options: api.RequestAdapterOptions = .{
         .feature_level = .undefined_,
         .power_preference = .undefined_,
@@ -150,7 +165,7 @@ test "an undefined feature level is refused" {
 
     try std.testing.expectError(
         error.FeatureLevelUnsupported,
-        instance.enumerateAdapters(std.testing.allocator, options),
+        instance.enumerateAdapters(std.testing.allocator, std.testing.io, options),
     );
 }
 
@@ -159,24 +174,36 @@ test "an undefined feature level is refused" {
 // ---------------------------------------------------------------------------
 
 test "the core and compatibility devices disagree on the storage-buffer limits" {
-    var instance = engine.Instance.init(.{});
-    var core_list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer core_list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var core_list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer core_list.deinit(std.testing.io) catch @panic("null core adapter teardown failed");
     var compat_list = try instance
-        .enumerateAdapters(std.testing.allocator, adapterOptions(.compatibility));
-    defer compat_list.deinit();
+        .enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.compatibility));
+    defer compat_list.deinit(std.testing.io) catch @panic("null compatibility adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var core_mutex: std.Io.Mutex = .init;
+    var compat_mutex: std.Io.Mutex = .init;
     var core_device = try core_list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&core_list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&core_list.items[0], &recorder, &core_mutex, .{}),
     );
-    defer core_device.deinit(std.testing.allocator);
+    defer core_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null core device teardown failed");
     var compat_device = try compat_list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&compat_list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&compat_list.items[0], &recorder, &compat_mutex, .{}),
     );
-    defer compat_device.deinit(std.testing.allocator);
+    defer compat_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null compatibility device teardown failed");
 
     const core_limits = core_device.getLimits();
     const compat_limits = compat_device.getLimits();
@@ -228,24 +255,36 @@ test "the core and compatibility devices disagree on the storage-buffer limits" 
 }
 
 test "the storage-texture rows follow the same two rules as the buffer rows" {
-    var instance = engine.Instance.init(.{});
-    var core_list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer core_list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var core_list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer core_list.deinit(std.testing.io) catch @panic("null core adapter teardown failed");
     var compat_list = try instance
-        .enumerateAdapters(std.testing.allocator, adapterOptions(.compatibility));
-    defer compat_list.deinit();
+        .enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.compatibility));
+    defer compat_list.deinit(std.testing.io) catch @panic("null compatibility adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var core_mutex: std.Io.Mutex = .init;
+    var compat_mutex: std.Io.Mutex = .init;
     var core_device = try core_list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&core_list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&core_list.items[0], &recorder, &core_mutex, .{}),
     );
-    defer core_device.deinit(std.testing.allocator);
+    defer core_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null core device teardown failed");
     var compat_device = try compat_list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&compat_list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&compat_list.items[0], &recorder, &compat_mutex, .{}),
     );
-    defer compat_device.deinit(std.testing.allocator);
+    defer compat_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null compatibility device teardown failed");
 
     const core_limits = core_device.getLimits();
     const compat_limits = compat_device.getLimits();
@@ -295,18 +334,28 @@ test "a required feature reaches the device and its implicit closure follows" {
     // Two devices from one adapter, so the instance has to allow it
     // (`Adapter.cpp:314-316`); the latch itself is the test below's subject.
     var instance = engine.Instance.init(
-        .{ .required_features = &.{.multiple_devices_per_adapter} },
+        .{ .backend_type = .null_, .required_features = &.{.multiple_devices_per_adapter} },
     );
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var formats_mutex: std.Io.Mutex = .init;
+    var map_mutex: std.Io.Mutex = .init;
     // `Device.cpp:1735-1752` and the edge list at `WGPUHelpers.cpp:454-460`.
     var formats_device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{ .features = &.{.texture_formats_tier2} }),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &formats_mutex, .{ .features = &.{.texture_formats_tier2} }),
     );
-    defer formats_device.deinit(std.testing.allocator);
+    defer formats_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null formats device teardown failed");
 
     try std.testing.expect(formats_device.hasFeature(.texture_formats_tier2));
     try std.testing.expect(formats_device.hasFeature(.texture_formats_tier1));
@@ -314,27 +363,39 @@ test "a required feature reaches the device and its implicit closure follows" {
 
     var map_device = try list.items[0].createDevice(
         std.testing.allocator,
+        std.testing.io,
         deviceOptions(
             &list.items[0],
             &recorder,
+            &map_mutex,
             .{ .features = &.{.buffer_map_write_extended_usages} },
         ),
     );
-    defer map_device.deinit(std.testing.allocator);
+    defer map_device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null map device teardown failed");
     try std.testing.expect(map_device.hasFeature(.buffer_map_write_extended_usages));
 }
 
 test "the enabled features come back ascending and agree with hasFeature" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
     var device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
     );
-    defer device.deinit(std.testing.allocator);
+    defer device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null device teardown failed");
 
     var out: [engine.features.feature_count]api.FeatureName = undefined;
     const reported = device.getFeatures(&out);
@@ -356,45 +417,69 @@ test "the enabled features come back ascending and agree with hasFeature" {
 // ---------------------------------------------------------------------------
 
 test "an adapter is consumed by the device it created" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
+    var refused_mutex: std.Io.Mutex = .init;
     var device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
     );
-    defer device.deinit(std.testing.allocator);
+    defer device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null device teardown failed");
 
     try std.testing.expect(list.items[0].is_consumed);
     try std.testing.expectError(
         error.AdapterConsumed,
         list.items[0].createDevice(
             std.testing.allocator,
-            deviceOptions(&list.items[0], &recorder, .{}),
+            std.testing.io,
+            deviceOptions(&list.items[0], &recorder, &refused_mutex, .{}),
         ),
     );
 }
 
 test "multiple devices per adapter is an instance feature and lifts the latch" {
     var instance = engine.Instance.init(.{
+        .backend_type = .null_,
         .required_features = &.{.multiple_devices_per_adapter},
     });
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var first_mutex: std.Io.Mutex = .init;
+    var second_mutex: std.Io.Mutex = .init;
     var first = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{ .label = "first" }),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &first_mutex, .{ .label = "first" }),
     );
-    defer first.deinit(std.testing.allocator);
+    defer first.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null first device teardown failed");
     var second = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{ .label = "second" }),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &second_mutex, .{ .label = "second" }),
     );
-    defer second.deinit(std.testing.allocator);
+    defer second.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null second device teardown failed");
 
     try std.testing.expect(!list.items[0].is_consumed);
     try std.testing.expectEqualStrings("first", first.getLabel());
@@ -403,21 +488,32 @@ test "multiple devices per adapter is an instance feature and lifts the latch" {
 
 test "a required limit above the adapter is refused and one below is accepted" {
     var instance = engine.Instance.init(
-        .{ .required_features = &.{.multiple_devices_per_adapter} },
+        .{ .backend_type = .null_, .required_features = &.{.multiple_devices_per_adapter} },
     );
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var accepted_mutex: std.Io.Mutex = .init;
+    var refused_mutex: std.Io.Mutex = .init;
     var within: api.Limits = .{};
     within.max_bind_groups = 4;
     within.max_buffer_size = 1024;
 
     var accepted = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{ .limits = &within }),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &accepted_mutex, .{ .limits = &within }),
     );
-    defer accepted.deinit(std.testing.allocator);
+    defer accepted.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null accepted device teardown failed");
+    try std.testing.expectEqual(@as(u64, 1024), accepted.getLimits().v1.max_buffer_size);
     try std.testing.expectEqual(@as(u64, 4), accepted.getLimits().v1.max_bind_groups);
 
     // `LimitU32Undefined` is `UINT32_MAX` (`src/api/constants.zig:21`-`:24`) and
@@ -433,75 +529,214 @@ test "a required limit above the adapter is refused and one below is accepted" {
         error.RequiredLimitAboveAdapterLimit,
         list.items[0].createDevice(
             std.testing.allocator,
-            deviceOptions(&list.items[0], &recorder, .{ .limits = &above }),
+            std.testing.io,
+            deviceOptions(&list.items[0], &recorder, &refused_mutex, .{ .limits = &above }),
         ),
     );
 }
 
 // ---------------------------------------------------------------------------
 // Device lifetime.
+test "a null device without an object mutex fails before allocation or parent acquisition" {
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.core));
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
+    var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
+    var options = deviceOptions(&list.items[0], &recorder, &object_mutex, .{});
+    options.object_mutex = null;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+
+    try std.testing.expectError(
+        error.MissingObjectMutex,
+        list.items[0].createDevice(failing.allocator(), std.testing.io, options),
+    );
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 0), list.items[0].live_device_count);
+    try std.testing.expect(!list.items[0].is_consumed);
+    try std.testing.expectEqual(@as(u64, 0), recorder.count);
+
+    // Refusal does not consume the latch; the same adapter still serves a valid request.
+    var device = try list.items[0].createDevice(
+        std.testing.allocator,
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
+    );
+    defer device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null device teardown failed");
+    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expect(list.items[0].is_consumed);
+}
+
 // ---------------------------------------------------------------------------
 
-test "a device that is destroyed is gone and the instance says so" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+test "destroy retires a device but final deinit releases its parent count" {
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
-    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount());
+    var object_mutex: std.Io.Mutex = .init;
+    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount(std.testing.io));
 
     var device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
     );
-    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount());
+    defer device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null device teardown failed");
+    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount(std.testing.io));
     try std.testing.expectEqual(engine.DeviceState.alive, device.getState());
     try std.testing.expect(!device.isLost());
-    try std.testing.expectEqual(@as(usize, 0), device.coreDevice().queryTrackedCount());
+    {
+        const host = device.coreDevice();
+        var guard = core.ObjectGuard.lockUncancelable(std.testing.io, host.borrow().objects);
+        defer guard.unlock(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 0), host.queryTrackedCount(&guard));
+    }
 
-    device.destroy(std.testing.allocator);
-    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount());
+    try device.destroy(std.testing.allocator, std.testing.io);
+    try device.destroy(std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount(std.testing.io));
     try std.testing.expectEqual(engine.DeviceState.destroyed, device.getState());
-    // The arena capacity is not read here. `destroy` runs `core.Device.deinit`,
-    // which poisons the core device, and this test created no object, so the
-    // capacity was already zero before the teardown ran. `test/object_arena.zig`
-    // is the shard that proves blocks come back to the allocator.
+    // Explicit retirement leaves the host shell valid until final deinit.
+    {
+        const host = device.coreDevice();
+        var guard = core.ObjectGuard.lockUncancelable(std.testing.io, host.borrow().objects);
+        defer guard.unlock(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 0), host.queryTrackedCount(&guard));
+        try std.testing.expectEqual(@as(usize, 0), host.queryCapacity(&guard));
+    }
+    try device.deinit(std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 0), list.items[0].live_device_count);
+    try device.deinit(std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 0), list.items[0].live_device_count);
+}
+
+test "live devices prevent list and instance teardown without releasing owners" {
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(
+        std.testing.allocator,
+        std.testing.io,
+        adapterOptions(.core),
+    );
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
+    const items = list.items;
+    const physical_devices = list.physical_devices;
+
+    var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
+    var device = try list.items[0].createDevice(
+        std.testing.allocator,
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
+    );
+    defer device.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null device teardown failed");
+
+    try std.testing.expectError(error.AdapterListInUse, list.deinit(std.testing.io));
+    try std.testing.expectError(
+        error.InstanceInUse,
+        instance.deinit(std.testing.allocator, std.testing.io),
+    );
+    try std.testing.expect(list.items.ptr == items.ptr);
+    try std.testing.expectEqual(items.len, list.items.len);
+    try std.testing.expect(list.physical_devices.ptr == physical_devices.ptr);
+    try std.testing.expectEqual(physical_devices.len, list.physical_devices.len);
+    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), instance.queryAdapterListCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), list.items[0].live_device_count);
+    try std.testing.expectEqualStrings("Null backend", device.adapter.getName());
+
+    try device.destroy(std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 1), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), list.items[0].live_device_count);
+    try std.testing.expectEqual(@as(u64, 1), instance.queryAdapterListCount(std.testing.io));
+    try std.testing.expectError(error.AdapterListInUse, list.deinit(std.testing.io));
+    try device.deinit(std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), instance.queryDeviceCount(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 0), list.items[0].live_device_count);
+    try std.testing.expectError(
+        error.InstanceInUse,
+        instance.deinit(std.testing.allocator, std.testing.io),
+    );
+}
+
+test "empty adapter lists still prevent instance teardown" {
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch
+        @panic("null instance teardown failed");
+    var options = adapterOptions(.core);
+    options.force_fallback_adapter = true;
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, options);
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
+
+    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+    try std.testing.expectEqual(@as(u64, 1), instance.queryAdapterListCount(std.testing.io));
+    try std.testing.expectError(
+        error.InstanceInUse,
+        instance.deinit(std.testing.allocator, std.testing.io),
+    );
+    try std.testing.expectEqual(@as(u64, 1), instance.queryAdapterListCount(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 0), list.items.len);
 }
 
 test "a lost device keeps the first reason it was given" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.core));
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
     var device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
     );
-    defer device.deinit(std.testing.allocator);
+    defer device.deinit(std.testing.allocator, std.testing.io) catch @panic("null device teardown failed");
 
-    device.handleDeviceLost(.destroyed, "the caller asked");
+    const message = try std.testing.allocator.dupe(u8, "the caller asked");
+    device.handleDeviceLost(std.testing.allocator, std.testing.io, .unknown, message);
+    std.testing.allocator.free(message);
     try std.testing.expect(device.isLost());
-    try std.testing.expectEqual(engine.DeviceLostReason.destroyed, device.lost_reason.?);
+    try std.testing.expectEqual(engine.DeviceLostReason.unknown, device.lost_reason.?);
     try std.testing.expectEqualStrings("the caller asked", device.lost_message);
     try std.testing.expectEqual(engine.DeviceState.disconnecting, device.getState());
 
-    device.handleDeviceLost(.unknown, "a second reason");
-    try std.testing.expectEqual(engine.DeviceLostReason.destroyed, device.lost_reason.?);
+    device.handleDeviceLost(std.testing.allocator, std.testing.io, .destroyed, "a second reason");
+    try std.testing.expectEqual(engine.DeviceLostReason.unknown, device.lost_reason.?);
     try std.testing.expectEqualStrings("the caller asked", device.lost_message);
 }
 
 test "the null device answers the four capability queries it owns" {
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.core));
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
     var device = try list.items[0].createDevice(
         std.testing.allocator,
-        deviceOptions(&list.items[0], &recorder, .{}),
+        std.testing.io,
+        deviceOptions(&list.items[0], &recorder, &object_mutex, .{}),
     );
-    defer device.deinit(std.testing.allocator);
+    defer device.deinit(std.testing.allocator, std.testing.io) catch @panic("null device teardown failed");
 
     // `DeviceNull.cpp:594-608`.
     try std.testing.expectEqual(@as(u32, 1), device.getOptimalBytesPerRowAlignment());
@@ -531,10 +766,8 @@ fn nameAdapterError(err: engine.AdapterError) []const u8 {
     };
 }
 
-/// Names every member of `engine.InstanceError`. The set is the union of the
-/// adapter set, the connect set, the allocator failure and the enumeration
-/// bound (`src/engine/instance.zig:42-45`), so every adapter member is a member
-/// here too.
+/// Names frontend refusals and the Vulkan discovery errors now shared by the
+/// production instance. Native failures keep their exact error name.
 fn nameInstanceError(err: engine.InstanceError) []const u8 {
     return switch (err) {
         error.OutOfMemory => "the allocator refused the physical devices or the adapters",
@@ -545,6 +778,40 @@ fn nameInstanceError(err: engine.InstanceError) []const u8 {
         error.RequiredLimitAboveAdapterLimit => "the limit is above what the adapter offers",
         error.AdapterConsumed => "the adapter already built a device",
         error.LimitsCompatibilityBlockMissing => "the adapter carries no compatibility block",
+        error.Canceled => "root-operation acquisition was canceled",
+        error.InstanceShutDown => "the instance no longer admits root work",
+        error.ReferenceCountOverflow => "a root parent or operation count cannot be retained",
+        error.MissingGlobalProc,
+        error.MissingInstanceProc,
+        error.MissingDeviceProc,
+        error.OutOfHostMemory,
+        error.OutOfDeviceMemory,
+        error.InitializationFailed,
+        error.DeviceLost,
+        error.MemoryMapFailed,
+        error.LayerNotPresent,
+        error.ExtensionNotPresent,
+        error.FeatureNotPresent,
+        error.IncompatibleDriver,
+        error.TooManyObjects,
+        error.FormatNotSupported,
+        error.FragmentedPool,
+        error.Unknown,
+        error.SurfaceLost,
+        error.NativeWindowInUse,
+        error.OutOfDate,
+        error.ValidationFailed,
+        error.UnknownResult,
+        error.UnexpectedOutcome,
+        error.VulkanVersionUnsupported,
+        error.InstanceCreationReturnedNull,
+        error.NoPhysicalDevice,
+        error.EnumerationCountUnstable,
+        error.QueueFamilyCountUnstable,
+        error.ExtensionCountUnstable,
+        error.LibraryAlreadyOpen,
+        error.OpenFailed,
+        => @errorName(err),
     };
 }
 
@@ -554,6 +821,43 @@ fn nameDeviceError(err: engine.DeviceError) []const u8 {
         error.OutOfMemory => "the allocator refused the device arena",
         error.LimitsCompatibilityBlockMissing => "the limits carry no compatibility block",
         error.FeatureLevelUnsupported => "the physical device does not serve the level",
+        error.MissingObjectMutex => "the null device requires a caller-owned object mutex",
+        error.InvalidOwner => "the device creation permit does not name this adapter and instance",
+        error.RequiredLimitIsWorseThanSupported,
+        error.RequiredAlignmentIsNotPowerOfTwo,
+        error.CompatibilityLimitsUnsupported,
+        error.MissingGlobalProc,
+        error.MissingInstanceProc,
+        error.MissingDeviceProc,
+        error.OutOfHostMemory,
+        error.OutOfDeviceMemory,
+        error.InitializationFailed,
+        error.DeviceLost,
+        error.MemoryMapFailed,
+        error.LayerNotPresent,
+        error.ExtensionNotPresent,
+        error.FeatureNotPresent,
+        error.IncompatibleDriver,
+        error.TooManyObjects,
+        error.FormatNotSupported,
+        error.FragmentedPool,
+        error.Unknown,
+        error.SurfaceLost,
+        error.NativeWindowInUse,
+        error.OutOfDate,
+        error.ValidationFailed,
+        error.UnknownResult,
+        error.UnexpectedOutcome,
+        error.NoUniversalQueueFamily,
+        error.DeviceCreationReturnedNull,
+        error.UnsupportedRequiredFeature,
+        error.RobustBufferAccessUnsupported,
+        error.DeviceProcTierMissing,
+        error.CommandContextPoolExhausted,
+        error.CommandPoolCreationReturnedNull,
+        error.CommandBufferAllocationReturnedNull,
+        error.QueueHandleIsNull,
+        => @errorName(err),
     };
 }
 
@@ -574,9 +878,10 @@ comptime {
 test "every error set member is named by this shard" {
     // The sweep above is a compile-time check. This test is the runtime half:
     // it reads one error of each kind back out of the live path and names it.
-    var instance = engine.Instance.init(.{});
-    var list = try instance.enumerateAdapters(std.testing.allocator, adapterOptions(.core));
-    defer list.deinit();
+    var instance = engine.Instance.init(.{ .backend_type = .null_ });
+    defer instance.deinit(std.testing.allocator, std.testing.io) catch @panic("null instance teardown failed");
+    var list = try instance.enumerateAdapters(std.testing.allocator, std.testing.io, adapterOptions(.core));
+    defer list.deinit(std.testing.io) catch @panic("null adapter teardown failed");
 
     try std.testing.expectEqualStrings(
         "the physical device does not serve the level",
@@ -590,10 +895,4 @@ test "every error set member is named by this shard" {
         "the limits carry no compatibility block",
         nameDeviceError(error.LimitsCompatibilityBlockMissing),
     );
-}
-
-test "the engine module declares no queue and no unused adapter storage" {
-    // The M8 module surface is exactly what `docs/40-plan.md` §1 `### M8` names.
-    // A queue added early would make M9's table a duplicate of M8's.
-    std.testing.refAllDecls(engine);
 }

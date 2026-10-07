@@ -1,22 +1,9 @@
 # cross-test profile for dusk.
 #
-# `zig-gate` section 9 runs this matrix. It is the only stage of the gate that
-# leaves the host, and it is the project's only foreign-ABI and big-endian
-# execution coverage. `zig-gate --no-cross` drops it; nothing else does.
-#
-# Read `~/zomp/cross-test.profile.sh` for the house
-# commentary on the two properties this file must respect:
-#
-#   1. A green run reports `status=partial`, not `status=pass`, whenever a row
-#      has no runner on this host. `partial` and `build_only` are judged by
-#      `fail=0`. Do not pass `--require-runners` to turn that into a failure.
-#   2. `status=fail` cannot tell a timeout from a wrong answer. A `timed out`
-#      in a per-target build log is a budget problem; anything else is a real
-#      failure. Keep the `CROSS_TIMEOUT` below set, because a `--timeout` on
-#      the command line beats this file.
-#
-# Run the Debug shard through Zig's native and QEMU runner selection. Native
-# `test` uses a shell launcher, which does not report counted results here.
+# Run this matrix separately from the installed legacy `zig-gate`, which has
+# no cross-test stage. The house contract includes this as stage 9.
+# Every selected row requires a runner; missing execution fails the check.
+# Native `test` uses a shell launcher, which does not report counted results.
 CROSS_BUILD_STEP=cross-test
 
 # The matrix. Every row must have a runner on this host, because
@@ -32,13 +19,10 @@ CROSS_BUILD_STEP=cross-test
 #                 a big-endian row is the only execution proof that they are
 #                 written correctly.
 #
-# Vulkan itself is not exercised by a foreign row. No foreign architecture has
-# a Vulkan loader or ICD here, so `src/vulkan/**` and every milestone that
-# opens a `VkInstance` stay native-only and are proven by a native run against
-# the host loader. What a foreign row proves is the half that must be portable:
-# `src/core/**`, `src/math/**`, the wire encoding, and the Vulkan struct
-# packing. Those are exactly the layers where an endianness or pointer-width
-# bug hides, so the matrix earns its place.
+# Foreign rows run the root Debug shard, including core objects, memory,
+# canonical formats, command encoding, replay fixtures, and Vulkan ABI types.
+# They use injected Vulkan procedures, not a foreign loader or device.
+# Native GPU readback remains a separate acceptance check.
 #
 # The matrix grows as the port lands. `docs/40-plan.md` names the milestone
 # that adds rows and the reason for each: riscv64 and loongarch64 for wider
@@ -62,6 +46,4 @@ CROSS_BUILD_TIMEOUT=3600
 CROSS_TIMEOUT=600
 
 # Foreign Linux rows build static musl, so no CROSS_LIBC_RUNTIMES loader is
-# needed. The C half of the port, once it exists, will need a row per system
-# library it links, because a `translate-c` binding that only works against the
-# host glibc is not portable coverage. `docs/40-plan.md` names the milestone.
+# needed. This matrix does not claim foreign GPU execution.

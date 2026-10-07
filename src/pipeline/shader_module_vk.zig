@@ -26,12 +26,12 @@
 
 const std = @import("std");
 const spirv = @import("../spirv/root.zig");
+const spirv_header = @import("../spirv/header.zig");
 const vk = @import("../vk/dispatch.zig");
 const vulkan = @import("vulkan");
 
-/// Everything the shader-module path needs from a device: the handle and the
-/// two entry points. A `Device` is not a `VkDevice` alias and not a device
-/// object; it is the seam, so `src/pipeline` needs no other module's fields.
+/// Everything the shader-module path needs from a device: the handle, effective
+/// Vulkan API version and two entry points. This borrowed seam owns no device.
 ///
 /// The two proc fields carry no `?` of their own: the generated bindings
 /// already make every `PFN_vk*` optional (`src/vulkan.zig:5145`), so a `?` here
@@ -39,6 +39,10 @@ const vulkan = @import("vulkan");
 /// optional it would have to unwrap a second time.
 pub const Device = struct {
     handle: vulkan.VkDevice,
+    /// Minimum of the instance's negotiated API version and the physical
+    /// device's API version, encoded as a Vulkan version. No SPIR-V extension
+    /// support is implied: only the core Vulkan version sets the accepted limit.
+    api_version: u32,
     create_shader_module: vulkan.PFN_vkCreateShaderModule,
     destroy_shader_module: vulkan.PFN_vkDestroyShaderModule,
     /// The two fields of `vk.DeviceProcs` this file calls, taken from the
@@ -47,12 +51,33 @@ pub const Device = struct {
     ///
     /// The parameter is `device_procs` because `procs` is `Device.procs` below,
     /// and a parameter of that name would shadow it.
-    pub fn init(device_procs: *const vk.DeviceProcs, handle: vulkan.VkDevice) Device {
+    pub fn init(
+        device_procs: *const vk.DeviceProcs,
+        handle: vulkan.VkDevice,
+        api_version: u32,
+    ) Device {
         return .{
             .handle = handle,
+            .api_version = api_version,
             .create_shader_module = device_procs.create_shader_module,
             .destroy_shader_module = device_procs.destroy_shader_module,
         };
+    }
+
+    /// Rejects a module above the core SPIR-V limit without allocating or
+    /// calling Vulkan. Vulkan 1.1 accepts up to 1.3, 1.2 up to 1.5, and 1.3
+    /// up to 1.6. No SPIR-V extensions are enabled by this seam.
+    pub fn validateSpirvVersion(self: *const Device, words: []const spirv.Word) spirv.Error!void {
+        const header = try spirv_header.parse(words);
+        const max_minor: u8 = if (self.api_version >= vulkan.VK_API_VERSION_1_3)
+            6
+        else if (self.api_version >= vulkan.VK_API_VERSION_1_2)
+            5
+        else if (self.api_version >= vulkan.VK_API_VERSION_1_1)
+            3
+        else
+            0;
+        if (header.version.minor > max_minor) return error.SpirvVersionUnsupported;
     }
 
     /// Both entry points or neither. `create` reads the pair so a module whose
@@ -85,14 +110,16 @@ pub const CreateError = error{
     /// one code Dawn special-cases; `core/errors.zig:245` carries the same
     /// classification for the error a device reports upward.
     PipelineUncategorized,
-} || vk.Error;
+} || vk.Error || spirv.Error;
 
 /// Creates the Vulkan shader module over `words`.
 ///
 /// The two create-info fields that matter are set exactly as Dawn sets them
 /// (`ShaderModuleVk.cpp:500-501`) and they are the whole port claim: the byte
 /// count is the word count times four, and `pCode` is the caller's words.
+/// An unsupported SPIR-V version fails before native dispatch and creates no handle.
 pub fn create(device: *const Device, words: []const spirv.Word) CreateError!vulkan.VkShaderModule {
+    try device.validateSpirvVersion(words);
     const procs = device.procs() orelse return error.MissingShaderModuleProc;
 
     const create_info: vulkan.VkShaderModuleCreateInfo = .{

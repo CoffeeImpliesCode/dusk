@@ -881,6 +881,7 @@ const Model = struct {
             .object,
             .structure,
             .@"callback function",
+            .@"callback info",
             .@"function pointer",
             => try pascalName(gpa, upstream),
             else => return error.UnexpectedCategory,
@@ -930,34 +931,6 @@ const Model = struct {
         };
     }
 
-    /// The `callback function` a `callback info` carries.
-    ///
-    /// The info names it among its members and it is not always the first one:
-    /// `device lost callback info` at `src/dawn/dawn.json` lists `mode` first.
-    /// Reading member zero would type the parameter as `CallbackMode`.
-    fn callbackFunctionOf(
-        self: *const Model,
-        gpa: Allocator,
-        scope: Scope,
-        info: Entry,
-    ) GenerateError![]const u8 {
-        for (info.members()) |member| {
-            const entry = self.lookup(member.type) orelse continue;
-            if (entry.category != .@"callback function") continue;
-            return self.typeName(gpa, scope, member.type);
-        }
-        return error.UnexpectedCategory;
-    }
-
-    /// True when `upstream` names a `callback info`. A member or argument of
-    /// that type becomes the callback function itself, named after the member
-    /// with ` info` removed, which is what `dawn_json_generator.py:1020-1035`
-    /// does for the C header.
-    fn isCallbackInfo(self: *const Model, upstream: []const u8) bool {
-        const entry = self.lookup(upstream) orelse return false;
-        return entry.category == .@"callback info";
-    }
-
     /// True when `upstream` names a type a callback can arrive as: a
     /// `callback function`, a `callback info`, or a `function pointer`.
     fn isCallbackTyped(self: *const Model, upstream: []const u8) bool {
@@ -998,16 +971,6 @@ const Rendered = struct {
     out: bool = false,
     zig_name: []const u8,
 };
-/// The Zig name for a value that carries a `callback info`: the info's snake
-/// name with `_info` removed and `_callback` kept, so the name ends in
-/// `_callback` (`AGENTS.md` section 2). Every info in `dawn.json` ends in
-/// `callback info`; anything else is a new shape and fails loudly.
-fn callbackCarryName(gpa: Allocator, info_name: []const u8) GenerateError![]const u8 {
-    const snake = try snakeName(gpa, info_name);
-    const cut = std.mem.lastIndexOf(u8, snake, "_callback_info") orelse return error.UnexpectedCategory;
-    return std.fmt.allocPrint(gpa, "{s}_callback", .{snake[0..cut]});
-}
-
 /// Render one member or one argument.
 ///
 /// `annotation` chooses the wrapper, `length` turns a pointer into a slice and
@@ -1023,24 +986,13 @@ fn renderMember(
 ) GenerateError!Rendered {
     const zig_name = try snakeName(gpa, member.name);
 
-    // A callback info becomes the callback function it wraps, so the name ends
-    // in `_callback` (`AGENTS.md` section 2).
-    if (model.isCallbackInfo(member.type)) {
-        const info = try model.entryOrFail(member.type);
-        const zig_type = try std.fmt.allocPrint(
-            gpa,
-            "?*const {s}",
-            .{try model.callbackFunctionOf(gpa, scope, info)},
-        );
-        return .{
-            .zig_type = zig_type,
-            .default = "null",
-            .nullable = true,
-            .zig_name = try callbackCarryName(gpa, info.name),
-        };
-    }
-
-    const optional = member.optional orelse false;
+    const optional = (member.optional orelse false) or if (member.default) |parsed|
+        model.isCallbackTyped(member.type) and switch (parsed) {
+            .string => |value| std.mem.eql(u8, value, "nullptr"),
+            else => false,
+        }
+    else
+        false;
     const annotation = member.annotation;
     const counted = member.length != null;
 
@@ -1903,11 +1855,7 @@ fn emitErrors(_: *const Model, output: *Output) !void {
     try header(&errors);
     _ = try errors.add("const enums = @import(\"enums.zig\");");
     _ = try errors.add("");
-    _ = try errors.add("/// Every failure a generated entry point reports.");
-    _ = try errors.add("///");
-    _ = try errors.add("/// The set follows the `error type` enum in dawn.json, minus `no error`.");
-    _ = try errors.add("/// `core` owns the object model, so this file declares the set and the");
-    _ = try errors.add("/// mapping both ways, and nothing else.");
+    _ = try errors.add("/// Upstream error values, without `no error`.");
     _ = try errors.add("pub const Error = error{");
     for (error_value_map) |member| {
         _ = try errors.addIndent(1, try std.fmt.allocPrint(output.gpa, "{s},", .{member.zig}));
@@ -1942,6 +1890,19 @@ fn emitErrors(_: *const Model, output: *Output) !void {
     _ = try errors.addIndent(1, "};");
     _ = try errors.add("}");
     _ = try errors.add("");
+    for (native_support_errors) |support| {
+        _ = try errors.add("/// Native support failures; not upstream `ErrorType` values.");
+        _ = try errors.addDecl(support.name, try std.fmt.allocPrint(
+            output.gpa,
+            "pub const {s} = error{{",
+            .{support.name},
+        ));
+        for (support.members) |member| {
+            _ = try errors.addIndent(1, try std.fmt.allocPrint(output.gpa, "{s},", .{member}));
+        }
+        _ = try errors.add("};");
+        _ = try errors.add("");
+    }
 
     output.errors = errors;
 }
@@ -1989,7 +1950,7 @@ fn emitNatives(model: *const Model, output: *Output) !void {
     output.natives = natives;
 }
 
-/// Emit one callback function pointer type.
+/// Emit one native Zig callback function pointer type.
 fn emitCallbackFunction(
     model: *const Model,
     output: *Output,
@@ -2030,7 +1991,7 @@ fn emitCallbackFunction(
         tag_name,
         try std.fmt.allocPrint(
             gpa,
-            "pub const {s} = *const fn ({s}) callconv(.c) {s};",
+            "pub const {s} = *const fn ({s}) {s};",
             .{ tag_name, params.items, returns },
         ),
     );
@@ -2043,13 +2004,12 @@ fn emitCallbackFunction(
         .zig = try std.fmt.allocPrint(gpa, "`api.callbacks.{s}`", .{tag_name}),
         .zig_file = "src/api/callbacks.zig",
         .zig_line = line,
-        .decision = "callback function, C function pointer with userdata first",
+        .decision = "callback function, native Zig function pointer with userdata first",
     });
 }
 
-/// Render one argument of a callback function. `userdata` is added by the
-/// emitter, not the JSON: the JSON never lists it, but Dawn's C templates add
-/// it as the first parameter of every callback.
+/// Render one argument of a callback function. The emitter adds the synthetic
+/// Zig `userdata` first parameter. This is not an upstream C-ABI projection.
 fn renderCallbackArg(
     model: *const Model,
     gpa: Allocator,
@@ -2086,9 +2046,8 @@ fn emitCallbackInfo(
     var member_index: usize = 0;
     for (entry.members()) |member| {
         const rendered = try renderMember(model, gpa, .callbacks, member);
-        // A `mode` member is a required enum field and every other member is
-        // a nullable handle, so the rendered default already says which is
-        // which. There is no `callback mode` alias in this file to satisfy.
+        // Preserve each schema field and its default. Nullable callbacks keep
+        // their function-pointer type inside the record.
         const field_line = if (rendered.default) |default|
             try callbacks.addIndent(1, try std.fmt.allocPrint(
                 gpa,
@@ -2401,10 +2360,8 @@ const Param = struct {
 
 /// Resolve the parameters of one method.
 ///
-/// A `callback info` argument becomes the callback function it wraps, named
-/// after the argument with ` info` removed, exactly as a `callback info`
-/// member does. Dawn's C header does the same thing
-/// (`dawn_json_generator.py:1020-1035`).
+/// Callback-info arguments retain their record type and JSON argument name.
+/// The callback marker keeps them last and outside grouped options.
 fn resolveParams(
     model: *const Model,
     gpa: Allocator,
@@ -2414,21 +2371,6 @@ fn resolveParams(
     const raw_args = method.args orelse &.{};
     var params: std.ArrayList(Param) = .empty;
     for (raw_args) |arg| {
-        if (model.isCallbackInfo(arg.type)) {
-            const info = try model.entryOrFail(arg.type);
-            try params.append(gpa, .{
-                .name = try callbackCarryName(gpa, info.name),
-                .zig_type = try std.fmt.allocPrint(
-                    gpa,
-                    "?*const {s}",
-                    .{try model.callbackFunctionOf(gpa, scope, info)},
-                ),
-                .callback = true,
-                .json_name = arg.name,
-                .json_type = arg.type,
-            });
-            continue;
-        }
         const member: JsonMember = .{
             .name = arg.name,
             .type = arg.type,
@@ -2448,19 +2390,84 @@ fn resolveParams(
     return params.toOwnedSlice(gpa);
 }
 
-/// The Zig return for a method. Any upstream entry point can raise, so a
-/// return type becomes `errors.Error!T`. A nullable return stays nullable
-/// inside the error union.
+/// Native support effects are independent of Dawn's `error type` enum.
+const MethodEffect = enum { ordinary, async_start, callback_control, process_events, future_wait };
+
+const method_effects = [_]struct {
+    owner: []const u8,
+    method: []const u8,
+    effect: MethodEffect,
+}{
+    .{ .owner = "adapter", .method = "request device", .effect = .async_start },
+    .{ .owner = "buffer", .method = "map async", .effect = .async_start },
+    .{ .owner = "device", .method = "create compute pipeline async", .effect = .async_start },
+    .{ .owner = "device", .method = "create render pipeline async", .effect = .async_start },
+    .{ .owner = "device", .method = "pop error scope", .effect = .async_start },
+    .{ .owner = "instance", .method = "request adapter", .effect = .async_start },
+    .{ .owner = "queue", .method = "on submitted work done", .effect = .async_start },
+    .{ .owner = "shader module", .method = "get compilation info", .effect = .async_start },
+    .{ .owner = "device", .method = "set logging callback", .effect = .callback_control },
+    .{ .owner = "device", .method = "get lost future", .effect = .callback_control },
+    .{ .owner = "instance", .method = "process events", .effect = .process_events },
+    .{ .owner = "instance", .method = "wait any", .effect = .future_wait },
+};
+
+fn methodEffect(owner: []const u8, method: []const u8) MethodEffect {
+    for (method_effects) |contract| {
+        if (std.mem.eql(u8, owner, contract.owner) and
+            std.mem.eql(u8, method, contract.method)) return contract.effect;
+    }
+    return .ordinary;
+}
+
+const native_support_errors = [_]struct {
+    name: []const u8,
+    members: []const []const u8,
+}{
+    .{ .name = "AsyncStartError", .members = &.{
+        "OutOfMemory",               "Canceled",               "MissingFutureNamespaceSource", "FutureNamespaceExhausted",
+        "FutureNamespaceContention", "FutureIdExhausted",      "AsyncCapacityExceeded",        "InvalidAsyncCapacity",
+        "InvalidCallbackMode",       "InvalidOwner",           "OwnerStopped",                 "InstanceShutDown",
+        "TaskQueueFull",             "PoolShutDown",           "WorkerExhausted",              "ConcurrencyUnavailable",
+        "InvalidRequest",            "ReferenceCountOverflow",
+    } },
+    .{ .name = "FutureWaitError", .members = &.{
+        "Canceled",             "MissingFutureNamespaceSource", "InvalidFutureId",    "FutureInstanceMismatch",
+        "FutureCountMismatch",  "WaitCountExceeded",            "ReentrantWait",      "InstanceShutDown",
+        "TimedWaitUnavailable", "WaitIterationExhausted",       "WaitEpochExhausted", "ReferenceCountOverflow",
+    } },
+    .{ .name = "CallbackControlError", .members = &.{
+        "Canceled", "MissingFutureNamespaceSource", "DeviceNotAlive", "InvalidOwner",
+    } },
+    .{ .name = "ProcessEventsError", .members = &.{
+        "InstanceShutDown", "ReferenceCountOverflow",
+    } },
+};
+
+/// Ordinary methods keep the upstream error projection. Native support methods
+/// use finite admission, callback-control, polling or wait errors instead.
 fn methodReturnType(
     model: *const Model,
     gpa: Allocator,
     scope: Scope,
+    effect: MethodEffect,
     method: JsonMethod,
 ) GenerateError![]const u8 {
-    const value = method.returns orelse return "void";
+    const error_set = switch (effect) {
+        .ordinary => "Error",
+        .async_start => "AsyncStartError",
+        .callback_control => "CallbackControlError",
+        .process_events => "ProcessEventsError",
+        .future_wait => "FutureWaitError",
+    };
+    const value = method.returns orelse {
+        if (effect == .ordinary) return "void";
+        return std.fmt.allocPrint(gpa, "errors.{s}!void", .{error_set});
+    };
     const ref = try resolveTypeRef(value);
     const zig_ret = try model.valueTypeName(gpa, scope, ref.name);
-    return std.fmt.allocPrint(gpa, "errors.Error!{s}", .{zig_ret});
+    const optional_prefix = if (ref.optional and !std.mem.startsWith(u8, zig_ret, "?")) "?" else "";
+    return std.fmt.allocPrint(gpa, "errors.{s}!{s}{s}", .{ error_set, optional_prefix, zig_ret });
 }
 
 /// Emit one object: the handle struct, its method signatures, and the options
@@ -2515,52 +2522,53 @@ fn emitObject(
     });
 }
 
-/// Emit one method signature and the options structs its parameters need.
-fn emitMethod(
-    model: *const Model,
-    output: *Output,
-    objects: *Out,
-    entry: Entry,
-    tag_name: []const u8,
-    method: JsonMethod,
-    json_line: u32,
-) !void {
-    const gpa = output.gpa;
-    const params = try resolveParams(model, gpa, .objects, method);
+const MethodSignature = struct {
+    params: []const u8,
+    returns: []const u8,
+    grouped: bool,
+    callback_last: bool,
+    effect: MethodEffect,
+};
 
-    // A callback is the last parameter. Anything else is a defect in the JSON
-    // read or in the parameter order above, never a second callback.
+/// Both surfaces use one emitter. Only object declarations group repeated
+/// upstream argument types; injected allocator and Io never enter a group.
+fn emitMethodSignature(
+    model: *const Model,
+    gpa: Allocator,
+    scope: Scope,
+    objects: ?*Out,
+    owner: []const u8,
+    self_type: []const u8,
+    method: JsonMethod,
+) GenerateError!MethodSignature {
+    const params = try resolveParams(model, gpa, scope, method);
     for (params, 0..) |param, index| {
         if (param.callback and index + 1 != params.len) return error.CallbackArgumentNotLast;
     }
-
-    _ = try objects.addIndent(1, try std.fmt.allocPrint(
-        gpa,
-        "/// Generated from dawn.json \"{s}\" method \"{s}\" (src/dawn/dawn.json:{d}).",
-        .{ entry.name, method.name, json_line },
-    ));
-    if (method.@"no autolock") |_| {
-        _ = try objects.addIndent(1, "/// dawn.json marks this method `no autolock`.");
-    }
-
-    // Two or more parameters of one type become an options struct
-    // (`AGENTS.md` section 2). Count by rendered Zig type, minus callbacks,
-    // which stay their own parameter and stay last.
-    var by_zig_type: std.StringHashMap(usize) = .init(gpa);
-    for (params) |param| {
-        if (param.callback) continue;
-        const slot = try by_zig_type.getOrPut(param.zig_type);
-        if (slot.found_existing) {
-            slot.value_ptr.* += 1;
-        } else {
-            slot.value_ptr.* = 1;
-        }
-    }
-
-    const method_pascal = try pascalName(gpa, method.name);
+    const effect = methodEffect(owner, method.name);
     var signature: std.ArrayList(u8) = .empty;
     try signature.appendSlice(gpa, "self: ");
-    try signature.appendSlice(gpa, tag_name);
+    try signature.appendSlice(gpa, self_type);
+    if (effect == .async_start) {
+        try signature.appendSlice(gpa, ", allocator: std.mem.Allocator");
+    }
+    if (effect != .ordinary) {
+        try signature.appendSlice(gpa, ", io: std.Io");
+    }
+
+    var by_zig_type: std.StringHashMap(usize) = .init(gpa);
+    if (objects != null) {
+        for (params) |param| {
+            if (param.callback) continue;
+            const slot = try by_zig_type.getOrPut(param.zig_type);
+            if (slot.found_existing) {
+                slot.value_ptr.* += 1;
+            } else {
+                slot.value_ptr.* = 1;
+            }
+        }
+    }
+    const method_pascal = if (objects != null) try pascalName(gpa, method.name) else "";
     var emitted_groups: std.ArrayList([]const u8) = .empty;
     for (params) |param| {
         const count = by_zig_type.get(param.zig_type) orelse 0;
@@ -2571,7 +2579,6 @@ fn emitMethod(
             }
             if (seen) continue;
             try emitted_groups.append(gpa, param.zig_type);
-
             var group_fields: std.ArrayList(Param) = .empty;
             for (params) |other| {
                 if (!other.callback and std.mem.eql(u8, other.zig_type, param.zig_type)) {
@@ -2588,32 +2595,29 @@ fn emitMethod(
                 "{s}_options",
                 .{try snakeName(gpa, group_fields.items[0].json_name)},
             );
-
             try signature.appendSlice(gpa, ", ");
             try signature.appendSlice(gpa, group_param);
             try signature.appendSlice(gpa, ": ");
             try signature.appendSlice(gpa, group_name);
 
-            _ = try objects.addIndent(1, try std.fmt.allocPrint(
+            const out = objects.?;
+            _ = try out.addIndent(1, try std.fmt.allocPrint(
                 gpa,
                 "/// {d} parameters of `{s}` become this struct (`AGENTS.md` section 2).",
                 .{ count, param.zig_type },
             ));
-            _ = try objects.addIndent(
+            _ = try out.addIndent(
                 1,
                 try std.fmt.allocPrint(gpa, "pub const {s} = struct {{", .{group_name}),
             );
             for (group_fields.items) |field| {
-                // An option field is a parameter, not a member: the member
-                // table carries the `members` arrays of the JSON, and the
-                // method row already names the struct that holds these.
-                _ = try objects.addIndent(2, try std.fmt.allocPrint(
+                _ = try out.addIndent(2, try std.fmt.allocPrint(
                     gpa,
                     "{s}: {s},",
                     .{ field.name, field.zig_type },
                 ));
             }
-            _ = try objects.addIndent(1, "};");
+            _ = try out.addIndent(1, "};");
         } else {
             try signature.appendSlice(gpa, ", ");
             try signature.appendSlice(gpa, param.name);
@@ -2621,26 +2625,69 @@ fn emitMethod(
             try signature.appendSlice(gpa, param.zig_type);
         }
     }
+    return .{
+        .params = try signature.toOwnedSlice(gpa),
+        .returns = try methodReturnType(model, gpa, scope, effect, method),
+        .grouped = emitted_groups.items.len != 0,
+        .callback_last = params.len != 0 and params[params.len - 1].callback,
+        .effect = effect,
+    };
+}
 
-    const return_type = try methodReturnType(model, gpa, .objects, method);
+/// Emit one method signature and the options structs its parameters need.
+fn emitMethod(
+    model: *const Model,
+    output: *Output,
+    objects: *Out,
+    entry: Entry,
+    tag_name: []const u8,
+    method: JsonMethod,
+    json_line: u32,
+) !void {
+    const gpa = output.gpa;
+    _ = try objects.addIndent(1, try std.fmt.allocPrint(
+        gpa,
+        "/// Generated from dawn.json \"{s}\" method \"{s}\" (src/dawn/dawn.json:{d}).",
+        .{ entry.name, method.name, json_line },
+    ));
+    if (method.@"no autolock") |_| {
+        _ = try objects.addIndent(1, "/// dawn.json marks this method `no autolock`.");
+    }
+
+    const signature = try emitMethodSignature(
+        model,
+        gpa,
+        .objects,
+        objects,
+        entry.name,
+        tag_name,
+        method,
+    );
     const camel = try camelName(gpa, method.name);
     const decl_line = try objects.addIndent(
         1,
         try std.fmt.allocPrint(
             gpa,
             "pub const {s} = fn ({s}) {s};",
-            .{ camel, signature.items, return_type },
+            .{ camel, signature.params, signature.returns },
         ),
     );
     _ = try objects.add("");
 
     var decision: std.ArrayList(u8) = .empty;
     try decision.appendSlice(gpa, "method");
-    if (emitted_groups.items.len > 0) {
+    if (signature.grouped) {
         try decision.appendSlice(gpa, ", options struct for repeated types");
     }
-    if (params.len > 0 and params[params.len - 1].callback) {
+    if (signature.callback_last) {
         try decision.appendSlice(gpa, ", callback last");
+    }
+    switch (signature.effect) {
+        .ordinary => {},
+        .async_start => try decision.appendSlice(gpa, ", allocator and Io, finite async admission errors"),
+        .callback_control => try decision.appendSlice(gpa, ", Io, finite callback control errors"),
+        .process_events => try decision.appendSlice(gpa, ", Io, finite event processing errors"),
+        .future_wait => try decision.appendSlice(gpa, ", Io, finite future wait errors"),
     }
     try output.methods.append(gpa, .{
         .owner = entry.name,
@@ -2800,20 +2847,19 @@ fn emitProcHeader(output: *Output) !void {
     output.proc = proc;
 }
 
-/// Emit `src/api/proc.zig`: the `Proc` type, the 205-entry `ProcTable`, and the
+/// Emit `src/api/proc.zig`: the 205-entry native Zig `ProcTable` and the
 /// five free functions in the `function` category.
 ///
-/// The table is the C entry-point table, shaped like Dawn's
-/// `generator/templates/dawn_proc_table.h`: each entry is a C function pointer
-/// that returns a `Proc`. The free functions are the five module-level entry
-/// points, emitted as `fn` types beside the table.
+/// Dawn's `generator/templates/dawn_proc_table.h` uses method-specific
+/// function pointers, not generic proc-retrieval returns. This table projects
+/// those contracts to native Zig, including slices, chains, and error unions.
+/// It does not declare Dawn's C ABI.
 fn emitProc(model: *const Model, output: *Output) !void {
     const gpa = output.gpa;
     var proc = output.proc;
 
-    // The JSON's own `proc` entry already declares this type, so the table
-    // names it instead of declaring a second `Proc` (`AGENTS.md` section 2).
-    _ = try proc.add("/// The C entry-point table. 205 entries, one per method.");
+    _ = try proc.add("/// Native Zig procedures. 205 entries, one per method.");
+    _ = try proc.add("/// Returns follow the object method contracts. This is not Dawn's C ABI.");
     _ = try proc.add("");
     _ = try proc.addDecl("ProcTable", "pub const ProcTable = struct {");
 
@@ -2821,23 +2867,25 @@ fn emitProc(model: *const Model, output: *Output) !void {
         if (entry.category != .object) continue;
         const object_name = try pascalName(gpa, entry.name);
         for (entry.methods()) |method| {
-            const params = try resolveParams(model, gpa, .proc, method);
-            var signature: std.ArrayList(u8) = .empty;
-            try signature.appendSlice(gpa, try std.fmt.allocPrint(
+            const self_type = try std.fmt.allocPrint(gpa, "objects.{s}", .{object_name});
+            const signature = try emitMethodSignature(
+                model,
                 gpa,
-                "self: objects.{s}",
-                .{object_name},
-            ));
-            for (params) |param| {
-                try signature.appendSlice(gpa, ", ");
-                try signature.appendSlice(gpa, param.name);
-                try signature.appendSlice(gpa, ": ");
-                try signature.appendSlice(gpa, param.zig_type);
-            }
+                .proc,
+                null,
+                entry.name,
+                self_type,
+                method,
+            );
             _ = try proc.addIndent(1, try std.fmt.allocPrint(
                 gpa,
-                "{s}_{s}: *const fn ({s}) callconv(.c) callbacks.Proc,",
-                .{ try snakeName(gpa, entry.name), try snakeName(gpa, method.name), signature.items },
+                "{s}_{s}: *const fn ({s}) {s},",
+                .{
+                    try snakeName(gpa, entry.name),
+                    try snakeName(gpa, method.name),
+                    signature.params,
+                    signature.returns,
+                },
             ));
         }
     }
@@ -3215,8 +3263,16 @@ fn emitApi(model: *const Model, output: *Output) !void {
     _ = try api.add("pub const objects = @import(\"objects.zig\");");
     _ = try api.add("pub const proc = @import(\"proc.zig\");");
     _ = try api.add("");
-    _ = try api.add("/// Every failure a generated entry point reports.");
+    _ = try api.add("/// Upstream error values.");
     _ = try api.addDecl("Error", "pub const Error = errors.Error;");
+    _ = try api.add("");
+    for (native_support_errors) |support| {
+        _ = try api.addDecl(support.name, try std.fmt.allocPrint(
+            gpa,
+            "pub const {s} = errors.{s};",
+            .{ support.name, support.name },
+        ));
+    }
     _ = try api.add("");
 
     for (handled_entry_names) |name| {

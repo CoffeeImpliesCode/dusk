@@ -14,8 +14,13 @@ pub const natives = @import("natives.zig");
 pub const objects = @import("objects.zig");
 pub const proc = @import("proc.zig");
 
-/// Every failure a generated entry point reports.
+/// Upstream error values.
 pub const Error = errors.Error;
+
+pub const AsyncStartError = errors.AsyncStartError;
+pub const FutureWaitError = errors.FutureWaitError;
+pub const CallbackControlError = errors.CallbackControlError;
+pub const ProcessEventsError = errors.ProcessEventsError;
 
 pub const INTERNAL_HAVE_EMDAWNWEBGPU_HEADER = descriptors.INTERNAL_HAVE_EMDAWNWEBGPU_HEADER;
 pub const createInstance = proc.createInstance;

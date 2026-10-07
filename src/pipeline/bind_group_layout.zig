@@ -225,16 +225,16 @@ comptime {
     // calls, so the sweep runs out of quota inside a single comparison. A set
     // that lost its packed prefix fails here loudly rather than silently, and
     // the member it names is the first rule out of place.
-    const PackedRules = @typeInfo(layout_internal.Error).error_set.?;
-    const ExposedRules = @typeInfo(Error).error_set.?;
-    if (ExposedRules.len < PackedRules.len) {
+    const packed_rules = @typeInfo(layout_internal.Error).error_set.?;
+    const exposed_rules = @typeInfo(Error).error_set.?;
+    if (exposed_rules.len < packed_rules.len) {
         @compileError(std.fmt.comptimePrint(
             "the exposed error set has {d} members and the packed layout has {d}",
-            .{ ExposedRules.len, PackedRules.len },
+            .{ exposed_rules.len, packed_rules.len },
         ));
     }
     var swept_count: usize = 0;
-    for (PackedRules, ExposedRules[0..PackedRules.len]) |rule, exposed| {
+    for (packed_rules, exposed_rules[0..packed_rules.len]) |rule, exposed| {
         if (!exposedNames(exposed.name, rule.name)) {
             @compileError("a packed-layout rule is not in the exposed error set: " ++ rule.name);
         }
@@ -245,10 +245,10 @@ comptime {
     // count names what was walked, so a narrowed loop fails here instead of
     // losing coverage quietly. Zig 0.16 has no `assert` builtin, so the
     // relationship is stated as a compile error rather than a trap.
-    if (swept_count != PackedRules.len) {
+    if (swept_count != packed_rules.len) {
         @compileError(std.fmt.comptimePrint(
             "the packed-rule sweep walked {d} of {d} members",
-            .{ swept_count, PackedRules.len },
+            .{ swept_count, packed_rules.len },
         ));
     }
 }

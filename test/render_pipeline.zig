@@ -26,9 +26,9 @@
 //! only way the two descriptors differ is the layout.
 //!
 //! **What this file does not claim.** It does not claim the pipeline renders
-//! anything. No pass, no draw and no readback happen here; M18 records and M18
-//! reads. It does not claim a swapchain or a surface, because the host is
-//! headless (`AGENTS.md` §5). It does not claim the pipeline handles are
+//! anything. No draw and no readback happen here; the compatibility pass is
+//! created through M18's native pass cache. The host is headless
+//! (`AGENTS.md` §5). It does not claim the pipeline handles are
 //! counted by `vulkan_device.HandleSet`: the pipeline seam takes no `HandleSet`
 //! (`src/pipeline/pipeline_backend.zig:44`-`:51`), so the driver handles the
 //! pipeline path creates are released by `destroy` and by the teardown below
@@ -52,6 +52,7 @@ const pipeline_backend = dusk.pipeline.pipeline_backend;
 const shader_module = dusk.pipeline.shader_module;
 const shader_module_vk = dusk.pipeline.shader_module_vk;
 const spirv = dusk.spirv;
+const render_pass_cache = dusk.engine.render_pass_cache;
 
 /// The Vulkan device, reached through `dusk.engine` the way
 /// `test/vulkan_device.zig` reaches it. A relative import into `src/` would
@@ -131,8 +132,9 @@ const ErrorRecorder = struct {
 
     fn record(
         allocator: std.mem.Allocator,
+        _: std.Io,
         context: *anyopaque,
-        data: *const core.ErrorData,
+        data: core.ErrorView,
     ) void {
         const self: *ErrorRecorder = @ptrCast(@alignCast(context));
         self.count += 1;
@@ -247,7 +249,9 @@ fn createModule(
 /// a `defer` and still hands the shard the loader's own words instead of a
 /// trap carrying ours. `AGENTS.md` §3.1 makes a missing proc a typed error and
 /// forbids the panic, so recording is the shape that leaves both standing.
-const TeardownError = vulkan_device.ProcError || shader_module_vk.CreateError;
+const TeardownError = vulkan_device.ProcError || shader_module_vk.CreateError ||
+    core.LifetimeError || core.ReferenceError || core.HandleError ||
+    error{ResourceInUse};
 
 const TeardownErrors = struct {
     first: ?TeardownError = null,
@@ -288,12 +292,14 @@ fn destroyModule(
 /// reads `vertex_index` and nothing else
 /// (`test/fixtures/triangle.vert.wgsl:4`), so there is nothing to bind.
 fn triangleDescriptor(
+    compatible_render_pass: vulkan.VkRenderPass,
     layout_handle: vulkan.VkPipelineLayout,
     layout_bytes: []const u8,
     vertex_module: shader_module.ShaderModule,
     fragment_module: shader_module.ShaderModule,
 ) pipeline.RenderPipelineDescriptor {
     return .{
+        .compatible_render_pass = compatible_render_pass,
         .label = "triangle",
         .layout = .{ .handle = layout_handle, .content_bytes = layout_bytes },
         .vertex = .{
@@ -354,7 +360,30 @@ fn pipelineAcceptance(io: std.Io, teardowns: *TeardownErrors) !void {
     try std.testing.expectEqual(@as(u32, 1), handles.countOf(.device));
 
     const pipeline_seam = pipeline_backend.Backend.fromDeviceProcs(device.vk_device, device.procs);
-    const module_device = shader_module_vk.Device.init(device.procs, device.vk_device);
+    const module_device = shader_module_vk.Device.init(
+        device.procs,
+        device.vk_device,
+        device.api_version,
+    );
+
+    var passes = render_pass_cache.RenderPassCache.init(.{
+        .allocator = std.testing.allocator,
+        .device = .{ .procs = device.procs, .vk_device = device.vk_device },
+    });
+    defer passes.deinit(io);
+    var pass_query: render_pass_cache.RenderPassCacheQuery = .{};
+    pass_query.setSampleCount(1);
+    pass_query.setColor(.{
+        .index = 0,
+        .format = .rgba8_unorm,
+        .load_op = .clear,
+        .store_op = .store,
+        .has_resolve_target = false,
+        .render_to_single_sampled = false,
+    });
+    const pass = try passes.getRenderPass(io, pass_query);
+    try std.testing.expect(pass.render_pass != null);
+    try std.testing.expectEqual(@as(u32, 0), pass.main_subpass);
 
     // The two shader modules, from the two checked-in fixtures. The words are
     // the caller's and the module borrows them
@@ -414,21 +443,21 @@ fn pipelineAcceptance(io: std.Io, teardowns: *TeardownErrors) !void {
     try second_layout_key.appendWord(std.testing.allocator, @intFromPtr(extra_set_layout));
 
     var recorder: ErrorRecorder = .{};
+    var object_mutex: std.Io.Mutex = .init;
     var core_device = core.Device.init(std.testing.allocator, .{
+        .object_mutex = &object_mutex,
         .uncaptured_context = @ptrCast(&recorder),
         .uncaptured_callback = ErrorRecorder.record,
     });
-    defer core_device.deinit(std.testing.allocator);
+    var guard = core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
+    defer guard.unlock(io);
+    defer core_device.deinit(std.testing.allocator, &guard) catch |err| teardowns.record(err);
 
-    var store = pipeline.PipelineStore.init(std.testing.allocator);
-    // The map is empty here (the render path hands Vulkan a null cache,
-    // `src/pipeline/pipeline_render.zig:972`), so the teardown has no handle
-    // to destroy and no proc to miss. A refusal still reaches `teardowns`
-    // rather than being dropped, because `AGENTS.md` §3.1 makes a missing
-    // proc a value.
-    defer store.deinit() catch |err| teardowns.record(err);
+    var store = pipeline.PipelineStore.init(std.testing.allocator, core_device.borrow().objects);
+    defer store.deinit(&guard) catch |err| teardowns.record(err);
 
     const base = triangleDescriptor(
+        pass.render_pass,
         first_layout,
         first_layout_key.bytes.items,
         vertex_module,
@@ -438,43 +467,76 @@ fn pipelineAcceptance(io: std.Io, teardowns: *TeardownErrors) !void {
     // The first sentence of the acceptance: `vkCreateGraphicsPipelines`
     // returned `VK_SUCCESS` (the call returned without an error) and wrote a
     // non-null `VkPipeline`.
-    const first = try pipeline.createRenderPipeline(
+    const first = try pipeline.createRenderPipelineLocked(
+        std.testing.allocator,
         io,
+        &guard,
         &core_device,
         &store,
         &pipeline_seam,
         base,
+        .user,
     );
-    const first_vk = try pipeline.vkPipeline(&core_device, first);
+    defer {
+        if (core_device.resolveReference(&guard, first)) |header| {
+            header.releaseUserLocked(&guard, io) catch |err| teardowns.record(err);
+        } else |err| teardowns.record(err);
+    }
+    const first_vk = try pipeline.vkPipeline(&guard, &core_device, first);
     try std.testing.expect(first_vk != null);
-    try std.testing.expectEqual(first_layout, try pipeline.vkLayout(&core_device, first));
-    try std.testing.expectEqual(pipeline.Kind.render, try pipeline.queryKind(&core_device, first));
-    try std.testing.expectEqual(@as(usize, 1), store.queryPipelineCount());
-    try std.testing.expectEqual(@as(usize, 1), core_device.queryTrackedCount());
+    try std.testing.expectEqual(first_layout, try pipeline.vkLayout(&guard, &core_device, first));
+    try std.testing.expectEqual(
+        pipeline.Kind.render,
+        try pipeline.queryKind(&guard, &core_device, first),
+    );
+    try std.testing.expectEqual(@as(usize, 1), store.queryPipelineCount(&guard));
+    try std.testing.expectEqual(@as(usize, 1), core_device.queryTrackedCount(&guard));
 
-    const state = try pipeline.renderState(&core_device, first);
+    const state = try pipeline.renderState(&guard, &core_device, first);
     try std.testing.expect(state.fragment_stage_present);
     try std.testing.expectEqual(@as(usize, 1), state.color_formats.items.len);
     try std.testing.expectEqual(color_format, state.color_formats.items[0]);
 
-    // The second sentence: the identical descriptor a second time reaches the
-    // same handle and not a new one.
-    const hit = try pipeline.createRenderPipeline(
+    // A pass with different load/store operations is compatible. Its raw
+    // handle must not split the semantic pipeline cache.
+    var compatible_query = pass_query;
+    compatible_query.setColor(.{
+        .index = 0,
+        .format = .rgba8_unorm,
+        .load_op = .load,
+        .store_op = .store,
+        .has_resolve_target = false,
+        .render_to_single_sampled = false,
+    });
+    const compatible_pass = try passes.getRenderPass(io, compatible_query);
+    try std.testing.expect(compatible_pass.render_pass != pass.render_pass);
+    var compatible_descriptor = base;
+    compatible_descriptor.compatible_render_pass = compatible_pass.render_pass;
+    const hit = try pipeline.createRenderPipelineLocked(
+        std.testing.allocator,
         io,
+        &guard,
         &core_device,
         &store,
         &pipeline_seam,
-        base,
+        compatible_descriptor,
+        .user,
     );
+    defer {
+        if (core_device.resolveReference(&guard, hit)) |header| {
+            header.releaseUserLocked(&guard, io) catch |err| teardowns.record(err);
+        } else |err| teardowns.record(err);
+    }
     try std.testing.expectEqual(first.ptr, hit.ptr);
-    try std.testing.expectEqual(first_vk, try pipeline.vkPipeline(&core_device, hit));
-    try std.testing.expectEqual(@as(usize, 1), store.queryPipelineCount());
-    try std.testing.expectEqual(@as(usize, 1), core_device.queryTrackedCount());
+    try std.testing.expectEqual(first_vk, try pipeline.vkPipeline(&guard, &core_device, hit));
+    try std.testing.expectEqual(@as(usize, 1), store.queryPipelineCount(&guard));
+    try std.testing.expectEqual(@as(usize, 1), core_device.queryTrackedCount(&guard));
 
     // The third sentence: the same pipeline with a different `PipelineLayout`
     // reaches a new handle. This is what proves the cache key carries the
     // layout, because nothing else in the two descriptors differs.
     const relaid = triangleDescriptor(
+        pass.render_pass,
         second_layout,
         second_layout_key.bytes.items,
         vertex_module,
@@ -488,18 +550,26 @@ fn pipelineAcceptance(io: std.Io, teardowns: *TeardownErrors) !void {
     defer relaid_key.deinit(std.testing.allocator);
     try std.testing.expect(!pipeline.CacheKey.eql(&base_key, &relaid_key));
     try std.testing.expect(base_key.bytes.items.len < relaid_key.bytes.items.len);
-    const miss = try pipeline.createRenderPipeline(
+    const miss = try pipeline.createRenderPipelineLocked(
+        std.testing.allocator,
         io,
+        &guard,
         &core_device,
         &store,
         &pipeline_seam,
         relaid,
+        .user,
     );
+    defer {
+        if (core_device.resolveReference(&guard, miss)) |header| {
+            header.releaseUserLocked(&guard, io) catch |err| teardowns.record(err);
+        } else |err| teardowns.record(err);
+    }
     try std.testing.expect(first.ptr != miss.ptr);
-    try std.testing.expect(try pipeline.vkPipeline(&core_device, miss) != first_vk);
-    try std.testing.expectEqual(second_layout, try pipeline.vkLayout(&core_device, miss));
-    try std.testing.expectEqual(@as(usize, 2), store.queryPipelineCount());
-    try std.testing.expectEqual(@as(usize, 2), core_device.queryTrackedCount());
+    try std.testing.expect(try pipeline.vkPipeline(&guard, &core_device, miss) != first_vk);
+    try std.testing.expectEqual(second_layout, try pipeline.vkLayout(&guard, &core_device, miss));
+    try std.testing.expectEqual(@as(usize, 2), store.queryPipelineCount(&guard));
+    try std.testing.expectEqual(@as(usize, 2), core_device.queryTrackedCount(&guard));
 
     try std.testing.expectEqual(@as(u64, 0), recorder.count);
 }
@@ -532,7 +602,11 @@ fn fixturesReachVulkanUnchanged(io: std.Io, teardowns: *TeardownErrors) !void {
     });
     defer device.deinit(std.testing.allocator) catch |err| teardowns.record(err);
 
-    const module_device = shader_module_vk.Device.init(device.procs, device.vk_device);
+    const module_device = shader_module_vk.Device.init(
+        device.procs,
+        device.vk_device,
+        device.api_version,
+    );
 
     const vertex_words = try spirv.wordsFromBytes(std.testing.allocator, vertex_fixture);
     defer std.testing.allocator.free(vertex_words);

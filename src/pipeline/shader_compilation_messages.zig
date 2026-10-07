@@ -1,12 +1,9 @@
 //! The diagnostics one shader-module creation produced.
 //!
-//! Ports `native/CompilationMessages.{h,cpp}`. Dawn splits the table in two:
-//! `ParsedCompilationMessages` (`CompilationMessages.h:69`) is what Tint fills,
-//! and `OwnedCompilationMessages` (`:94`) is the immutable owning form that
-//! builds the pointer chain the C API hands out (`CompilationMessages.cpp:236-268`).
-//! The port has one form, because the thing it fills is a Zig slice and the
-//! thing the C API reads is a slice of generated structs the device layer
-//! projects.
+//! Ports the diagnostic records in `native/CompilationMessages.{h,cpp}`.
+//! `one` owns its item array but borrows message text. `snapshot` and
+//! `Messages.clone` own both the array and every text byte; their result is
+//! independent of its source. Release each owned result once with `deinit`.
 //!
 //! **Every message the port produces is unanchored.** Dawn anchors a message
 //! to a WGSL file: `AddMessage` (`CompilationMessages.cpp:116-181`) recomputes
@@ -63,18 +60,32 @@ pub const Message = struct {
     }
 };
 
-/// The messages one shader module carries. Immutable after construction, so a
-/// reader needs no lock, which is the property Dawn gets from `NonMovable` and
-/// never writing a member again (`CompilationMessages.h:91-93`).
+/// Immutable diagnostic records with one owner for their allocated storage.
+///
+/// `one` borrows text; `snapshot` and `clone` copy it. The allocator's backing
+/// state must outlive this record. Assignment aliases storage and does not
+/// create another owner. Readers may share a record until its owner deinits it.
 pub const Messages = struct {
     allocator: std.mem.Allocator,
+    /// Owned array. An accessor's borrowed copy must not release it.
     items: []const Message,
+    /// Exact text allocation from `snapshot`, or empty for borrowed text.
+    owned_text: []const u8 = &.{},
 
-    /// Releases the slice. An empty record holds the empty slice and not an
-    /// allocation, so there is nothing to free.
+    /// Releases owned text and the item array, never caller-owned text.
+    /// Call once on the owner, not on a borrowed copy. All views then expire.
     pub fn deinit(self: Messages) void {
-        if (self.items.len == 0) return;
-        self.allocator.free(self.items);
+        if (self.owned_text.len != 0) self.allocator.free(self.owned_text);
+        if (self.items.len != 0) self.allocator.free(self.items);
+    }
+
+    /// Copies all records and text into an independent owner. `source` must
+    /// stay valid and unchanged through this call. See `snapshot` for errors.
+    pub fn clone(
+        allocator: std.mem.Allocator,
+        source: Messages,
+    ) std.mem.Allocator.Error!Messages {
+        return snapshot(allocator, source.items);
     }
 
     /// How many messages carry `type_`. `getCompilationInfo` on a module that
@@ -101,13 +112,8 @@ pub fn empty(allocator: std.mem.Allocator) Messages {
     return .{ .allocator = allocator, .items = &.{} };
 }
 
-/// One message, held in a one-element slice.
-///
-/// Ports `ParsedCompilationMessages::AddMessage(CompilationMessageContent&&)`
-/// (`CompilationMessages.cpp:180-182`), which appends a record somebody else
-/// built. The port takes one record rather than a vector because there is one
-/// producer and one consumer, and a one-element allocation is the whole
-/// difference between a list and no list.
+/// Owns one allocated item while borrowing `message.text` unchanged.
+/// The caller keeps text alive and unchanged until the record is released.
 pub fn one(
     allocator: std.mem.Allocator,
     message: Message,
@@ -115,6 +121,51 @@ pub fn one(
     const items = try allocator.alloc(Message, 1);
     items[0] = message;
     return .{ .allocator = allocator, .items = items };
+}
+
+/// Copies every metadata field and text byte into independent owned storage.
+///
+/// `source` and its text must stay valid and unchanged through this call only.
+/// Empty text becomes `""`; no source pointer is retained. Nonempty records use
+/// one item allocation and at most one contiguous text allocation. The caller
+/// releases the result once with `deinit`.
+///
+/// Returns `error.OutOfMemory` if checked storage sizes overflow or an
+/// allocation fails. On error no allocation survives and `source` is unchanged.
+pub fn snapshot(
+    allocator: std.mem.Allocator,
+    source: []const Message,
+) std.mem.Allocator.Error!Messages {
+    if (source.len == 0) return empty(allocator);
+    _ = std.math.mul(usize, source.len, @sizeOf(Message)) catch return error.OutOfMemory;
+    var text_byte_count: usize = 0;
+    for (source) |message| {
+        text_byte_count = std.math.add(usize, text_byte_count, message.text.len) catch
+            return error.OutOfMemory;
+    }
+
+    const items = try allocator.alloc(Message, source.len);
+    errdefer allocator.free(items);
+    const text: []u8 = if (text_byte_count == 0)
+        &.{}
+    else
+        try allocator.alloc(u8, text_byte_count);
+    errdefer if (text.len != 0) allocator.free(text);
+
+    var text_offset: usize = 0;
+    for (source, items) |message, *copied| {
+        copied.* = message;
+        if (message.text.len == 0) {
+            copied.text = "";
+        } else {
+            const text_end = text_offset + message.text.len;
+            @memcpy(text[text_offset..text_end], message.text);
+            copied.text = text[text_offset..text_end];
+            text_offset = text_end;
+        }
+    }
+    std.debug.assert(text_offset == text_byte_count);
+    return .{ .allocator = allocator, .items = items, .owned_text = text };
 }
 
 /// The log text `AddFormattedTintMessages` builds

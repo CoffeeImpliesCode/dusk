@@ -6,11 +6,10 @@
 //! validators at `:113`-`:863` and `RenderPipeline::InitializeImpl`
 //! (`src/dawn/native/vulkan/RenderPipelineVk.cpp:398`).
 //!
-//! **What this file does not claim.** It does not claim a render pass. Dawn
-//! builds a `VkPipelineRenderingCreateInfoKHR` under dynamic rendering
-//! (`vulkan/RenderPipelineVk.cpp:796-807`) or a `VkRenderPass` otherwise
-//! (`:841-884`); the port chains the rendering struct (`src/vulkan.zig:7580`), so
-//! the descriptor needs attachment formats and nothing else. It does not claim
+//! **What this file does not claim.** It does not own a render pass. The caller
+//! supplies a compatible traditional `VkRenderPass`, as Dawn's non-dynamic
+//! path does (`vulkan/RenderPipelineVk.cpp:841-884`). M18's pass cache supplies
+//! the same attachment formats and sample count for replay. It does not claim
 //! the specialization map either: Dawn keeps one `VkPipeline` per distinct
 //! pipeline-layout binding and per YCbCr set (`vulkan/RenderPipelineVk.h:108`),
 //! and the port's dedup key already contains the layout's bytes, so one
@@ -224,9 +223,13 @@ pub const BlendFactor = enum {
     one_minus_dst,
     dst_alpha,
     one_minus_dst_alpha,
+    constant,
+    one_minus_constant,
     src_alpha_saturate,
     src1,
     one_minus_src1,
+    src1_alpha,
+    one_minus_src1_alpha,
 };
 pub const BlendOperation = enum { add, subtract, reverse_subtract, min, max };
 
@@ -265,6 +268,8 @@ pub const DepthStencilState = struct {
     depth_compare: CompareFunction = .always,
     stencil_front: StencilFaceState = .{},
     stencil_back: StencilFaceState = .{},
+    stencil_read_mask: u32 = std.math.maxInt(u32),
+    stencil_write_mask: u32 = std.math.maxInt(u32),
     depth_bias: i32 = 0,
     depth_bias_slope_scale: f32 = 0,
     depth_bias_clamp: f32 = 0,
@@ -282,6 +287,7 @@ pub const BlendState = struct {
 };
 
 pub const ColorTargetState = struct {
+    /// Undefined preserves a genuine absent attachment slot. Its mask and blend are ignored.
     format: vulkan.VkFormat,
     /// The four `VK_COLOR_COMPONENT_*` bits, as Dawn's `ColorTargetState`
     /// stores it and `ValidateColorWriteMask` checks (`RenderPipeline.cpp:521`).
@@ -310,13 +316,16 @@ pub const Scratch = struct {
     // slot is written before any `pStages` read whenever it is reachable.
     stages: [2]vulkan.VkPipelineShaderStageCreateInfo = undefined,
     stage_count: u32 = 0,
+    /// Owns native C names through pipeline creation, including partial builds.
+    stage_names: [2]?[:0]u8 = .{ null, null },
     bindings: std.ArrayList(vulkan.VkVertexInputBindingDescription) = .empty,
     attributes: std.ArrayList(vulkan.VkVertexInputAttributeDescription) = .empty,
-    color_formats: std.ArrayList(vulkan.VkFormat) = .empty,
     blend_states: std.ArrayList(vulkan.VkPipelineColorBlendAttachmentState) = .empty,
-    dynamic_states: [2]vulkan.VkDynamicState = .{
+    dynamic_states: [4]vulkan.VkDynamicState = .{
         vulkan.VK_DYNAMIC_STATE_VIEWPORT,
         vulkan.VK_DYNAMIC_STATE_SCISSOR,
+        vulkan.VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+        vulkan.VK_DYNAMIC_STATE_BLEND_CONSTANTS,
     },
     vertex_input: vulkan.VkPipelineVertexInputStateCreateInfo = .{},
     input_assembly: vulkan.VkPipelineInputAssemblyStateCreateInfo = .{},
@@ -326,13 +335,14 @@ pub const Scratch = struct {
     depth_stencil: vulkan.VkPipelineDepthStencilStateCreateInfo = .{},
     color_blend: vulkan.VkPipelineColorBlendStateCreateInfo = .{},
     dynamic: vulkan.VkPipelineDynamicStateCreateInfo = .{},
-    rendering: vulkan.VkPipelineRenderingCreateInfo = .{},
     create_info: vulkan.VkGraphicsPipelineCreateInfo = .{},
 
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
+        for (self.stage_names) |name| {
+            if (name) |owned| allocator.free(owned);
+        }
         self.bindings.deinit(allocator);
         self.attributes.deinit(allocator);
-        self.color_formats.deinit(allocator);
         self.blend_states.deinit(allocator);
         self.* = undefined;
     }
@@ -422,26 +432,33 @@ pub fn validateDepthStencil(
     if (attachment_format == vulkan.VK_FORMAT_UNDEFINED) {
         return error.DepthStencilFormatUndefinedWithDepthStencilState;
     }
-    try validateStencilFace(state.stencil_front);
-    try validateStencilFace(state.stencil_back);
+    const has_stencil = switch (state.format) {
+        vulkan.VK_FORMAT_S8_UINT,
+        vulkan.VK_FORMAT_D16_UNORM_S8_UINT,
+        vulkan.VK_FORMAT_D24_UNORM_S8_UINT,
+        vulkan.VK_FORMAT_D32_SFLOAT_S8_UINT,
+        => true,
+        else => false,
+    };
+    // Dawn checks unused faces only without stencil (`RenderPipeline.cpp:379-387`).
+    if (!has_stencil) {
+        try validateStencilFaceUnused(state.stencil_front);
+        try validateStencilFaceUnused(state.stencil_back);
+    }
     if (compatibility and state.depth_bias_clamp != 0) {
         return error.CompatibilityDepthBiasClampNonZero;
     }
 }
 
-/// Dawn's `ValidateStencilFaceUnused` (`RenderPipeline.cpp:294`) plus the
-/// `ValidateStencilOperation` calls it makes (`:321-334`).
-fn validateStencilFace(face: StencilFaceState) PipelineError!void {
-    if (face.compare == .always and
-        face.fail_op == .keep and
-        face.depth_fail_op == .keep and
-        face.pass_op == .keep)
+/// Dawn's `ValidateStencilFaceUnused` (`RenderPipeline.cpp:294-311`).
+/// The low-level enums contain no undefined values. The API boundary handles those.
+fn validateStencilFaceUnused(face: StencilFaceState) PipelineError!void {
+    if (face.compare != .always or
+        face.fail_op != .keep or
+        face.depth_fail_op != .keep or
+        face.pass_op != .keep)
     {
-        return;
-    }
-    if (face.compare == .always) return error.StencilOperationUndefined;
-    if (face.fail_op == .keep and face.depth_fail_op == .keep and face.pass_op == .keep) {
-        return error.StencilOperationUndefined;
+        return error.StencilStateWithoutStencilAspect;
     }
 }
 
@@ -469,10 +486,9 @@ fn isSupportedSampleCount(count: u32) bool {
 fn validateColorTargetStates(targets: []const ColorTargetState) PipelineError!void {
     if (targets.len > max_color_attachments) return error.ColorTargetCountAboveLimit;
     for (targets) |target| {
-        if (target.format == vulkan.VK_FORMAT_UNDEFINED) {
-            return error.ColorTargetFormatUndefined;
-        }
-        if (target.write_mask == 0) return error.ColorWriteMaskEmpty;
+        if (target.format == vulkan.VK_FORMAT_UNDEFINED) continue;
+        // None is legal. Only bits outside RGBA are invalid (`dawn.json:840-848`).
+        if (target.write_mask & ~@as(u32, 0xF) != 0) return error.ColorWriteMaskInvalid;
         if (target.blend) |blend| {
             try validateBlendComponent(blend.color);
             try validateBlendComponent(blend.alpha);
@@ -493,9 +509,13 @@ fn validateBlendComponent(component: BlendComponent) PipelineError!void {
         .one_minus_dst,
         .dst_alpha,
         .one_minus_dst_alpha,
+        .constant,
+        .one_minus_constant,
         .src_alpha_saturate,
         .src1,
         .one_minus_src1,
+        .src1_alpha,
+        .one_minus_src1_alpha,
         => {},
     }
     switch (component.dst_factor) {
@@ -509,9 +529,13 @@ fn validateBlendComponent(component: BlendComponent) PipelineError!void {
         .one_minus_dst,
         .dst_alpha,
         .one_minus_dst_alpha,
+        .constant,
+        .one_minus_constant,
         .src_alpha_saturate,
         .src1,
         .one_minus_src1,
+        .src1_alpha,
+        .one_minus_src1_alpha,
         => {},
     }
     switch (component.operation) {
@@ -550,6 +574,8 @@ pub fn appendDepthStencilKey(
     try key.appendEnum(allocator, state.depth_compare);
     try appendStencilFaceKey(allocator, key, state.stencil_front);
     try appendStencilFaceKey(allocator, key, state.stencil_back);
+    try key.appendWord(allocator, state.stencil_read_mask);
+    try key.appendWord(allocator, state.stencil_write_mask);
     // The three bias values are 32-bit, and a word is eight bytes, so each is
     // reinterpreted at its own width and then widened. The widening is what
     // keeps two keys apart: `-1` and `0xFFFFFFFF` are the same bits and must
@@ -600,8 +626,8 @@ pub fn buildRenderState(
     render.multisample = descriptor.multisample;
 
     try appendColorTargets(allocator, render, descriptor.color_targets);
-    fillStages(scratch, descriptor);
-    try fillScratch(allocator, scratch, descriptor, render);
+    try fillStages(allocator, scratch, descriptor);
+    try fillScratch(allocator, scratch, descriptor);
 }
 
 /// Copies one descriptor list into the render state. The element type is a
@@ -628,8 +654,9 @@ fn appendColorTargets(
     try render.blend_enabled.ensureTotalCapacity(allocator, targets.len);
     for (targets) |target| {
         render.color_formats.appendAssumeCapacity(target.format);
-        render.color_write_masks.appendAssumeCapacity(target.write_mask);
-        render.blend_enabled.appendAssumeCapacity(target.blend != null);
+        const present = target.format != vulkan.VK_FORMAT_UNDEFINED;
+        render.color_write_masks.appendAssumeCapacity(if (present) target.write_mask else 0);
+        render.blend_enabled.appendAssumeCapacity(present and target.blend != null);
     }
 }
 
@@ -638,24 +665,34 @@ fn appendColorTargets(
 /// because a descriptor with no fragment stage is legal and Vulkan takes the
 /// stage count it is given.
 fn fillStages(
+    allocator: std.mem.Allocator,
     scratch: *Scratch,
     descriptor: pipeline.RenderPipelineDescriptor,
-) void {
-    scratch.stage_count = 0;
-    scratch.stages[scratch.stage_count] = makeStage(&descriptor.vertex);
-    scratch.stage_count += 1;
+) std.mem.Allocator.Error!void {
+    std.debug.assert(scratch.stage_count == 0);
+    std.debug.assert(scratch.stage_names[0] == null);
+    std.debug.assert(scratch.stage_names[1] == null);
+    const vertex_name = try allocator.dupeZ(u8, descriptor.vertex.entry_point);
+    scratch.stage_names[0] = vertex_name;
+    scratch.stages[0] = makeStage(&descriptor.vertex, vertex_name);
+    scratch.stage_count = 1;
     if (descriptor.fragment) |fragment| {
-        scratch.stages[scratch.stage_count] = makeStage(&fragment);
-        scratch.stage_count += 1;
+        const fragment_name = try allocator.dupeZ(u8, fragment.entry_point);
+        scratch.stage_names[1] = fragment_name;
+        scratch.stages[1] = makeStage(&fragment, fragment_name);
+        scratch.stage_count = 2;
     }
 }
 
-fn makeStage(input: *const pipeline.StageInput) vulkan.VkPipelineShaderStageCreateInfo {
+fn makeStage(
+    input: *const pipeline.StageInput,
+    entry_point: [:0]const u8,
+) vulkan.VkPipelineShaderStageCreateInfo {
     return .{
         .sType = vulkan.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = stageFlagBits(input.stage),
         .module = input.module,
-        .pName = input.entry_point.ptr,
+        .pName = entry_point.ptr,
     };
 }
 
@@ -673,7 +710,6 @@ fn fillScratch(
     allocator: std.mem.Allocator,
     scratch: *Scratch,
     descriptor: pipeline.RenderPipelineDescriptor,
-    render: *const pipeline.RenderState,
 ) std.mem.Allocator.Error!void {
     try scratch.bindings.ensureTotalCapacity(allocator, descriptor.vertex_buffers.len);
     for (descriptor.vertex_buffers, 0..) |buffer, slot| {
@@ -692,9 +728,7 @@ fn fillScratch(
             .offset = attribute.offset,
         });
     }
-    try scratch.color_formats.ensureTotalCapacity(allocator, render.color_formats.items.len);
-    for (render.color_formats.items) |format| scratch.color_formats.appendAssumeCapacity(format);
-    try scratch.blend_states.ensureTotalCapacity(allocator, render.color_formats.items.len);
+    try scratch.blend_states.ensureTotalCapacity(allocator, descriptor.color_targets.len);
     for (descriptor.color_targets) |target| {
         scratch.blend_states.appendAssumeCapacity(makeBlendState(target));
     }
@@ -750,16 +784,9 @@ fn fillScratch(
         .dynamicStateCount = scratch.dynamic_states.len,
         .pDynamicStates = &scratch.dynamic_states,
     };
-    scratch.rendering = .{
-        .sType = vulkan.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = @intCast(scratch.color_formats.items.len),
-        .pColorAttachmentFormats = scratch.color_formats.items.ptr,
-        .depthAttachmentFormat = attachmentFormat(descriptor),
-        .stencilAttachmentFormat = stencilFormat(descriptor.depth_stencil),
-    };
     scratch.create_info = .{
         .sType = vulkan.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = @ptrCast(&scratch.rendering),
+        .pNext = null,
         .stageCount = scratch.stage_count,
         .pStages = &scratch.stages,
         .pVertexInputState = &scratch.vertex_input,
@@ -771,12 +798,14 @@ fn fillScratch(
         .pColorBlendState = &scratch.color_blend,
         .pDynamicState = &scratch.dynamic,
         .layout = descriptor.layout.handle,
-        .renderPass = null,
+        .renderPass = descriptor.compatible_render_pass,
         .subpass = 0,
     };
 }
 
 fn makeBlendState(target: ColorTargetState) vulkan.VkPipelineColorBlendAttachmentState {
+    if (target.format == vulkan.VK_FORMAT_UNDEFINED)
+        return .{ .blendEnable = 0, .colorWriteMask = 0 };
     const blend = target.blend orelse return .{
         .blendEnable = 0,
         .colorWriteMask = target.write_mask,
@@ -803,24 +832,40 @@ fn makeDepthStencil(state: ?DepthStencilState) vulkan.VkPipelineDepthStencilStat
         .depthWriteEnable = @intFromBool(depth_stencil.depth_write_enabled),
         .depthCompareOp = compareFunctionToVk(depth_stencil.depth_compare),
         .stencilTestEnable = @intFromBool(usesStencil(depth_stencil)),
-        .front = makeStencilOpState(depth_stencil.stencil_front),
-        .back = makeStencilOpState(depth_stencil.stencil_back),
+        .front = makeStencilOpState(
+            depth_stencil.stencil_front,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        ),
+        .back = makeStencilOpState(
+            depth_stencil.stencil_back,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        ),
     };
 }
 
-fn makeStencilOpState(face: StencilFaceState) vulkan.VkStencilOpState {
+fn makeStencilOpState(
+    face: StencilFaceState,
+    read_mask: u32,
+    write_mask: u32,
+) vulkan.VkStencilOpState {
     return .{
         .failOp = stencilOperationToVk(face.fail_op),
         .depthFailOp = stencilOperationToVk(face.depth_fail_op),
         .passOp = stencilOperationToVk(face.pass_op),
         .compareOp = compareFunctionToVk(face.compare),
+        .compareMask = read_mask,
+        .writeMask = write_mask,
     };
 }
 
-/// Dawn's `UsesStencil` (`RenderPipeline.cpp:1186`): a stencil state that keeps
-/// every operation is no stencil state.
+/// Comparison-only stencil state must remain enabled: it reads the dynamic
+/// reference even when every stencil operation keeps the stored value.
 pub fn usesStencil(state: DepthStencilState) bool {
-    return state.stencil_front.fail_op != .keep or
+    return state.stencil_front.compare != .always or
+        state.stencil_back.compare != .always or
+        state.stencil_front.fail_op != .keep or
         state.stencil_front.depth_fail_op != .keep or
         state.stencil_front.pass_op != .keep or
         state.stencil_back.fail_op != .keep or
@@ -849,16 +894,6 @@ pub fn depthBiasSlopeScale(state: ?DepthStencilState) f32 {
 pub fn depthBiasClamp(state: ?DepthStencilState) f32 {
     const depth_stencil = state orelse return 0;
     return depth_stencil.depth_bias_clamp;
-}
-
-/// Dawn sets the stencil format to `VK_FORMAT_UNDEFINED` and lets the depth
-/// format carry both aspects when the attachment is a combined format.
-fn stencilFormat(state: ?DepthStencilState) vulkan.VkFormat {
-    const depth_stencil = state orelse return vulkan.VK_FORMAT_UNDEFINED;
-    return switch (depth_stencil.format) {
-        vulkan.VK_FORMAT_D24_UNORM_S8_UINT => vulkan.VK_FORMAT_S8_UINT,
-        else => vulkan.VK_FORMAT_UNDEFINED,
-    };
 }
 
 pub fn stepModeToVk(mode: StepMode) vulkan.VkVertexInputRate {
@@ -937,9 +972,13 @@ pub fn blendFactorToVk(factor: BlendFactor) vulkan.VkBlendFactor {
         .one_minus_dst => vulkan.VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR,
         .dst_alpha => vulkan.VK_BLEND_FACTOR_DST_ALPHA,
         .one_minus_dst_alpha => vulkan.VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+        .constant => vulkan.VK_BLEND_FACTOR_CONSTANT_COLOR,
+        .one_minus_constant => vulkan.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR,
         .src_alpha_saturate => vulkan.VK_BLEND_FACTOR_SRC_ALPHA_SATURATE,
         .src1 => vulkan.VK_BLEND_FACTOR_SRC1_COLOR,
         .one_minus_src1 => vulkan.VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR,
+        .src1_alpha => vulkan.VK_BLEND_FACTOR_SRC1_ALPHA,
+        .one_minus_src1_alpha => vulkan.VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA,
     };
 }
 
@@ -960,12 +999,9 @@ pub fn blendOperationToVk(operation: BlendOperation) vulkan.VkBlendOp {
 /// M18's replay reuses the compiled pipeline across passes.
 pub fn createGraphicsPipeline(
     backend: *const Backend,
-    layout: vulkan.VkPipelineLayout,
-    descriptor: pipeline.RenderPipelineDescriptor,
     scratch: *const Scratch,
-) BackendError!vulkan.VkPipeline {
-    _ = layout;
-    _ = descriptor;
+) (BackendError || error{CompatibleRenderPassMissing})!vulkan.VkPipeline {
+    if (scratch.create_info.renderPass == null) return error.CompatibleRenderPassMissing;
     const create = backend.create_graphics_pipelines orelse
         return error.CreateGraphicsPipelinesNotLoaded;
     var handle: vulkan.VkPipeline = null;

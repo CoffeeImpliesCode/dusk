@@ -29,14 +29,18 @@ const std = @import("std");
 const vulkan = @import("vulkan");
 const dispatch = @import("../vk/dispatch.zig");
 const platform = @import("../platform/root.zig");
+const api = @import("../api/api.zig");
 
 /// The minimum Vulkan the driver must report.
 ///
-/// Ports `kRequiredVulkanVersion` (`BackendVk.h:53`). Dawn's comment at
-/// `:50`-`:52` records why 1.1 rather than 1.0: some Vulkan 1.0 drivers are
-/// poor enough to be unusable. The same value reaches `VkApplicationInfo`
-/// (`BackendVk.cpp:486`) and the loader gate (`BackendVk.cpp:404`).
+/// Admission keeps Vulkan 1.1 support even when the loader and device permit
+/// requesting a newer core API.
 pub const required_vulkan_version: u32 = vulkan.VK_API_VERSION_1_1;
+
+/// Request the newest core API used by this backend, without raising admission.
+fn negotiatedInstanceApiVersion(loader_api_version: u32) u32 {
+    return @min(loader_api_version, vulkan.VK_API_VERSION_1_3);
+}
 
 /// One installable driver, and the library that reaches it.
 ///
@@ -90,22 +94,24 @@ fn icdIndex(icd: Icd) usize {
     return @intFromEnum(icd);
 }
 
-/// One Vulkan handle type `dusk` creates at this milestone.
+/// A Vulkan object kind tracked through native resource teardown.
 ///
-/// Dawn's `FENCED_DELETER_TYPES` (`FencedDeleter.h:49`-`:66`) lists 17 types in
-/// deletion order. This milestone creates 7 of them, plus the two parent
-/// objects Dawn destroys outside the list. `VkPhysicalDevice` is absent on
-/// purpose: Dawn's destructor comment at `BackendVk.cpp:325` states that the
-/// physical devices die with the instance, so there is nothing to destroy and
-/// nothing to count.
+/// Physical devices are borrowed from their instance and have no destroy call.
+/// Resource owners count created handles until their immediate or serial-delayed
+/// destruction completes.
 pub const HandleKind = enum(u8) {
     instance,
     device,
     command_pool,
     command_buffer,
     buffer,
+    image,
+    image_view,
+    query_pool,
     memory,
     fence,
+    sampler,
+    sampler_y_cb_cr_conversion,
 };
 
 /// How many handle kinds there are, which is the width of `HandleSet.counts`.
@@ -281,6 +287,8 @@ pub const VulkanInstance = struct {
     /// What `vkEnumerateInstanceVersion` reported, or the loader's default of
     /// 1.0 when it does not export the call.
     loader_api_version: u32,
+    /// The API actually requested from the instance, capped at Vulkan 1.3.
+    api_version: u32,
 
     pub const InitOptions = struct {
         /// Which driver's library to open (`BackendVk.cpp:371`-`:385`).
@@ -338,8 +346,7 @@ pub const VulkanInstance = struct {
             // string names this engine; a driver that logs it must not be told
             // it is talking to Dawn.
             .pEngineName = "dusk",
-            // `appInfo.apiVersion = kRequiredVulkanVersion` (`BackendVk.cpp:486`).
-            .apiVersion = required_vulkan_version,
+            .apiVersion = negotiatedInstanceApiVersion(api_version),
         };
         const create_info: vulkan.VkInstanceCreateInfo = .{
             .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO),
@@ -394,6 +401,7 @@ pub const VulkanInstance = struct {
             .vk_instance = handle,
             .procs = procs,
             .loader_api_version = api_version,
+            .api_version = app_info.apiVersion,
         };
     }
 
@@ -520,11 +528,16 @@ pub const PhysicalDevice = struct {
     max_buffer_size: vulkan.VkDeviceSize,
     /// The queue families, in the driver's own order. The caller frees this.
     queue_families: []vulkan.VkQueueFamilyProperties,
+    maintenance4_supported: bool = false,
+    maintenance4_extension: bool = false,
+    max_per_set_descriptors: u32 = 0,
+    sampler_y_cb_cr_supported: bool = false,
 
     pub const GatherError = std.mem.Allocator.Error || ProcError || error{
-        /// The family count grew between the two calls, which the second call
-        /// cannot serve because the array was sized by the first.
+        /// The family count changed between count and fetch. Reject shrinkage
+        /// as well, so the retained allocation keeps its original free length.
         QueueFamilyCountUnstable,
+        ExtensionCountUnstable,
     };
 
     /// Ports the `GatherDeviceInfo` passes this milestone uses
@@ -534,13 +547,14 @@ pub const PhysicalDevice = struct {
         gpa: std.mem.Allocator,
         procs: *const dispatch.InstanceProcs,
         handle: vulkan.VkPhysicalDevice,
+        instance_api_version: u32,
     ) GatherError!PhysicalDevice {
         // Every entry point below is bound before its first call, because
         // `AGENTS.md` §3.1 makes a null dispatch field a typed error. The queue
         // family one is bound once for the count query and the fetch.
         const get_properties = procs.get_physical_device_properties orelse
             return error.MissingInstanceProc;
-        const get_features = procs.get_physical_device_features orelse
+        const get_features2 = procs.get_physical_device_features2 orelse
             return error.MissingInstanceProc;
         const get_memory_properties = procs.get_physical_device_memory_properties orelse
             return error.MissingInstanceProc;
@@ -557,12 +571,34 @@ pub const PhysicalDevice = struct {
         var properties: vulkan.VkPhysicalDeviceProperties = undefined;
         get_properties(handle, &properties);
 
-        const max_buffer_size = try queryMaxBufferSize(gpa, procs, handle);
-
-        // SAFETY: `vkGetPhysicalDeviceFeatures`, same out-parameter shape as
-        // the properties above.
-        var features: vulkan.VkPhysicalDeviceFeatures = undefined;
-        get_features(handle, &features);
+        const maintenance4_extension = try deviceAdvertisesExtension(
+            gpa,
+            procs,
+            handle,
+            vulkan.VK_KHR_MAINTENANCE_4_EXTENSION_NAME,
+        );
+        const can_query_maintenance4 =
+            @min(instance_api_version, properties.apiVersion) >= vulkan.VK_API_VERSION_1_3 or
+            maintenance4_extension;
+        const bounds = try queryBufferBounds(procs, handle, can_query_maintenance4);
+        var maintenance4: vulkan.VkPhysicalDeviceMaintenance4Features = .{
+            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES),
+            .pNext = null,
+            .maintenance4 = vulkan.VK_FALSE,
+        };
+        const can_query_sampler_y_cb_cr =
+            @min(instance_api_version, properties.apiVersion) >= vulkan.VK_API_VERSION_1_1;
+        var sampler_y_cb_cr: vulkan.VkPhysicalDeviceSamplerYcbcrConversionFeatures = .{
+            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES),
+            .pNext = if (can_query_maintenance4) @ptrCast(&maintenance4) else null,
+            .samplerYcbcrConversion = vulkan.VK_FALSE,
+        };
+        var features2: vulkan.VkPhysicalDeviceFeatures2 = .{
+            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2),
+            .pNext = if (can_query_sampler_y_cb_cr) @ptrCast(&sampler_y_cb_cr) else if (can_query_maintenance4) @ptrCast(&maintenance4) else null,
+            .features = std.mem.zeroes(vulkan.VkPhysicalDeviceFeatures),
+        };
+        get_features2(handle, &features2);
 
         // SAFETY: `vkGetPhysicalDeviceMemoryProperties`, same out-parameter
         // shape as the properties above.
@@ -574,15 +610,20 @@ pub const PhysicalDevice = struct {
         const families = try gpa.alloc(vulkan.VkQueueFamilyProperties, family_count);
         errdefer gpa.free(families);
         get_queue_family_properties(handle, &family_count, families.ptr);
-        if (family_count > families.len) return error.QueueFamilyCountUnstable;
+        if (family_count != families.len) return error.QueueFamilyCountUnstable;
 
         return .{
             .handle = handle,
             .properties = properties,
-            .features = features,
+            .features = features2.features,
             .memory_properties = memory_properties,
-            .max_buffer_size = max_buffer_size,
+            .max_buffer_size = bounds.max_buffer_size,
             .queue_families = families[0..family_count],
+            .maintenance4_supported = can_query_maintenance4 and maintenance4.maintenance4 == vulkan.VK_TRUE,
+            .maintenance4_extension = maintenance4_extension,
+            .max_per_set_descriptors = bounds.max_per_set_descriptors,
+            .sampler_y_cb_cr_supported = can_query_sampler_y_cb_cr and
+                sampler_y_cb_cr.samplerYcbcrConversion == vulkan.VK_TRUE,
         };
     }
 
@@ -621,9 +662,22 @@ pub const PhysicalDevice = struct {
         var index: u32 = 0;
         while (index < self.queue_families.len) : (index += 1) {
             const family = self.queue_families[index];
-            if ((family.queueFlags & required_flags) == required_flags) return index;
+            if (family.queueCount != 0 and (family.queueFlags & required_flags) == required_flags) return index;
         }
         return null;
+    }
+
+    /// Timestamp queries use the same first universal family as logical-device creation.
+    pub fn supportsTimestampQueries(self: *const PhysicalDevice) bool {
+        const queue_family_index = self.findQueueFamilyIndex(
+            vulkan.VK_QUEUE_GRAPHICS_BIT | vulkan.VK_QUEUE_COMPUTE_BIT,
+        ) orelse return false;
+        const valid_bits = self.queue_families[queue_family_index].timestampValidBits;
+        const native_limits = self.properties.limits;
+        return valid_bits >= 1 and valid_bits <= 64 and
+            native_limits.timestampComputeAndGraphics == vulkan.VK_TRUE and
+            std.math.isFinite(native_limits.timestampPeriod) and
+            native_limits.timestampPeriod > 0;
     }
 
     /// The device name without its terminator, for a log line.
@@ -653,10 +707,8 @@ pub const MemoryTypeError = error{
 /// keep: a type must be inside the allocation's `memoryTypeBits`, must carry
 /// every required flag, and must carry no forbidden one.
 ///
-/// `VK_MEMORY_PROPERTY_DEVICE_LOCAL` is the forbidden flag here because
-/// `vkCmdFillBuffer` on device-local memory is legal and a driver may satisfy
-/// it by doing nothing, and a test that cannot tell a fill from a no-op is not
-/// evidence (`docs/50-verification.md` §3.2).
+/// Device-local and host-visible flags can coexist on UMA devices. A caller must
+/// not forbid device-local memory merely because it needs a host mapping.
 pub fn findMemoryTypeIndex(
     memory_properties: *const vulkan.VkPhysicalDeviceMemoryProperties,
     memory_type_bits: u32,
@@ -676,24 +728,6 @@ pub fn findMemoryTypeIndex(
     return error.NoMemoryType;
 }
 
-/// The device extensions this milestone turns on at `vkCreateDevice`.
-///
-/// `VK_KHR_dynamic_rendering` is the only one, and the render path does not
-/// work without it: `src/pipeline/pipeline_render.zig` chains
-/// `VkPipelineRenderingCreateInfo` with `renderPass = null` (`:751`-`:772`),
-/// and on a Vulkan 1.1 device the extension is the only thing that makes that
-/// legal. Dawn names it at `VulkanExtensions.cpp:141`, under the
-/// `// Promoted in 1.3` comment at `:135`, asserts it at `DeviceVk.cpp:714`,
-/// and then selects `VulkanRenderPassType::DynamicRendering` (`:711`-`:717`).
-///
-/// Raising `required_vulkan_version` instead would be wrong twice over. Dawn's
-/// own floor is 1.1 (`BackendVk.h:53`) and the loader gate
-/// (`VulkanInfo.cpp:86`-`:94`) reads what `vkEnumerateInstanceVersion` wrote
-/// (`:87`-`:88`), the loader's own version: a 1.1 loader cannot create a 1.2
-/// instance even when the driver is newer. And 1.2 would not have supplied
-/// this either, because the promotion above is to 1.3.
-const required_device_ext: dispatch.DeviceExt = .dynamic_rendering;
-
 /// Whether `handle` advertises `ext_name` in the list `vkCreateDevice` would
 /// read.
 ///
@@ -711,7 +745,7 @@ fn deviceAdvertisesExtension(
     procs: *const dispatch.InstanceProcs,
     handle: vulkan.VkPhysicalDevice,
     ext_name: [:0]const u8,
-) (std.mem.Allocator.Error || ProcError)!bool {
+) (std.mem.Allocator.Error || ProcError || error{ExtensionCountUnstable})!bool {
     // The count query and the fetch below are the same entry point, so one
     // binding serves the pair.
     const enumerate_extensions =
@@ -736,6 +770,7 @@ fn deviceAdvertisesExtension(
         &count,
         properties.ptr,
     ));
+    if (count > properties.len) return error.ExtensionCountUnstable;
 
     for (properties[0..count]) |property| {
         // `VkExtensionProperties::extensionName` is `[256]u8`
@@ -755,11 +790,13 @@ fn deviceAdvertisesExtension(
 /// Ports the `VkPhysicalDeviceProperties2` chain Dawn builds at
 /// `VulkanInfo.cpp:254`-`:260` and sends at `:410`, its Maintenance4 append at
 /// `:306`-`:309`, and the assignment at `PhysicalDeviceVk.cpp:940`-`:945`.
-fn queryMaxBufferSize(
-    gpa: std.mem.Allocator,
+const BufferBounds = struct { max_buffer_size: vulkan.VkDeviceSize, max_per_set_descriptors: u32 };
+
+fn queryBufferBounds(
     procs: *const dispatch.InstanceProcs,
     handle: vulkan.VkPhysicalDevice,
-) (std.mem.Allocator.Error || ProcError)!vulkan.VkDeviceSize {
+    has_maintenance4: bool,
+) ProcError!BufferBounds {
     // Bound before the chain is built, because `AGENTS.md` §3.1 makes a null
     // dispatch field a typed error and the chain is the out-parameter it fills.
     const get_properties2 = procs.get_physical_device_properties2 orelse
@@ -773,32 +810,20 @@ fn queryMaxBufferSize(
         .maxPerSetDescriptors = 0,
         .maxMemoryAllocationSize = 0,
     };
-    // `VulkanInfo.cpp:306`-`:309` chains Maintenance4 only where
-    // `HasExt(DeviceExt::Maintenance4)` holds, and so does this. The gate is
-    // the same shape as the one `Device.create` puts on `dynamic_rendering`
-    // (`vulkan_device.zig:937`-`:942`): the device's own extension list, read by
-    // `deviceAdvertisesExtension`. A chain that names a struct the device
-    // cannot take is refused by the validation layer, and `AGENTS.md` §3.1
-    // makes the library run with no layer.
+    // Maintenance4 properties are queried when promoted to core 1.3 or when
+    // the device advertises the extension. Feature enablement is separate.
     var maintenance4: vulkan.VkPhysicalDeviceMaintenance4Properties = .{
         .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES),
         .pNext = null,
         .maxBufferSize = 0,
     };
-    const has_maintenance4 = try deviceAdvertisesExtension(
-        gpa,
-        procs,
-        handle,
-        vulkan.VK_KHR_MAINTENANCE_4_EXTENSION_NAME,
-    );
     // `pNext` is a plain pointer, so the driver writes straight into both
     // blocks. The block behind the link is zeroed by its own literal.
     maintenance3.pNext = if (has_maintenance4) @ptrCast(&maintenance4) else null;
     var properties2: vulkan.VkPhysicalDeviceProperties2 = .{
         .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2),
         .pNext = @ptrCast(&maintenance3),
-        // Zeroed because the driver fills the core block too, which is what
-        // `queryDynamicRendering` does with the features block at `:841`-`:845`.
+        // The driver fills the core properties block as well as the chain.
         .properties = std.mem.zeroes(vulkan.VkPhysicalDeviceProperties),
     };
     get_properties2(handle, &properties2);
@@ -808,57 +833,22 @@ fn queryMaxBufferSize(
     // which matters only if neither branch runs, and one of the two always
     // does here. The fallback is the conservative one: no allocation, and so
     // no buffer, can be larger than the ceiling.
-    return if (has_maintenance4)
-        maintenance4.maxBufferSize
-    else
-        maintenance3.maxMemoryAllocationSize;
-}
-
-/// What the driver reports for `VkPhysicalDeviceDynamicRenderingFeatures`.
-///
-/// Ports the chain Dawn builds at `VulkanInfo.cpp:391`-`:394` and copies into
-/// the create info at `DeviceVk.cpp:715`. The bit is read rather than
-/// asserted: a pipeline carrying `VkPipelineRenderingCreateInfo` is legal only
-/// where `dynamicRendering` is enabled, and the driver is the only authority
-/// on that.
-fn queryDynamicRendering(
-    procs: *const dispatch.InstanceProcs,
-    handle: vulkan.VkPhysicalDevice,
-) ProcError!vulkan.VkPhysicalDeviceDynamicRenderingFeatures {
-    // Bound before the chain is built, for the reason the properties chain
-    // above gives: it is the out-parameter this call fills.
-    const get_features2 = procs.get_physical_device_features2 orelse
-        return error.MissingInstanceProc;
-    const s_type: vulkan.VkStructureType =
-        @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR);
-    var dynamic: vulkan.VkPhysicalDeviceDynamicRenderingFeatures = .{
-        .sType = s_type,
-        .pNext = null,
-        .dynamicRendering = 0,
+    return .{
+        .max_buffer_size = if (has_maintenance4) maintenance4.maxBufferSize else maintenance3.maxMemoryAllocationSize,
+        .max_per_set_descriptors = maintenance3.maxPerSetDescriptors,
     };
-    // `pNext` is a plain pointer, so the driver writes straight into `dynamic`.
-    // `features` is zeroed because the driver fills the core block too.
-    var features: vulkan.VkPhysicalDeviceFeatures2 = .{
-        .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2),
-        .pNext = @ptrCast(&dynamic),
-        .features = std.mem.zeroes(vulkan.VkPhysicalDeviceFeatures),
-    };
-    get_features2(handle, &features);
-    return dynamic;
 }
 
 /// One `VkDevice` and the device-tier procs behind it.
 ///
-/// Ports the creation half of `Device::CreateDevice`
-/// (`DeviceVk.cpp:443`-`:790`) and its accessors. It does not port the
-/// feature and limits negotiation (`PhysicalDeviceVk.cpp:285`-`:990`), which
-/// lands with `VulkanExtensions`. The one exception is
-/// `required_device_ext` and the feature it needs, because
-/// `pipeline_render.zig` cannot create a pipeline without them and the file
-/// that would negotiate them is M7's.
+/// Ports the creation half of `Device::CreateDevice` and its accessors.
+/// The selected backend uses traditional render passes and requests no dynamic
+/// rendering extension or feature.
 pub const Device = struct {
     /// The device handle. Null after `deinit`.
     vk_device: vulkan.VkDevice,
+    /// The core API usable by both this instance and this physical device.
+    api_version: u32,
     /// The device tier, one set per device
     /// (`docs/30-port-design.md` §6.3).
     procs: *dispatch.DeviceProcs,
@@ -874,11 +864,20 @@ pub const Device = struct {
     /// memory allocation on this device has to record it here or the teardown
     /// assertion cannot see it.
     handles: *HandleSet,
+    maintenance4_enabled: bool,
+    enabled_features: vulkan.VkPhysicalDeviceFeatures,
+    sampler_y_cb_cr_enabled: bool = false,
+    /// Actual live VkSampler handles for hardware admission, not reference ownership.
+    /// The original object guard serializes creation and destruction.
+    sampler_allocation_count: u32 = 0,
+    timestamp_valid_bits: u32,
+    timestamp_period: f32,
 
     pub const CreateOptions = struct {
         instance: *VulkanInstance,
         physical: *const PhysicalDevice,
         handles: *HandleSet,
+        required_features: []const api.FeatureName = &.{},
     };
 
     pub const CreateError = std.mem.Allocator.Error || dispatch.LoadError || dispatch.Error ||
@@ -890,12 +889,16 @@ pub const Device = struct {
             /// `vkCreateDevice` succeeded and returned null, which
             /// `DeviceVk.cpp:786` passes straight on as a success.
             DeviceCreationReturnedNull,
+            UnsupportedRequiredFeature,
+            RobustBufferAccessUnsupported,
         };
 
     /// Ports `Device::CreateDevice` (`DeviceVk.cpp:443`): the queue-family scan
     /// (`:737`-`:755`), the single queue request (`:757`-`:770`), and
     /// `vkCreateDevice` (`:786`).
     pub fn create(gpa: std.mem.Allocator, options: CreateOptions) CreateError!Device {
+        // Core buffer memory safety requires enabled hardware robustness.
+        if (options.physical.features.robustBufferAccess != vulkan.VK_TRUE) return error.RobustBufferAccessUnsupported;
         // `kUniversalFlags` at `DeviceVk.cpp:740`.
         const universal_flags: vulkan.VkQueueFlags =
             vulkan.VK_QUEUE_GRAPHICS_BIT | vulkan.VK_QUEUE_COMPUTE_BIT;
@@ -920,82 +923,82 @@ pub const Device = struct {
         // makes a null dispatch field a typed error.
         const instance_procs = options.instance.procs;
         const create_device = instance_procs.create_device orelse
-            return error.MissingDeviceProc;
+            return error.MissingInstanceProc;
         const destroy_device = instance_procs.destroy_device orelse
-            return error.MissingDeviceProc;
+            return error.MissingInstanceProc;
         const get_device_proc_addr = instance_procs.get_device_proc_addr orelse
-            return error.MissingDeviceProc;
+            return error.MissingInstanceProc;
 
-        // Dawn asserts `required_device_ext` at `DeviceVk.cpp:714` and then
-        // selects `VulkanRenderPassType::DynamicRendering` (`:711`-`:717`),
-        // which is what lets `pipeline_render.zig` build a pipeline with no
-        // render pass. The gate is the device's own extension list, the one
-        // `GatherDeviceInfo` reads (`VulkanInfo.cpp:212`-`:238`). A device
-        // that does not advertise it is still created, because refusing it is
-        // an admission rule and admission is M9's row; upstream the same
-        // refusal is the `DAWN_CHECK` at `DeviceVk.cpp:714`.
-        const render_ext_enabled = try deviceAdvertisesExtension(
-            gpa,
-            instance_procs,
-            options.physical.handle,
-            required_device_ext.vkName(),
-        );
-
-        var enabled_exts: dispatch.EnabledDeviceExts = .{};
-        // One slot, because there is one extension. A fixed array keeps the
-        // name pointer alive across the `vkCreateDevice` call without a heap
-        // slice the caller would have to free.
-        //
-        // SAFETY: `extension_names[0]` is written inside the `if` below
-        // whenever `extension_count` becomes 1, and `enabled_names` below is
-        // null unless that count is nonzero, so the array is read only when
-        // the write happened.
-        var extension_names: [1][*:0]const u8 = undefined;
-        var extension_count: u32 = 0;
-        // SAFETY: `dynamic_rendering` is assigned inside the `if` below
-        // whenever `render_ext_enabled` is true, and `dynamic_rendering_chain`
-        // below is non-null only under that same condition, so the value is
-        // read only when the assignment happened.
-        var dynamic_rendering: vulkan.VkPhysicalDeviceDynamicRenderingFeatures = undefined;
-        if (render_ext_enabled) {
-            // The extension without the feature is unusable and the feature
-            // without the extension is unreachable, so one decision drives
-            // both.
-            dynamic_rendering = try queryDynamicRendering(
-                instance_procs,
-                options.physical.handle,
-            );
-            extension_names[0] = required_device_ext.vkName();
-            extension_count = 1;
-            enabled_exts = enabled_exts.with(required_device_ext);
-        }
-        // The array, or nothing: `pNext` and the extension list are two views
-        // of one decision, so both are null when the gate is closed.
-        const enabled_names: [*c]const [*c]const u8 = if (extension_count == 0)
-            null
-        else
-            @ptrCast(&extension_names);
-        const dynamic_rendering_chain: ?*const anyopaque = if (render_ext_enabled)
-            @ptrCast(&dynamic_rendering)
-        else
-            null;
+        const enabled_exts: dispatch.EnabledDeviceExts = .{};
+        const api_version = @min(options.instance.api_version, options.physical.properties.apiVersion);
+        const maintenance4_enabled = options.physical.maintenance4_supported and
+            (api_version >= vulkan.VK_API_VERSION_1_3 or options.physical.maintenance4_extension);
+        const available = options.physical.features;
+        var enabled_features = std.mem.zeroes(vulkan.VkPhysicalDeviceFeatures);
+        // These core flags back implemented graphics/storage paths, not optional
+        // advertised API features. Enable only flags this physical device queried.
+        enabled_features.robustBufferAccess = vulkan.VK_TRUE;
+        enabled_features.samplerAnisotropy = available.samplerAnisotropy;
+        enabled_features.independentBlend = available.independentBlend;
+        enabled_features.fullDrawIndexUint32 = available.fullDrawIndexUint32;
+        enabled_features.imageCubeArray = available.imageCubeArray;
+        enabled_features.depthBiasClamp = available.depthBiasClamp;
+        enabled_features.sampleRateShading = available.sampleRateShading;
+        enabled_features.fragmentStoresAndAtomics = available.fragmentStoresAndAtomics;
+        enabled_features.vertexPipelineStoresAndAtomics = available.vertexPipelineStoresAndAtomics;
+        enabled_features.shaderUniformBufferArrayDynamicIndexing =
+            available.shaderUniformBufferArrayDynamicIndexing;
+        enabled_features.shaderStorageBufferArrayDynamicIndexing =
+            available.shaderStorageBufferArrayDynamicIndexing;
+        enabled_features.shaderSampledImageArrayDynamicIndexing =
+            available.shaderSampledImageArrayDynamicIndexing;
+        enabled_features.shaderStorageImageArrayDynamicIndexing =
+            available.shaderStorageImageArrayDynamicIndexing;
+        // Hardware compression is a core admission baseline. The high-level
+        // feature set still controls which compression formats callers may use.
+        enabled_features.textureCompressionBC = available.textureCompressionBC;
+        enabled_features.textureCompressionETC2 = available.textureCompressionETC2;
+        enabled_features.textureCompressionASTC_LDR = available.textureCompressionASTC_LDR;
+        for (options.required_features) |feature| switch (feature) {
+            .core_features_and_limits => {},
+            .depth_clip_control => {
+                if (available.depthClamp != vulkan.VK_TRUE) return error.UnsupportedRequiredFeature;
+                enabled_features.depthClamp = vulkan.VK_TRUE;
+            },
+            .indirect_first_instance => {
+                if (available.drawIndirectFirstInstance != vulkan.VK_TRUE)
+                    return error.UnsupportedRequiredFeature;
+                enabled_features.drawIndirectFirstInstance = vulkan.VK_TRUE;
+            },
+            .timestamp_query => {
+                if (!options.physical.supportsTimestampQueries())
+                    return error.UnsupportedRequiredFeature;
+            },
+            else => return error.UnsupportedRequiredFeature,
+        };
+        var maintenance4: vulkan.VkPhysicalDeviceMaintenance4Features = .{
+            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES),
+            .pNext = null,
+            .maintenance4 = vulkan.VK_TRUE,
+        };
+        const sampler_y_cb_cr_enabled = options.physical.sampler_y_cb_cr_supported and
+            api_version >= vulkan.VK_API_VERSION_1_1;
+        var sampler_y_cb_cr: vulkan.VkPhysicalDeviceSamplerYcbcrConversionFeatures = .{
+            .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES),
+            .pNext = if (maintenance4_enabled) @ptrCast(&maintenance4) else null,
+            .samplerYcbcrConversion = @intFromBool(sampler_y_cb_cr_enabled),
+        };
+        const extension_names = [_][*:0]const u8{vulkan.VK_KHR_MAINTENANCE_4_EXTENSION_NAME};
+        const maintenance4_needs_extension = maintenance4_enabled and api_version < vulkan.VK_API_VERSION_1_3;
         const create_info: vulkan.VkDeviceCreateInfo = .{
             .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO),
             .pQueueCreateInfos = &queue_create_info,
             .queueCreateInfoCount = 1,
-            // Dawn enables no layer on the device (`DeviceVk.cpp:780`), and it
-            // enables every extension the device advertised
-            // (`usedKnobs.extensions = mDeviceInfo.extensions`, `:447`),
-            // naming that set at `:450`-`:452`. This milestone turns on one,
-            // the render path's, so the name array has a single slot.
             .enabledLayerCount = 0,
-            .enabledExtensionCount = extension_count,
-            .ppEnabledExtensionNames = enabled_names,
-            // `VulkanInfo.cpp:391`-`:394` reads the feature and `DeviceVk.cpp:715`
-            // chains it here. Without it `pipeline_render.zig` builds a
-            // pipeline the device is not allowed to create.
-            .pNext = dynamic_rendering_chain,
-            .pEnabledFeatures = null,
+            .enabledExtensionCount = @intFromBool(maintenance4_needs_extension),
+            .ppEnabledExtensionNames = if (maintenance4_needs_extension) &extension_names else null,
+            .pNext = if (sampler_y_cb_cr_enabled) @ptrCast(&sampler_y_cb_cr) else if (maintenance4_enabled) @ptrCast(&maintenance4) else null,
+            .pEnabledFeatures = &enabled_features,
         };
 
         var handle: vulkan.VkDevice = null;
@@ -1015,21 +1018,24 @@ pub const Device = struct {
         const procs = try dispatch.loadDeviceProcs(gpa, .{
             .get_device_proc_addr = get_device_proc_addr,
             .device = handle,
-            // The same set the create info carried. The loader resolves a
-            // device proc by the extension that carries it
-            // (`src/vk/dispatch.zig:761`-`:767`), so a set that disagreed with
-            // `ppEnabledExtensionNames` would leave `cmd_begin_rendering_khr`
-            // null on a device that has it.
+            // This is the same empty extension set carried by the create info.
             .enabled_extensions = enabled_exts,
         });
 
         return .{
             .vk_device = handle,
+            .api_version = api_version,
             .procs = procs,
             .instance = options.instance,
             .physical = options.physical.*,
             .queue_family_index = queue_family_index,
             .handles = options.handles,
+            .maintenance4_enabled = maintenance4_enabled,
+            .enabled_features = enabled_features,
+            .sampler_y_cb_cr_enabled = sampler_y_cb_cr_enabled,
+            .sampler_allocation_count = 0,
+            .timestamp_valid_bits = options.physical.queue_families[queue_family_index].timestampValidBits,
+            .timestamp_period = options.physical.properties.limits.timestampPeriod,
         };
     }
 
@@ -1043,7 +1049,7 @@ pub const Device = struct {
     /// the caller the teardown rather than a half-finished one.
     pub fn deinit(self: *Device, gpa: std.mem.Allocator) ProcError!void {
         const destroy_device = self.instance.procs.destroy_device orelse
-            return error.MissingDeviceProc;
+            return error.MissingInstanceProc;
         destroy_device(self.vk_device, null);
         self.handles.release(.device);
         gpa.destroy(self.procs);
@@ -1339,6 +1345,7 @@ pub const Backend = struct {
                 self.allocator,
                 instance.procs,
                 discovered[index],
+                instance.api_version,
             );
         }
         self.physical_devices[icd_slot] = cached;
@@ -1363,6 +1370,7 @@ comptime {
     });
     assertErrorSetNamed(PhysicalDevice.GatherError, &.{
         error.OutOfMemory,
+        error.ExtensionCountUnstable,
         error.QueueFamilyCountUnstable,
     });
     assertErrorSetNamed(Device.CreateError, &.{
@@ -1372,6 +1380,8 @@ comptime {
         error.MissingDeviceProc,
         error.NoUniversalQueueFamily,
         error.DeviceCreationReturnedNull,
+        error.UnsupportedRequiredFeature,
+        error.RobustBufferAccessUnsupported,
     });
     assertErrorSetNamed(Backend.DiscoverError, &.{
         error.OutOfMemory,
@@ -1381,6 +1391,7 @@ comptime {
         error.MissingInstanceProc,
         error.MissingDeviceProc,
         error.QueueFamilyCountUnstable,
+        error.ExtensionCountUnstable,
         error.EnumerationCountUnstable,
         error.VulkanVersionUnsupported,
         error.InstanceCreationReturnedNull,
@@ -1396,7 +1407,7 @@ comptime {
     }
 }
 
-test "the memory-type rule refuses a device-local type and accepts a linear one" {
+test "the memory-type rule honors required and explicitly forbidden flags" {
     // A two-type table: index 0 is device-local, index 1 is host-visible.
     var properties: vulkan.VkPhysicalDeviceMemoryProperties =
         std.mem.zeroes(vulkan.VkPhysicalDeviceMemoryProperties);
@@ -1405,7 +1416,7 @@ test "the memory-type rule refuses a device-local type and accepts a linear one"
     properties.memoryTypes[1].propertyFlags =
         vulkan.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vulkan.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    // Only type 1 is host-visible, so a fill that must not be a no-op picks it.
+    // Only type 1 is host-visible.
     try std.testing.expectEqual(
         @as(u32, 1),
         try findMemoryTypeIndex(
@@ -1428,6 +1439,19 @@ test "the memory-type rule refuses a device-local type and accepts a linear one"
         error.NoMemoryType,
         findMemoryTypeIndex(&properties, 0, 0, 0),
     );
+}
+
+test "host-visible device-local memory is a legal mapped allocation type" {
+    var properties = std.mem.zeroes(vulkan.VkPhysicalDeviceMemoryProperties);
+    properties.memoryTypeCount = 1;
+    properties.memoryTypes[0].propertyFlags = vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+        vulkan.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vulkan.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    try std.testing.expectEqual(@as(u32, 0), try findMemoryTypeIndex(
+        &properties,
+        1,
+        vulkan.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        0,
+    ));
 }
 
 test "the live-handle set counts one kind and comes back empty" {
@@ -1469,13 +1493,20 @@ test "the floor is Vulkan 1.1" {
     try std.testing.expectEqual(vulkan.VK_API_VERSION_1_1, required_vulkan_version);
 }
 
-test "the render extension is the one the bindings spell" {
-    // A wrong name fails silently at every other layer: the driver is only
-    // ever asked whether it advertises the name this file holds, so a typo
-    // makes the answer "no", the device is created without the extension,
-    // and the first evidence is a failed `vkCreateGraphicsPipelines`.
-    try std.testing.expectEqualStrings(
-        vulkan.VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-        required_device_ext.vkName(),
-    );
+test "instance negotiation preserves the floor and caps the requested API" {
+    try std.testing.expectEqual(vulkan.VK_API_VERSION_1_1, negotiatedInstanceApiVersion(vulkan.VK_API_VERSION_1_1));
+    try std.testing.expectEqual(vulkan.VK_API_VERSION_1_2, negotiatedInstanceApiVersion(vulkan.VK_API_VERSION_1_2));
+    try std.testing.expectEqual(vulkan.VK_API_VERSION_1_3, negotiatedInstanceApiVersion(vulkan.VK_API_VERSION_1_4));
+}
+
+test "native creation refuses missing robust buffer access before native calls" {
+    var physical = std.mem.zeroes(PhysicalDevice);
+    var instance: VulkanInstance = undefined;
+    var handles: HandleSet = .{};
+    try std.testing.expectError(error.RobustBufferAccessUnsupported, Device.create(std.testing.allocator, .{
+        .instance = &instance,
+        .physical = &physical,
+        .handles = &handles,
+    }));
+    try std.testing.expect(handles.isEmpty());
 }

@@ -2,7 +2,7 @@
 
 Upstream is `google/dawn`, pinned at **`32f77c02294310054a660c393feded4bcb3f203c`**
 (2026-10-03, `main`), read-only at
-`/tmp/scratch/research/dawn`.
+`~/.cache/dusk-research/research/dawn`.
 
 Every claim below cites `path:line` in that tree, or a command whose output is
 quoted. Where a fact came from a count, the command is given. Where something is
@@ -79,6 +79,15 @@ The generated C header carries **266 `WGPU*` free functions**: the 5
 function at this revision, so `c_methods` yields nothing for them
 (`generator/dawn_json_generator.py:1501-1511`,
 `generator/templates/api.h:366-377`).
+
+**Procedure return types at the pin.** The local source-only checkout does not
+include `generator/templates/api.h`. The immutable
+[upstream template](https://raw.githubusercontent.com/google/dawn/32f77c02294310054a660c393feded4bcb3f203c/generator/templates/api.h)
+provides this evidence. Its method-procedure typedef uses
+`as_nullability_annotated_cType(method.returns)`, not the generic `WGPUProc` type.
+The global-procedure typedef uses `function.returns`. `WGPUProc` is the
+generic function-pointer type returned by `get proc address`.
+These are Dawn C declarations. They do not promise a C ABI for Dusk's native Zig types.
 
 Sample of the schema (`src/dawn/dawn.json`, `buffer descriptor`):
 
@@ -320,6 +329,12 @@ then always calls `vkCreateShaderModule` on the *regenerated* words
 The `#else` branch at `:529` returns an unrecoverable error; **there is no
 pass-through branch**.
 
+`ShaderModule::Create` constructs the object and calls `Initialize`
+(`src/dawn/native/vulkan/ShaderModuleVk.cpp:93-99`).
+`GetHandleAndSpirv` defers native module creation until pipeline compilation
+(`src/dawn/native/vulkan/ShaderModuleVk.cpp:130-135`).
+The factory evidence in §4.16.4 preserves this distinction.
+
 Reflection is not derived from parsing SPIR-V either. It is read out of the
 WGSL-side `tint::Program` by `tint::inspector::Inspector`
 (`src/dawn/native/ShaderModule.cpp:1314-1352`).
@@ -337,6 +352,83 @@ content hash; a SHA3-256 `ShaderModuleHash` for shader identity; and a
 `StreamIn`-serialised `CacheKey` byte blob for persistent keys. The in-memory
 `ContentLessObjectCache` sets and `InternalPipelineStore` are **unbounded**, with
 eviction only on object destroy.
+
+**Stage constants at the pin.** `src/dawn/native/Pipeline.cpp:164-226`
+validates each key against reflected overrides, rejects nonfinite values, checks
+the scalar range, and rejects duplicate initialization. Boolean conversion
+cannot fail after the finite check (`:208-211`).
+`src/utils/numeric.h:103-120` checks the original double against inclusive
+integer/f32 bounds and the f16 range `[-65504, 65504]`.
+These checks precede conversion. They do not first truncate an out-of-range value.
+`Pipeline.cpp:228-249` also rejects remaining uninitialized WGSL overrides.
+Dusk's binary input carries encoded defaults and does not implement that WGSL rule.
+`PipelineBase::PipelineBase` (`:260-304`) stores each stage's key/value map
+at `:281-284`. Hashing and equality then consume that stored representation.
+
+`src/dawn/native/ShaderModule.cpp:398-415` converts Tint override IDs and scalar
+types. `ReflectEntryPointUsingTint` (`:795`, override collection at `:812-847`)
+uses decimal ID strings for explicitly numbered overrides and names otherwise.
+It also collects overrides unused by the entry point, for pipeline validation.
+This is WGSL/Tint reflection, not a SPIR-V `SpecId` parser.
+`PipelineBase::ComputeContentHash` (`Pipeline.cpp:383-395`) includes stage constants.
+`PipelineBase::EqualForCache` (`:398-416`) compares their count, keys, and values.
+
+**Native SPIR-V adaptation boundary.** Dusk uses module-scope `SpecId` metadata,
+not Tint's WGSL initialization state. Numeric IDs and unambiguous `OpName` aliases
+resolve to the same ID. Derived `OpSpecConstantOp` expressions are not direct
+external scalar IDs. Vulkan applies supplied values without rewriting the input
+words. Omitted values retain encoded defaults. This follows the first-party
+[SPIR-V 1.6 specialization contract, §§2.12 and 3.20](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#SpecializationSection).
+It does not claim a WGSL parser or WGSL uninitialized-override validation.
+
+**Compute workgroup validation at the pin.**
+[`ValidateComputeStageWorkgroupSize`](https://github.com/google/dawn/blob/32f77c02294310054a660c393feded4bcb3f203c/src/dawn/native/ShaderModule.cpp#L1355-L1435)
+rejects zero dimensions, excessive dimensions, and excessive invocation counts.
+It also checks workgroup storage and subgroup constraints.
+Its input is Tint's `WorkgroupInfo`, not a SPIR-V execution-mode decoder.
+Dusk's M5 decoder supplies native SPIR-V workgroup metadata.
+M14 owns effective-size resolution and selected-device limit validation before pipeline lookup and native creation.
+The absence of a size field in `VkComputePipelineCreateInfo` does not remove this validation contract.
+Dusk's phase-1 dimension and invocation checks do not implement the storage or subgroup checks.
+Dusk selects the entry-point name and compute execution model together.
+Its native evaluator preserves constant bit patterns and wraps supported integer arithmetic at the component width.
+This shader arithmetic differs from the checked `u64` invocation-count product.
+`has_local_size_id` records mode presence even when the builtin supplies the effective size.
+The consumer gates that presence before lookup or native creation.
+These are Dusk source contracts, not additional Dawn claims.
+`docs/30-port-design.md` cites the first-party SPIR-V and Vulkan rules.
+Phase-1 final verification remains pending.
+
+**Shared module IDs are not duplicate map entries.** Khronos recorded the
+October 15, 2025 working-group discussion in
+[SPIRV-Registry issue 357](https://github.com/KhronosGroup/SPIRV-Registry/issues/357).
+Multiple result IDs with one `SpecId` are not explicitly forbidden.
+The validator did not reject the reported same-type/same-default compiler output.
+The discussion did not settle all different-type/default implementation behavior.
+It is not evidence that every such shader runs correctly on every driver.
+[VkSpecializationInfo VUID-04911](https://docs.vulkan.org/refpages/latest/refpages/source/VkSpecializationInfo.html#VUID-VkSpecializationInfo-constantID-04911)
+requires unique IDs within `pMapEntries`, not unique `SpecId` decorations across module results.
+[VkSpecializationMapEntry VUID-00776](https://docs.vulkan.org/refpages/latest/refpages/source/VkSpecializationMapEntry.html#VUID-VkSpecializationMapEntry-constantID-00776)
+requires the supplied size to match the shader constant's byte size.
+Boolean constants require the byte size of `VkBool32`.
+
+Dusk therefore retains each result's metadata, aliases, and independent encoded defaults.
+It sorts metadata by `SpecId`, then result ID. Repeated `SpecId` decorations on
+one result remain malformed. The codec converts the requested f64 value for
+every declaration in the resolved ID family. It accepts one map entry only
+when all conversions produce the same encoded size and bits.
+Conflicting sizes or bits are ambiguous. Range and finite errors remain explicit.
+The canonical type tag and width use a deterministic minimum across the family.
+Aliases and metadata order cannot change that choice. Distinct IDs sharing one
+name remain ambiguous. Duplicate caller assignments to one ID fail.
+These are native conversion rules, not additional SPIR-V validity rules.
+They do not require matching encoded defaults or exact scalar kinds.
+
+The checked Dawn source is available at the pin:
+[Pipeline.cpp](https://github.com/google/dawn/blob/32f77c02294310054a660c393feded4bcb3f203c/src/dawn/native/Pipeline.cpp#L164-L226),
+[numeric.h](https://github.com/google/dawn/blob/32f77c02294310054a660c393feded4bcb3f203c/src/utils/numeric.h#L103-L120),
+and [ShaderModule.cpp](https://github.com/google/dawn/blob/32f77c02294310054a660c393feded4bcb3f203c/src/dawn/native/ShaderModule.cpp#L398-L415).
+
 
 **Consequence.** A Vulkan-only port that takes SPIR-V and hands it to
 `vkCreateShaderModule` is *strictly simpler* than Dawn, owes nothing to Tint's
@@ -423,6 +515,106 @@ reaching private state by including private headers.
 - `src/dawn/partition_alloc/` vendors 3 Chromium headers (760 lines, header-only)
   and by default uses **Dawn's own no-op implementation**, so the dependency
   collapses to `?*T`. Dawn never calls a PartitionAlloc API. **Nothing to port.**
+
+### 4.16 Native phase-2 function evidence
+
+These tables record upstream functions at the pin. They are not a Dusk port map.
+`docs/40-plan.md` owns the function map and its port decisions.
+Paths and ranges below refer to the pinned checkout named above.
+
+**Not claimed.** These tables establish no Dusk consumer pass, runtime result, or full Dusk/Dawn Core parity.
+They add no implementation claim for asynchronous pipelines, caches, surfaces, or platform services.
+Dusk context owners and typed resource facades are original Dusk glue.
+They are not additional Dawn factory functions.
+
+#### 4.16.1 Instance, adapter, and physical-device selection
+
+| Concern | Function and pinned evidence | Upstream behavior |
+| --- | --- | --- |
+| Instance creation | `InstanceBase::Create`, `src/dawn/native/Instance.cpp:242-262`. Constructor at `src/dawn/native/Instance.cpp:265-268`. `Initialize` entry at `src/dawn/native/Instance.cpp:301`. | `Create` validates the descriptor, creates instance toggles, constructs the instance, and calls `Initialize`. |
+| Adapter construction | `InstanceBase::CreateAdapter`, `src/dawn/native/Instance.cpp:405-418`. `AdapterBase::AdapterBase`, `src/dawn/native/Adapter.cpp:54-71`. | Instance creates adapter toggles and an adapter. The adapter checks its feature level, then stores supported features and limits. |
+| Adapter enumeration | `InstanceBase::EnumerateAdapters`, `src/dawn/native/Instance.cpp:433-465`. | It creates adapters from enumerated physical devices. It sorts the result except when the request selects D3D11 or D3D12. |
+| Backend connection | `InstanceBase::GetBackendConnection`, `src/dawn/native/Instance.cpp:468-478`. Vulkan `Connect`, `src/dawn/native/vulkan/BackendVk.cpp:642-644`. | The instance returns a previously tried connection or registers a connection. Vulkan `Connect` constructs a `Backend`. |
+| Physical enumeration | `InstanceBase::EnumeratePhysicalDevices`, `src/dawn/native/Instance.cpp:539-576`. | Request options select backends. Each available backend discovers physical devices for the combined result. |
+| Vulkan discovery and selection | `Backend::DiscoverPhysicalDevices`, `src/dawn/native/vulkan/BackendVk.cpp:576-639`. | It searches ICDs in fallback-first order and initializes physical devices. It stores discovered devices, then filters results by the requested feature level. |
+| Physical initialization | `PhysicalDeviceBase::Initialize`, `src/dawn/native/PhysicalDevice.cpp:51-74`. | It calls backend initialization, initializes vendor information and supported features, then initializes and normalizes limits. |
+| Adapter facts | `AdapterBase::GetLimits`, `src/dawn/native/Adapter.cpp:109-111`. `APIGetInfo`, `src/dawn/native/Adapter.cpp:120-144`. `APIHasFeature` and `APIGetFeatures`, `src/dawn/native/Adapter.cpp:207-216`. | Limits and feature accessors use stored adapter facts. `APIGetInfo` obtains identity and backend properties from the physical device. |
+| Required capabilities | `AdapterBase::CreateDeviceInternal`, `src/dawn/native/Adapter.cpp:238-252,268-294,305-321`. `CreateDevice`, `src/dawn/native/Adapter.cpp:325-329`. | Device creation checks required features under device toggles and checks required limits. Adapter consumption occurs only after successful creation when required. |
+| Physical feature and device dispatch | `PhysicalDeviceBase::SupportsAllRequiredFeatures`, `src/dawn/native/PhysicalDevice.cpp:158-167`. `GetLimits` and `EnableFeature`, `src/dawn/native/PhysicalDevice.cpp:169-175`. `CreateDevice`, `src/dawn/native/PhysicalDevice.cpp:77-82`. | Feature checks use toggles. Limits and enabled features belong to the physical device. `CreateDevice` dispatches to `CreateDeviceImpl`. |
+
+#### 4.16.2 Vulkan queries, baseline, Core features, and limits
+
+Raw queries and admission policy are separate functions.
+`PhysicalDevice::InitializeImpl` calls `GatherDeviceInfo` before it applies policy
+(`src/dawn/native/vulkan/PhysicalDeviceVk.cpp:180-181,234-282`).
+Do not treat the full initializer as only a query helper.
+
+| Concern | Function and pinned evidence | Upstream behavior |
+| --- | --- | --- |
+| Raw properties, memory, and queues | `GatherDeviceInfo`, `src/dawn/native/vulkan/VulkanInfo.cpp:164-194`. | It queries physical-device properties, memory types and heaps, and queue-family properties. |
+| Extended properties and features | `GatherDeviceInfo`, `src/dawn/native/vulkan/VulkanInfo.cpp:306-309,407-412`. | It adds maintenance4 properties when available. It calls `GetPhysicalDeviceProperties2` and `GetPhysicalDeviceFeatures2`, then stores the base features. |
+| Vulkan version and robust access | `PhysicalDevice::InitializeImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:234-242`. | It asserts Vulkan 1.1 or later. Missing `robustBufferAccess` rejects the physical device. |
+| Compression baseline | `PhysicalDevice::InitializeImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:244-250`. | It requires BC compression, or both ETC2 and ASTC LDR compression. |
+| Descriptor-array indexing baseline | `PhysicalDevice::InitializeImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:252-258`. | It requires uniform-buffer, storage-buffer, sampled-image, and storage-image array dynamic indexing. All four Vulkan feature flags must be present. |
+| Other baseline features | `PhysicalDevice::InitializeImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:264-271`. | Missing `fragmentStoresAndAtomics` or `fullDrawIndexUint32` rejects the physical device. |
+| Core-only feature gates | `PhysicalDevice::InitializeImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:260-263,272-280`. | Missing `depthBiasClamp`, `imageCubeArray`, `independentBlend`, or `sampleRateShading` marks Core unsupported. These checks do not reject Compatibility by themselves. |
+| Optional compression features | `PhysicalDevice::InitializeSupportedFeaturesImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:285-303`. | It advertises BC, ETC2, and ASTC features according to their queried Vulkan flags. This is separate from the compression baseline. |
+| Feature-level limit admission | `PhysicalDevice::InitializeSupportedLimitsImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:736-748`. `InitializeSupportedLimitsInternal`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:750-772`. | It tries Core limits when Core remains supported. A failure marks Core unsupported and retries Compatibility limits. Internal checks start from feature-level defaults. |
+| Descriptor and binding limits | `PhysicalDevice::InitializeSupportedLimitsInternal`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:800-828`. | It checks and projects bind-group, dynamic-buffer, per-stage descriptor, storage-buffer range, and color-attachment limits. Uniform-buffer range rounds down to 16 bytes. |
+| Fragment-output resource budget | `PhysicalDevice::InitializeSupportedLimitsInternal`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:834-867`. | It compares the combined budget with baseline and projected totals. When the budget is strictly between them, it shares extra resources across three limits. |
+| Buffer-size projection | `PhysicalDevice::InitializeSupportedLimitsInternal`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:940-945`. | It uses maintenance4 `maxBufferSize` when available. Otherwise, it uses maintenance3 `maxMemoryAllocationSize`. |
+
+The fragment budget combines storage buffers, storage textures, and color attachments.
+Dawn first reserves their baseline limits, then allocates extra attachments, textures, and buffers in that order
+(`src/dawn/native/vulkan/PhysicalDeviceVk.cpp:835-863`).
+This evidence does not establish equality with Dusk's limit-budget formulas.
+
+Dusk's corrected native baseline does not establish full Core parity.
+Dusk still does not advertise the optional compression `Feature` bits.
+Do not infer those public features from native compression eligibility.
+
+#### 4.16.3 Device initialization, universal queue, and destruction
+
+| Concern | Function and pinned evidence | Upstream behavior |
+| --- | --- | --- |
+| Physical-device dispatch | `PhysicalDevice::CreateDeviceImpl`, `src/dawn/native/vulkan/PhysicalDeviceVk.cpp:1426-1432`. | It calls Vulkan `Device::Create`. |
+| Device construction | `Device::Create`, `src/dawn/native/vulkan/DeviceVk.cpp:90-98`. | It constructs a device, calls `Initialize`, and returns the initialized device. |
+| Native initialization order | `Device::Initialize`, `src/dawn/native/vulkan/DeviceVk.cpp:107-138`. | It copies physical-device information and instance functions. It creates the device, loads device functions, then constructs the fenced deleter. |
+| Queue and base initialization | `Device::Initialize`, `src/dawn/native/vulkan/DeviceVk.cpp:151-153,205-206`. `DeviceBase::Initialize`, `src/dawn/native/Device.cpp:401-403,417-428`. | Vulkan creates the default queue and passes it to base initialization. The base stores the queue, marks the device alive, and creates empty layouts. |
+| Device feature enablement | `Device::CreateDevice`, `src/dawn/native/vulkan/DeviceVk.cpp:443-478`. | It builds extension names and a features2 chain. Core enables four Core-only flags. Both profiles enable full draw indices, fragment stores, and four dynamic-indexing flags. Robustness controls `robustBufferAccess`. |
+| Universal queue selection | `Device::CreateDevice`, `src/dawn/native/vulkan/DeviceVk.cpp:737-770`. | It selects the first queue family with graphics and compute flags. It requests one queue from that family. |
+| Native device creation | `Device::CreateDevice`, `src/dawn/native/vulkan/DeviceVk.cpp:772-789`. | It attaches features2 and queue requests to `VkDeviceCreateInfo`, then calls `vkCreateDevice`. |
+| Queue and limits accessors | `DeviceBase::GetQueue`, `src/dawn/native/Device.cpp:1994-1997`. `GetLimits`, `src/dawn/native/Device.cpp:2506-2508`. | These return the stored queue and combined limits. |
+| Explicit destruction entry | `DeviceBase::APIDestroy`, `src/dawn/native/Device.cpp:615-617`. | It calls `Destroy` with `EarlyDestroy`. |
+| Native destruction | `Device::DestroyImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:1072-1097,1140-1148`. | It handles partial initialization. On the regular path, it releases the deleter before it destroys the native device. |
+
+#### 4.16.4 Native resource factory functions
+
+The frontend column identifies the entry. The device-hook column identifies the Vulkan device hook.
+These columns do not assert direct calls between every entry and hook.
+The final column identifies native creation inside the resource implementation.
+It does not claim that every descriptor creates a new Vulkan handle.
+
+| Resource | Frontend entry | Vulkan device hook | Vulkan resource factory and native call |
+| --- | --- | --- | --- |
+| Buffer | `DeviceBase::CreateBuffer`, `src/dawn/native/Device.cpp:2033-2051` | `Device::CreateBufferImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:220-223` | `Buffer::Create`, `src/dawn/native/vulkan/BufferVk.cpp:224-234`. `Initialize` at `src/dawn/native/vulkan/BufferVk.cpp:236`. `vkCreateBuffer` at `src/dawn/native/vulkan/BufferVk.cpp:294-297`. |
+| Shader module | `DeviceBase::CreateShaderModule`, `src/dawn/native/Device.cpp:2303-2324` | `Device::CreateShaderModuleImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:251-255` | `ShaderModule::Create`, `src/dawn/native/vulkan/ShaderModuleVk.cpp:93-99`. `GetHandleAndSpirv` at `src/dawn/native/vulkan/ShaderModuleVk.cpp:130-135`. `vkCreateShaderModule` at `src/dawn/native/vulkan/ShaderModuleVk.cpp:496-511`. |
+| Bind-group layout | `DeviceBase::CreateBindGroupLayout`, `src/dawn/native/Device.cpp:2016-2030` | `Device::CreateBindGroupLayoutImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:216-219` | `BindGroupLayout::Create`, `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:215-221`. `Initialize` at `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:230-256`. `GetOrCreateSpecialization` at `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:259-288` calls `vkCreateDescriptorSetLayout`. |
+| Pipeline layout | `DeviceBase::CreatePipelineLayout`, `src/dawn/native/Device.cpp:2138-2158` | `Device::CreatePipelineLayoutImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:233-236` | `PipelineLayout::Create`, `src/dawn/native/vulkan/PipelineLayoutVk.cpp:45-51`. `CreateVkPipelineLayout` at `src/dawn/native/vulkan/PipelineLayoutVk.cpp:53-54` calls `vkCreatePipelineLayout` at `src/dawn/native/vulkan/PipelineLayoutVk.cpp:107-113`. |
+| Bind group | `DeviceBase::CreateBindGroup`, `src/dawn/native/Device.cpp:2001-2013` | `Device::CreateBindGroupImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:212-215` | `BindGroup::Create`, `src/dawn/native/vulkan/BindGroupVk.cpp:51-59`, obtains a bind group from its layout allocator. `InitializeImpl` calls `WriteDescriptorSet` at `src/dawn/native/vulkan/BindGroupVk.cpp:69-74`. |
+| Compute pipeline | `DeviceBase::CreateComputePipeline`, `src/dawn/native/Device.cpp:2054-2060,2070-2074` | `Device::CreateUninitializedComputePipelineImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:229-232` | `ComputePipeline::CreateUninitialized`, `src/dawn/native/vulkan/ComputePipelineVk.cpp:48-52`. `InitializeImpl` at `src/dawn/native/vulkan/ComputePipelineVk.cpp:54-76` calls `InitializeSpecialization`, defined at `src/dawn/native/vulkan/ComputePipelineVk.cpp:113-115`. Its `vkCreateComputePipelines` call is at `src/dawn/native/vulkan/ComputePipelineVk.cpp:206-213`. |
+| Render pipeline | `DeviceBase::CreateRenderPipeline`, `src/dawn/native/Device.cpp:2205-2213,2223-2227` | `Device::CreateUninitializedRenderPipelineImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:240-243` | `RenderPipeline::CreateUninitialized`, `src/dawn/native/vulkan/RenderPipelineVk.cpp:392-396`. `InitializeImpl` at `src/dawn/native/vulkan/RenderPipelineVk.cpp:398-425` calls `InitializeSpecialization`, defined at `src/dawn/native/vulkan/RenderPipelineVk.cpp:470-472`. Its `vkCreateGraphicsPipelines` call is at `src/dawn/native/vulkan/RenderPipelineVk.cpp:933-940`. |
+| Texture | `DeviceBase::CreateTexture`, `src/dawn/native/Device.cpp:2377-2398` | `Device::CreateTextureImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:261-264` | `InternalTexture::Create`, `src/dawn/native/vulkan/TextureVk.cpp:1441-1448`. `Initialize` at `src/dawn/native/vulkan/TextureVk.cpp:1450`. `vkCreateImage` at `src/dawn/native/vulkan/TextureVk.cpp:1530-1532`. |
+| Texture view | `DeviceBase::CreateTextureView`, `src/dawn/native/Device.cpp:2401-2417` | `Device::CreateTextureViewImpl`, `src/dawn/native/vulkan/DeviceVk.cpp:265-269` | `TextureView::Create`, `src/dawn/native/vulkan/TextureVk.cpp:2086-2093`. `Initialize` at `src/dawn/native/vulkan/TextureVk.cpp:2095-2114`. `vkCreateImageView` at `src/dawn/native/vulkan/TextureVk.cpp:2158-2160`. |
+
+**Shader boundary deviation.** Dawn generates SPIR-V through Tint in `GetHandleAndSpirv`
+(`src/dawn/native/vulkan/ShaderModuleVk.cpp:424-432,477-478`).
+It supplies those generated words to Vulkan
+(`src/dawn/native/vulkan/ShaderModuleVk.cpp:496-511`).
+Without the Tint writer, this function returns an unrecoverable error
+(`src/dawn/native/vulkan/ShaderModuleVk.cpp:529-531`).
+Dusk instead validates and reflects caller SPIR-V, then supplies those caller words to Vulkan.
+The matching Vulkan call does not make Dusk's shader frontend a port of Tint.
 
 ---
 

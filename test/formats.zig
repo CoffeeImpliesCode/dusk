@@ -1,38 +1,13 @@
-//! The M7 shard for the format tables: the API descriptor and the engine's
-//! capability table have to name the same four formats, and the engine table
-//! has an arm for every format the descriptor declares.
-//!
-//! **Which two tables, and why these four.** `src/api/enums.zig` is generated
-//! from `src/dawn/dawn.json` and owns the WebGPU format names and their tags.
-//! `src/engine/vulkan_format.zig` owns the engine's Vulkan name for each one,
-//! ported from `VulkanImageFormat` (`vulkan/TextureVk.cpp:448-573`). The four
-//! named rows are the ones whose two tables carry different information: two
-//! are channel-order dependent (`RGBA8Unorm` against `BGRA8Unorm`), one is a
-//! depth format that must not borrow a stencil (`Depth24Plus`), and one is
-//! renderable only behind a feature (`RG11B10Ufloat`).
-//!
-//! **Why the Vulkan values are spelled as numbers.** `src/vulkan.zig` is
-//! generated from the pinned `vulkan_core.h` and the test cannot
-//! `@import("vulkan")`: the module is a private dependency of the library, not
-//! a published one. The numbers are the Vulkan ABI, they are stable, and each
-//! row carries the upstream line that fixes its name.
-//!
-//! **Why the renderable gate is asserted on the feature, not on the Vulkan
-//! name.** `Format.cpp:250-253` gives `RG11B10Ufloat` `Cap::None`, and `:394-397`
-//! adds `Renderable`, `Multisample`, `Resolve` and `Blendable` only when
-//! `Feature::RG11B10UfloatRenderable` is on. That is a WebGPU-level
-//! capability, so it has no Vulkan name: `TextureVk.cpp:481` is unconditional.
-//! The claim this file makes is therefore the one that can fail — the feature
-//! exists, and the engine table carries exactly one arm for the packed format.
-//!
-//! **What this file does not claim.** It does not claim a device, a sample
-//! count or a render pass. It claims the two name tables agree.
+//! Format metadata, typed block geometry, and native Vulkan mappings.
+//! This shard does not create a device or claim Vulkan format support.
 
 const std = @import("std");
 const dusk = @import("dusk");
 
 const api = dusk.api;
 const vk_format = dusk.engine.vulkan_format;
+const format_info = dusk.engine.format;
+const block_info = dusk.engine.block_info;
 
 const TextureFormat = api.enums.TextureFormat;
 
@@ -114,11 +89,10 @@ test "bgra8unorm and rgba8unorm are two names, not one format" {
 }
 
 test "depth24plus is the plain depth format and carries no stencil" {
-    // `TextureVk.cpp:585-586` gives Depth24Plus the 32-bit float format, while
-    // `:574-583` gives Depth24PlusStencil8 a toggle-selected one. Pairing a
-    // depth24plus attachment with a stencil format would make
-    // `vkImageLayoutForDepthStencilAttachment` choose a two-aspect layout for
-    // an image that has one aspect.
+    // `TextureVk.cpp:585-586` gives Depth24Plus the 32-bit float format.
+    // `:574-583` gives Depth24PlusStencil8 a toggle-selected depth-stencil format.
+    // These formats have different aspects. Combined depth-stencil layouts remain
+    // legal for single-aspect images without separateDepthStencilLayouts.
     const depth24_plus = vkValue(.depth24_plus);
     try std.testing.expectEqual(@as(u32, 126), depth24_plus);
     try std.testing.expect(depth24_plus != vkValue(.depth24_plus_stencil8));
@@ -201,4 +175,44 @@ test "exactly one API pair shares a Vulkan name" {
         }
     }
     try std.testing.expectEqual(declared - 1, distinct);
+}
+
+test "canonical format rows supply public texture block metadata" {
+    var table: format_info.FormatTable = undefined;
+    format_info.buildFormatTable(.{}, &table);
+    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
+        if (field.value != 0) {
+            const name: TextureFormat = @enumFromInt(field.value);
+            const row = &table[format_info.computeFormatIndex(name).?];
+            try std.testing.expectEqual(name, try format_info.toApiFormat(row.format));
+            try std.testing.expectEqual(row.index, format_info.computeFormatIndex(name).?);
+            if (row.isColor()) {
+                const aspect = try row.getAspectInfo(.all);
+                const typed = block_info.TypedTexelBlockInfo.fromTexelBlockInfo(aspect.block);
+                const one_block: block_info.BlockCount = .{ .value = 1 };
+                try std.testing.expectEqual(
+                    @as(u64, aspect.block.byte_size),
+                    try typed.toBytes(one_block),
+                );
+                const texel_width = try typed.toTexelWidth(one_block);
+                try std.testing.expectEqual(@as(u64, aspect.block.width), texel_width.value);
+            }
+        }
+    }
+}
+
+test "renderable format gate changes real capabilities rather than Vulkan names" {
+    var table: format_info.FormatTable = undefined;
+    format_info.buildFormatTable(.{}, &table);
+    const index = format_info.computeFormatIndex(.rg11_b10_ufloat).?;
+    try std.testing.expect(table[index].isSupported());
+    try std.testing.expect(!table[index].caps.renderable);
+    var enabled: dusk.engine.features.FeaturesSet = .{};
+    enabled.enable(.rg11b10_ufloat_renderable);
+    format_info.buildFormatTable(enabled, &table);
+    try std.testing.expect(table[index].caps.renderable);
+    try std.testing.expect(table[index].caps.multisample);
+    try std.testing.expect(table[index].caps.resolve);
+    try std.testing.expect(table[index].caps.blendable);
+    try std.testing.expectEqual(@as(u32, 122), vkValue(.rg11_b10_ufloat));
 }

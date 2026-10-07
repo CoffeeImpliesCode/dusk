@@ -62,6 +62,7 @@ pub const ErrorModuleDescriptor = struct {
     /// The text the one message carries. Dawn takes a whole message list here
     /// (`ShaderModule.cpp:1883-1885`) because Tint produces one per diagnostic; the
     /// port's create pass names the rule that failed, which is one message.
+    /// Copied at creation; the caller may mutate or release it afterward.
     message: []const u8,
 };
 
@@ -105,6 +106,8 @@ pub const ShaderModule = struct {
     words: []const spirv.Word,
 
     entry_points: []EntryPoint,
+    /// Owned metadata; names borrow `words`, as entry-point names do.
+    specialization_constants: []spirv.SpecializationConstant = &.{},
     messages: Messages,
     hash: ContentHash,
 
@@ -180,6 +183,8 @@ pub const ShaderModule = struct {
         }
         freeEntryPoints(self.allocator, self.entry_points);
         self.entry_points = &.{};
+        self.allocator.free(self.specialization_constants);
+        self.specialization_constants = &.{};
         self.messages.deinit();
     }
 };
@@ -188,6 +193,8 @@ pub const ShaderModule = struct {
 /// The module comes out of the `await`, and an `Io` that cannot go concurrent
 /// answers `error.ConcurrencyUnavailable` instead of quietly validating on the
 /// calling thread.
+/// SPIR-V above the device's core Vulkan limit fails before reflection or
+/// native creation; no SPIR-V extension support is assumed.
 pub fn createShaderModule(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -217,7 +224,7 @@ pub fn createErrorShaderModule(
         .label = descriptor.label orelse "",
         .words = &.{},
         .entry_points = &.{},
-        .messages = try shader_compilation_messages.one(allocator, message),
+        .messages = try shader_compilation_messages.snapshot(allocator, &.{message}),
         // Dawn's error constructor never fills `mHash`
         // (`ShaderModule.cpp:1867`), so the port's is the zero digest and not
         // the hash of an empty word stream, which could collide with nothing
@@ -235,8 +242,22 @@ pub fn createErrorShaderModule(
 /// constructor at `:236` built. The port's answer is a slice, and the generated
 /// `api.CompilationInfoChain` (`src/api/descriptors.zig:492`) is the device
 /// method layer's projection of it, because `pipeline` imports no API surface.
+///
+/// Borrows the module's item array and text until `destroy`. Do not call
+/// `deinit` on this view. Use `snapshotCompilationInfo` to retain diagnostics.
 pub fn getCompilationInfo(module: *const ShaderModule) Messages {
     return module.messages;
+}
+
+/// Owns a copy of the module's diagnostics, independent of module lifetime.
+/// The module must stay alive and unchanged through the call. Release the
+/// result once with `deinit`. Allocation or size overflow returns
+/// `error.OutOfMemory` with no partial owner and leaves the module unchanged.
+pub fn snapshotCompilationInfo(
+    allocator: std.mem.Allocator,
+    module: *const ShaderModule,
+) std.mem.Allocator.Error!Messages {
+    return Messages.clone(allocator, module.messages);
 }
 
 /// The log text, or an empty string when there is nothing to report.
@@ -293,9 +314,10 @@ fn validateAndCreate(
 ) CreateError!ShaderModule {
     // Dawn validates first and parses only when the words are sound
     // (`ShaderModule.cpp:1522-1534`), and reflects last (`:1554-1556`).
+    try device.validateSpirvVersion(descriptor.words);
     try spirv.validate(descriptor.words);
 
-    const reflected = try spirv.reflect(allocator, descriptor.words);
+    var reflected = try spirv.reflect(allocator, descriptor.words);
     // The names reflection returned borrow the caller's words, so they outlive
     // this scope; the resource slices are its own and go back here.
     defer reflected.deinit();
@@ -306,12 +328,15 @@ fn validateAndCreate(
     // Last, because a Vulkan handle is not something an `errdefer` can unwind
     // and one must not leak when a later step fails.
     const vk_module = try shader_module_vk.create(device, descriptor.words);
+    const specialization_constants = reflected.specialization_constants;
+    reflected.specialization_constants = &.{};
 
     return .{
         .allocator = allocator,
         .label = descriptor.label orelse "",
         .words = descriptor.words,
         .entry_points = entry_points,
+        .specialization_constants = specialization_constants,
         .messages = shader_compilation_messages.empty(allocator),
         .hash = contentHash(descriptor.words),
         .vk_module = vk_module,

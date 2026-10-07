@@ -10,22 +10,16 @@
 //! false to take the `DynamicUploader` path (`Buffer.cpp:1183`) and asserts the
 //! same result."
 //!
-//! `writeBuffer` cannot be the writer for the mapped-at-creation buffer, and the
-//! reason is two rules of this port rather than an accident:
+//! `writeBuffer` requires public `copy_dst` usage. Creation mapping does not
+//! require `map_write`: its writable `getMappedRange` is a one-time privilege,
+//! separate from the usage required for later write maps. The original direct
+//! mapping test keeps `map_write | copy_src`, so it rejects `writeBuffer` and
+//! writes through `getMappedRange`. The additional creation-mapping regression
+//! uses GPU-policy storage/uniform memory and a real staging upload, without
+//! granting public `copy_dst` or later write-map permission.
 //!
-//!   - `validateBufferUsageCombinations` (`src/engine/buffer.zig:359`) lets
-//!     `map_write` sit beside `copy_src` and nothing else.
-//!   - `validateWriteBuffer` (`src/engine/buffer.zig:1510`) refuses a buffer
-//!     with no `copy_dst`, and `validateBufferDescriptor` (`:367`) requires
-//!     `map_write` on a buffer mapped at creation.
-//!
-//! The two usages are therefore mutually exclusive on one buffer, so the
-//! mapped-at-creation range is written through `getMappedRange`, which is what
-//! sub-path A of `MapAtCreation` (`Buffer.cpp:714`-`:717`) exists for. The first
-//! test asserts the refusal above so the writer is named rather than guessed,
-//! and the second half of the acceptance — `writeBuffer` with
-//! `mapped_at_creation` false, through the upload ring — is exactly the second
-//! test.
+//! The second upload path writes with `mapped_at_creation` false through the
+//! upload ring.
 //!
 //! **Both paths are asserted byte for byte.** The first test writes the pattern
 //! into the mapped-at-creation range; the second writes the same 1,048,576-byte
@@ -50,8 +44,10 @@
 const std = @import("std");
 const dusk = @import("dusk");
 
+const core = dusk.core;
 const engine = dusk.engine;
 const platform = dusk.platform;
+const vulkan = platform.vulkan_bindings;
 
 const buffer_mod = engine.buffer;
 const queue_mod = engine.queue;
@@ -114,6 +110,9 @@ const Harness = struct {
     threaded: std.Io.Threaded = undefined,
     handles: vulkan_device.HandleSet = .{},
     device_mutex: platform.DeviceMutex = .{},
+    // SAFETY: `init` binds this canonical list to the existing stable queue mutex.
+    // Raw buffers remain owned by each test through submission and fence completion.
+    objects: core.ObjectList = undefined,
     // SAFETY: `init` assigns `backend` before passing `&self.handles` to it,
     // and `deinit` reads it only after `init` returned.
     backend: vulkan_device.Backend = undefined,
@@ -142,18 +141,12 @@ const Harness = struct {
         queue_mod.Queue.InitError ||
         vulkan_device.ProcError;
 
-    /// Every way standing the harness back down can fail. Four of the six
-    /// teardowns reach a dispatch proc, and `AGENTS.md` §3.1 makes a null one
-    /// a typed error rather than a panic, so `deinit` reports instead of
-    /// returning `void` and a caller has to read the result. The union is the
-    /// two proc error sets, plus the buffer module's own: the upload ring
-    /// destroys its staging buffer on the way down and that reports
-    /// `buffer_mod.Error`, which carries `Rule` and `core.ValidationError` on
-    /// top of what `vulkan_device.ProcError` already has. `queue.ProcError`
-    /// adds only `DeviceProcTierMissing` to the rest.
+    /// Every teardown error, including the queue's guarded lifetime and cancellation
+    /// errors. The object-list preflight refuses any remaining header owner.
     const TeardownError = buffer_mod.Error ||
         vulkan_device.ProcError ||
-        queue_mod.ProcError;
+        queue_mod.Queue.CleanupError ||
+        error{ResourceInUse};
 
     /// The failures a `std.testing` assertion reports, one per assertion the
     /// shard makes: `expect` reports `TestUnexpectedResult` and `expectEqual`
@@ -175,6 +168,8 @@ const Harness = struct {
     fn init(self: *Harness, teardowns: *TeardownErrors) SetupError!void {
         self.threaded = .init(std.testing.allocator, .{});
         errdefer self.threaded.deinit();
+        const io = self.threaded.io();
+        self.objects = .{ .mutex = &self.device_mutex.mutex };
 
         // One `VkInstance` per ICD in fallback-first order, then the first
         // physical device that reported Vulkan 1.1 or later
@@ -213,7 +208,7 @@ const Harness = struct {
             .device_mutex = &self.device_mutex,
         });
         // Same reason as the backend teardown above.
-        errdefer self.queue.deinit() catch |err| teardowns.record(err);
+        errdefer self.queue.deinit(io, &self.objects) catch |err| teardowns.record(err);
 
         const limits = self.device.physicalProperties().limits;
         self.buffers = .{
@@ -242,9 +237,15 @@ const Harness = struct {
     /// returned rather than caught here, so the error is never dropped on the
     /// floor; the caller reads it, and a Zig 0.16 `defer` cannot `try`, so each
     /// of the three call sites below catches and re-fails with the error named.
-    fn deinit(self: *Harness) TeardownError!void {
+    fn deinit(self: *Harness, io: std.Io) TeardownError!void {
         try self.ring.deinit();
-        try self.queue.deinit();
+        // Queue teardown acquires its own guard only for header lifetime phases.
+        try self.queue.deinit(io, &self.objects);
+        {
+            var guard = core.ObjectGuard.lockUncancelable(io, &self.objects);
+            defer guard.unlock(io);
+            try self.objects.preflightDeinitLocked(&guard);
+        }
         try self.device.deinit(std.testing.allocator);
         self.adapters.deinit();
         try self.backend.deinit();
@@ -282,7 +283,8 @@ const Harness = struct {
         io: std.Io,
         recording: buffer_mod.Recording,
     ) RunError!platform.Serial {
-        const result = try self.queue.submit(.{
+        // The queue owns its short guard phases; native submit and waits run unlocked.
+        const result = try self.queue.submit(io, &self.objects, .{
             .command_buffers = &.{recording.command_buffer},
         });
         try std.testing.expectEqual(recording.pending_serial, result.serial);
@@ -290,12 +292,13 @@ const Harness = struct {
         // member function and `self.queue.wait(...)` would bind `io` to the
         // queue. The qualified call is what puts `io` in the parameter the
         // signature names (`src/engine/queue.zig:367`).
-        const completed = try queue_mod.Queue.wait(io, &self.queue, .{
+        const completed = try queue_mod.Queue.wait(io, &self.queue, &self.objects, .{
             .serial = result.serial,
             .timeout_ns = queue_mod.fence_wait_timeout_ns,
         });
         try std.testing.expect(completed >= result.serial);
-        return result.serial;
+        try buffer_mod.UploadRing.reclaim(std.testing.allocator, &self.ring, completed);
+        return completed;
     }
 };
 
@@ -375,10 +378,8 @@ fn createReadback(harness: *Harness) buffer_mod.CreateError!*buffer_mod.Buffer {
 /// Copies `source` into `readback`, retires the copy, and maps the readback for
 /// reading. The map is the last step, so the bytes are already retired by then.
 ///
-/// The map is requested against the completed serial on purpose: `mapAsync`
-/// refuses a buffer whose last recorded use is newer than the serial the caller
-/// claims to have waited for (`src/engine/buffer.zig:1438`), so a map that
-/// ignored the wait could read a buffer the GPU is still writing.
+/// The map completes against the serial returned by the real queue wait.
+/// A newer recorded use must not expose bytes before its submission retires.
 fn readbackThrough(
     harness: *Harness,
     io: std.Io,
@@ -396,11 +397,15 @@ fn readbackThrough(
     try std.testing.expectEqual(recording.pending_serial, source.getLastUsageSerial());
     try std.testing.expectEqual(recording.pending_serial, readback.getLastUsageSerial());
 
-    const serial = try harness.submitAndWait(io, recording);
-    try readback.mapAsync(.{
-        .mode = .{ .read = true },
-        .completed_serial = serial,
-    });
+    const completed_serial = try harness.submitAndWait(io, recording);
+    var guard = core.ObjectGuard.lockUncancelable(io, &harness.objects);
+    defer guard.unlock(io);
+    const generation = try readback.beginMap(.{ .mode = .{ .read = true } });
+    try std.testing.expectEqual(buffer_mod.State.pending_map, readback.getState());
+    try std.testing.expectEqual(
+        buffer_mod.Buffer.MapCompletion.mapped,
+        try readback.completeMap(generation, completed_serial),
+    );
     try std.testing.expectEqual(buffer_mod.State.mapped, readback.getState());
     try std.testing.expectEqual(pattern_size, readback.getMapSize());
 }
@@ -425,11 +430,11 @@ test "buffer: a 1 MiB mapped-at-creation buffer round trips every byte" {
 /// looks for one.
 fn mappedAtCreationRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     try harness.init(teardowns);
+    const io = harness.threaded.io();
     // `deinit` reaches three dispatch procs, so it reports rather than
     // returning `void`, and the recorder the caller holds is where a refusal
     // goes.
-    defer harness.deinit() catch |err| teardowns.record(err);
-    const io = harness.threaded.io();
+    defer harness.deinit(io) catch |err| teardowns.record(err);
 
     const pattern = try makePattern();
     defer std.testing.allocator.free(pattern);
@@ -462,11 +467,9 @@ fn mappedAtCreationRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !voi
         firstNonZero(subject.mappedSpan()[0..pattern_byte_count]),
     );
 
-    // `writeBuffer` is refused here, and the refusal is the rule, not an
-    // accident: `map_write` may sit beside `copy_src` and nothing else
-    // (`src/engine/buffer.zig:359`), `validateWriteBuffer` needs `copy_dst`
-    // (`:1510`), and a buffer mapped at creation must carry `map_write`
-    // (`:367`). Asserted so the acceptance's writer is named, not guessed.
+    // This buffer lacks `copy_dst`, because `map_write` may sit beside
+    // `copy_src` and nothing else. Creation mapping itself does not require
+    // `map_write` and does not grant permission for `writeBuffer`.
     try std.testing.expectError(
         buffer_mod.Rule.BufferUsageMissingCopyDst,
         subject.writeBuffer(&harness.ring, harness.nextRecording(), .{ .data = pattern }),
@@ -477,7 +480,9 @@ fn mappedAtCreationRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !voi
     @memcpy(try subject.getMappedRange(0, pattern_size), pattern);
 
     const recording = harness.nextRecording();
-    try subject.unmap(recording);
+    const unmap_result = try subject.unmap(recording);
+    // This direct mapping owns no upload to transfer to the submission queue.
+    try std.testing.expect(unmap_result.staging_upload == null);
     try std.testing.expectEqual(buffer_mod.State.unmapped, subject.getState());
 
     var readback = try createReadback(harness);
@@ -492,8 +497,297 @@ fn mappedAtCreationRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !voi
     try std.testing.expectEqual(pattern_byte_count, read.len);
     try std.testing.expectEqual(pattern_byte_count, firstMismatch(read, pattern));
 
-    try readback.unmap(harness.nextRecording());
+    try std.testing.expect(readback.staging == null);
+    const readback_unmap_result = try readback.unmap(harness.nextRecording());
+    try std.testing.expect(readback_unmap_result.staging_upload == null);
     try std.testing.expectEqual(buffer_mod.State.unmapped, readback.getState());
+}
+
+test "buffer: creation mapping without map write vs later denied write" {
+    var harness: Harness = .{};
+    var teardowns: TeardownErrors = .{};
+    try creationMappingWithoutMapWrite(&harness, &teardowns);
+    try teardowns.report();
+}
+
+/// Creation mapping initializes GPU-policy memory without granting later map
+/// or copy-destination usage. Real queue submission checks every padding byte.
+fn creationMappingWithoutMapWrite(harness: *Harness, teardowns: *TeardownErrors) !void {
+    try harness.init(teardowns);
+    const io = harness.threaded.io();
+    defer harness.deinit(io) catch |err| teardowns.record(err);
+
+    {
+        // Empty creation mappings need no native mapping or staging upload.
+        const empty = try buffer_mod.Buffer.create(std.testing.allocator, harness.buffers, .{
+            .label = "M10_empty_creation_mapping_without_map_write",
+            .usage = .{ .storage = true },
+            .size = 0,
+            .mapped_at_creation = true,
+        });
+        defer destroyBuffer(empty, teardowns);
+        const writable = try empty.getMappedRange(0, buffer_mod.whole_map_size);
+        try std.testing.expectEqual(@as(usize, 0), writable.len);
+        const empty_unmap = try empty.unmap(harness.nextRecording());
+        try std.testing.expect(empty_unmap.staging_upload == null);
+        var guard = core.ObjectGuard.lockUncancelable(io, &harness.objects);
+        defer guard.unlock(io);
+        try std.testing.expectError(
+            buffer_mod.Rule.BufferMapModeMismatch,
+            empty.beginMap(.{ .mode = .{ .write = true } }),
+        );
+    }
+
+    const pattern = try makePattern();
+    defer std.testing.allocator.free(pattern);
+    const declared_size = pattern_size + 4;
+    const allocated_size = std.mem.alignForward(
+        u64,
+        declared_size,
+        buffer_mod.uniform_allocated_alignment,
+    );
+    const declared_byte_count: usize = @intCast(declared_size);
+    const allocated_byte_count: usize = @intCast(allocated_size);
+    const usage: buffer_mod.BufferUsage = .{
+        .storage = true,
+        .uniform = true,
+        .copy_src = true,
+    };
+    const subject = try buffer_mod.Buffer.create(std.testing.allocator, harness.buffers, .{
+        .label = "M10_creation_mapping_without_map_write",
+        .usage = usage,
+        .size = declared_size,
+        .mapped_at_creation = true,
+    });
+    defer destroyBuffer(subject, teardowns);
+
+    try std.testing.expectEqual(buffer_mod.State.mapped_at_creation, subject.getState());
+    try std.testing.expectEqual(usage, subject.getUsage());
+    try std.testing.expectEqual(declared_size, subject.getSize());
+    try std.testing.expectEqual(allocated_size, subject.getAllocatedSize());
+    try std.testing.expectEqual(declared_size, subject.getMapSize());
+    try std.testing.expect(subject.getMapMode().write);
+
+    // Keep the destination's existing GPU-policy allocation. Host-visible
+    // creation writes use the real staging buffer, not a changed usage mask.
+    try std.testing.expect(!subject.isCpuWritableAtCreation());
+    const staging = subject.staging orelse return error.CreationStagingBufferMissing;
+    try std.testing.expect(staging.getUsage().map_write);
+    try std.testing.expect(staging.getUsage().copy_src);
+    try std.testing.expect(staging.isCpuWritableAtCreation());
+    try std.testing.expect(staging.getHandle() != subject.getHandle());
+    try std.testing.expect(staging.allocation.memory != subject.allocation.memory);
+
+    const visible = try subject.getMappedRange(0, declared_size);
+    try std.testing.expectEqual(declared_byte_count, visible.len);
+    try std.testing.expectEqual(visible.len, firstNonZero(visible));
+    @memcpy(visible[0..pattern_byte_count], pattern);
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        firstNonZero(visible[pattern_byte_count..]),
+    );
+    const staged_bytes = try staging.getMappedRange(0, allocated_size);
+    try std.testing.expectEqual(
+        allocated_byte_count - declared_byte_count,
+        firstNonZero(staged_bytes[declared_byte_count..]),
+    );
+
+    const recording = harness.nextRecording();
+    try std.testing.expectError(
+        buffer_mod.Rule.BufferUsageMissingCopyDst,
+        subject.recordCopyBuffer(recording, staging, 0, 0, 4),
+    );
+    try harness.queue.reserveStagingUpload(std.testing.allocator, subject);
+    {
+        const original_procs = subject.device.dispatch.device orelse
+            return error.MissingDeviceProc;
+        var missing_copy_procs = original_procs.*;
+        missing_copy_procs.cmd_copy_buffer = null;
+        subject.device.dispatch.device = &missing_copy_procs;
+        defer subject.device.dispatch.device = original_procs;
+
+        try std.testing.expectError(error.MissingDeviceProc, subject.unmap(recording));
+        try std.testing.expectEqual(buffer_mod.State.mapped_at_creation, subject.getState());
+        try std.testing.expect(subject.is_mapped_at_creation);
+        try std.testing.expect(subject.getMapMode().write);
+        try std.testing.expectEqual(declared_size, subject.getMapSize());
+        try std.testing.expect(subject.staging == staging);
+        try std.testing.expect(staging.getHandle() != null);
+        try std.testing.expect(staging.allocation.memory != null);
+        const writable = try subject.getMappedRange(0, declared_size);
+        try std.testing.expectEqual(
+            pattern_byte_count,
+            firstMismatch(writable[0..pattern_byte_count], pattern),
+        );
+        // A failed recording must leave the actual owned upload writable.
+        writable[0] = pattern[0] ^ 0xff;
+        try std.testing.expectEqual(pattern[0] ^ 0xff, writable[0]);
+        writable[0] = pattern[0];
+    }
+    const unmap_result = try subject.unmap(recording);
+    // Adoption is immediate and infallible after the reserved unmap succeeds.
+    if (unmap_result.staging_upload) |upload| {
+        harness.queue.adoptStagingUploadAssumeCapacity(upload);
+    } else {
+        return error.CreationStagingUploadMissing;
+    }
+    try std.testing.expect(unmap_result.staging_upload.? == staging);
+    try std.testing.expect(subject.staging == null);
+    try std.testing.expectEqual(buffer_mod.State.unmapped, subject.getState());
+    try std.testing.expect(!subject.is_mapped_at_creation);
+    try std.testing.expectEqual(usage, subject.getUsage());
+    {
+        var guard = core.ObjectGuard.lockUncancelable(io, &harness.objects);
+        defer guard.unlock(io);
+        try std.testing.expectError(
+            buffer_mod.Rule.BufferMapModeMismatch,
+            subject.beginMap(.{ .mode = .{ .write = true } }),
+        );
+        try std.testing.expectEqual(buffer_mod.State.unmapped, subject.getState());
+    }
+
+    const readback = try buffer_mod.Buffer.create(std.testing.allocator, harness.buffers, .{
+        .label = "M10_creation_mapping_allocation_readback",
+        .usage = .{ .map_read = true, .copy_dst = true },
+        .size = allocated_size,
+        .mapped_at_creation = false,
+    });
+    defer destroyBuffer(readback, teardowns);
+    // This low-level copy intentionally reaches beyond the subject's public
+    // size. The readback's public range exposes all VkBuffer allocation padding.
+    try readback.recordCopyBuffer(recording, subject, 0, 0, allocated_size);
+    const completed_serial = try harness.submitAndWait(io, recording);
+    {
+        var guard = core.ObjectGuard.lockUncancelable(io, &harness.objects);
+        defer guard.unlock(io);
+        const generation = try readback.beginMap(.{ .mode = .{ .read = true } });
+        try std.testing.expectEqual(
+            buffer_mod.Buffer.MapCompletion.mapped,
+            try readback.completeMap(generation, completed_serial),
+        );
+        const read = try readback.getConstMappedRange(0, allocated_size);
+        try std.testing.expectEqual(allocated_byte_count, read.len);
+        try std.testing.expectEqual(
+            pattern_byte_count,
+            firstMismatch(read[0..pattern_byte_count], pattern),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 4),
+            firstNonZero(read[pattern_byte_count..declared_byte_count]),
+        );
+        try std.testing.expectEqual(
+            allocated_byte_count - declared_byte_count,
+            firstNonZero(read[declared_byte_count..]),
+        );
+        const readback_unmap = try readback.unmap(harness.nextRecording());
+        try std.testing.expect(readback_unmap.staging_upload == null);
+    }
+}
+
+test "buffer: creation staging native OOM releases its parent and permits retry" {
+    var harness: Harness = .{};
+    var teardowns: TeardownErrors = .{};
+    try creationStagingAllocationFailure(&harness, &teardowns);
+    try teardowns.report();
+}
+
+/// Only the second native allocation fails. The first allocation and every
+/// native cleanup use the original Vulkan device and dispatch procedures.
+const CreationStagingAllocationFault = struct {
+    original_allocate: vulkan.PFN_vkAllocateMemory,
+    calls: u32 = 0,
+
+    threadlocal var active: ?*CreationStagingAllocationFault = null;
+
+    fn allocate(
+        device: vulkan.VkDevice,
+        info: [*c]const vulkan.VkMemoryAllocateInfo,
+        callbacks: [*c]const vulkan.VkAllocationCallbacks,
+        memory: [*c]vulkan.VkDeviceMemory,
+    ) callconv(.c) vulkan.VkResult {
+        const self = active orelse unreachable;
+        self.calls += 1;
+        if (self.calls == 2) return vulkan.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        return self.original_allocate.?(device, info, callbacks, memory);
+    }
+};
+
+/// Constructor failure must release both native parent handles. A subsequent
+/// real upload and GPU readback prove that the same device remains usable.
+fn creationStagingAllocationFailure(harness: *Harness, teardowns: *TeardownErrors) !void {
+    try harness.init(teardowns);
+    const io = harness.threaded.io();
+    defer harness.deinit(io) catch |err| teardowns.record(err);
+
+    const descriptor: buffer_mod.BufferDescriptor = .{
+        .label = "M10_creation_staging_allocation_failure",
+        .usage = .{ .storage = true, .copy_src = true },
+        .size = 4,
+        .mapped_at_creation = true,
+    };
+    const buffer_count = harness.handles.countOf(.buffer);
+    const memory_count = harness.handles.countOf(.memory);
+    const total_count = harness.handles.totalCount();
+    {
+        const original_procs = harness.buffers.dispatch.device orelse
+            return error.MissingDeviceProc;
+        var fault: CreationStagingAllocationFault = .{
+            .original_allocate = original_procs.allocate_memory orelse
+                return error.MissingDeviceProc,
+        };
+        std.debug.assert(CreationStagingAllocationFault.active == null);
+        CreationStagingAllocationFault.active = &fault;
+        defer CreationStagingAllocationFault.active = null;
+        var local_procs = original_procs.*;
+        local_procs.allocate_memory = CreationStagingAllocationFault.allocate;
+        var local_device = harness.buffers;
+        local_device.dispatch.device = &local_procs;
+        try std.testing.expectError(
+            error.OutOfDeviceMemory,
+            buffer_mod.Buffer.create(std.testing.allocator, local_device, descriptor),
+        );
+        try std.testing.expectEqual(@as(u32, 2), fault.calls);
+        try std.testing.expectEqual(buffer_count, harness.handles.countOf(.buffer));
+        try std.testing.expectEqual(memory_count, harness.handles.countOf(.memory));
+        try std.testing.expectEqual(total_count, harness.handles.totalCount());
+    }
+
+    const subject = try buffer_mod.Buffer.create(
+        std.testing.allocator,
+        harness.buffers,
+        descriptor,
+    );
+    defer destroyBuffer(subject, teardowns);
+    const bytes = [_]u8{ 0x31, 0x72, 0xb4, 0xe9 };
+    @memcpy(try subject.getMappedRange(0, 4), &bytes);
+    const recording = harness.nextRecording();
+    try harness.queue.reserveStagingUpload(std.testing.allocator, subject);
+    const unmap_result = try subject.unmap(recording);
+    if (unmap_result.staging_upload) |upload| {
+        harness.queue.adoptStagingUploadAssumeCapacity(upload);
+    } else {
+        return error.CreationStagingUploadMissing;
+    }
+
+    const readback = try buffer_mod.Buffer.create(std.testing.allocator, harness.buffers, .{
+        .label = "M10_creation_staging_allocation_failure_readback",
+        .usage = .{ .map_read = true, .copy_dst = true },
+        .size = 4,
+        .mapped_at_creation = false,
+    });
+    defer destroyBuffer(readback, teardowns);
+    try readback.recordCopyBuffer(recording, subject, 0, 0, 4);
+    const completed_serial = try harness.submitAndWait(io, recording);
+    var guard = core.ObjectGuard.lockUncancelable(io, &harness.objects);
+    defer guard.unlock(io);
+    const generation = try readback.beginMap(.{ .mode = .{ .read = true } });
+    try std.testing.expectEqual(
+        buffer_mod.Buffer.MapCompletion.mapped,
+        try readback.completeMap(generation, completed_serial),
+    );
+    try std.testing.expectEqualSlices(u8, &bytes, try readback.getConstMappedRange(0, 4));
+    const readback_unmap = try readback.unmap(harness.nextRecording());
+    try std.testing.expect(readback_unmap.staging_upload == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -512,9 +806,9 @@ test "buffer: the same 1 MiB write without mapped_at_creation goes through the r
 /// acceptance flips.
 fn ringUploadRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     try harness.init(teardowns);
-    // Same reason as the path-A teardown above.
-    defer harness.deinit() catch |err| teardowns.record(err);
     const io = harness.threaded.io();
+    // Same reason as the path-A teardown above.
+    defer harness.deinit(io) catch |err| teardowns.record(err);
 
     const pattern = try makePattern();
     defer std.testing.allocator.free(pattern);
@@ -522,13 +816,20 @@ fn ringUploadRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     // The one flag the acceptance flips. `copy_dst | copy_src` carries no map
     // usage, so `memoryKindFor` (`src/engine/buffer.zig:460`) asks for no host
     // access and `allocateMemory` takes no mapping.
-    var subject = try buffer_mod.Buffer.create(std.testing.allocator, harness.buffers, .{
+    // Destination and staging share a VkDevice, not a host allocation owner.
+    var destination_heap: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expect(destination_heap.deinit() == .ok) catch
+        @panic("buffer: destination allocator leaked");
+    const destination_allocator = destination_heap.allocator();
+    var destination_device = harness.buffers;
+    destination_device.allocator = destination_allocator;
+    var subject = try buffer_mod.Buffer.create(destination_allocator, destination_device, .{
         .label = "M10_ring_upload",
         .usage = .{ .copy_dst = true, .copy_src = true },
         .size = pattern_size,
         .mapped_at_creation = false,
     });
-    defer destroyBuffer(subject, teardowns);
+    defer subject.destroy(destination_allocator) catch |err| teardowns.record(err);
 
     try std.testing.expectEqual(buffer_mod.State.unmapped, subject.getState());
     try std.testing.expectEqual(pattern_size, subject.getSize());
@@ -539,6 +840,33 @@ fn ringUploadRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     try std.testing.expectEqual(@as(u64, 0), harness.ring.pendingByteCount());
 
     const recording = harness.nextRecording();
+    {
+        const original_device = harness.ring.device.vk_device;
+        harness.ring.device.vk_device = null;
+        defer harness.ring.device.vk_device = original_device;
+        try std.testing.expectError(error.UploadRingDeviceMismatch, subject.writeBuffer(
+            &harness.ring,
+            recording,
+            .{ .data = pattern },
+        ));
+        try std.testing.expectEqual(@as(u64, 0), harness.ring.pendingByteCount());
+        try std.testing.expect(harness.ring.staging == null);
+    }
+    {
+        const original_procs = subject.device.dispatch.device orelse
+            return error.MissingDeviceProc;
+        var missing_copy_procs = original_procs.*;
+        missing_copy_procs.cmd_copy_buffer = null;
+        subject.device.dispatch.device = &missing_copy_procs;
+        defer subject.device.dispatch.device = original_procs;
+        try std.testing.expectError(error.MissingDeviceProc, subject.writeBuffer(
+            &harness.ring,
+            recording,
+            .{ .data = pattern },
+        ));
+        try std.testing.expectEqual(@as(u64, 0), harness.ring.pendingByteCount());
+        try std.testing.expectEqual(@as(u64, 0), harness.ring.offsets.used_end_offset_byte_count);
+    }
     try subject.writeBuffer(&harness.ring, recording, .{ .data = pattern });
 
     // The write was recorded, not performed. The bytes are in the ring and
@@ -550,26 +878,25 @@ fn ringUploadRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     // (`src/engine/buffer.zig:1144`).
     try std.testing.expect(!subject.needsInitialization());
 
-    // The observables that say the ring carried the bytes: it built its staging
-    // buffer, that buffer is a different buffer from the destination, and the
-    // reservation was released once the copy that reads it was recorded.
-    // The error is the shard's, not the library's: no call above reports it, and
-    // it names the one precondition this assertion cannot read any other way.
+    // Recording must retain staging bytes until the GPU completes the copy.
     const staging = harness.ring.staging orelse
         return error.UploadRingStagingBufferMissing;
     try std.testing.expect(staging.getHandle() != subject.getHandle());
     try std.testing.expect(staging.getUsage().copy_src);
-    try std.testing.expectEqual(@as(u64, 0), harness.ring.pendingByteCount());
+    try std.testing.expectEqual(pattern_size, harness.ring.pendingByteCount());
 
     var readback = try createReadback(harness);
     defer destroyBuffer(readback, teardowns);
     try readbackThrough(harness, io, readback, subject, recording);
+    try std.testing.expectEqual(@as(u64, 0), harness.ring.pendingByteCount());
 
     const read = try readback.getConstMappedRange(0, pattern_size);
     try std.testing.expectEqual(pattern_byte_count, read.len);
     try std.testing.expectEqual(pattern_byte_count, firstMismatch(read, pattern));
 
-    try readback.unmap(harness.nextRecording());
+    try std.testing.expect(readback.staging == null);
+    const readback_unmap_result = try readback.unmap(harness.nextRecording());
+    try std.testing.expect(readback_unmap_result.staging_upload == null);
     try std.testing.expectEqual(buffer_mod.State.unmapped, readback.getState());
 }
 
@@ -589,8 +916,9 @@ test "buffer: a write larger than the ring is refused and stages nothing" {
 /// return a teardown refusal, for the reason the path-A body names.
 fn oversizedWriteStagesNothing(harness: *Harness, teardowns: *TeardownErrors) !void {
     try harness.init(teardowns);
+    const io = harness.threaded.io();
     // Same reason as the path-A teardown above.
-    defer harness.deinit() catch |err| teardowns.record(err);
+    defer harness.deinit(io) catch |err| teardowns.record(err);
 
     const pattern = try makePattern();
     defer std.testing.allocator.free(pattern);

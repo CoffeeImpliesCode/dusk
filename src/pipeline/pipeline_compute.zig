@@ -4,14 +4,10 @@
 //! (`src/dawn/native/ComputePipeline.cpp:56`) and `ComputePipeline::InitializeImpl`
 //! (`src/dawn/native/vulkan/ComputePipelineVk.cpp:54`).
 //!
-//! **What this file does not claim.** `GetWorkgroupSize`
-//! (`ComputePipeline.cpp:90`) returns an `Extent3D` that Dawn reads out of the
-//! Tint program. M5's reflector reads no `OpExecutionMode LocalSize`, so the
-//! port has nothing to return and does not pretend otherwise; the workgroup
-//! size is M5's table, not this module's. Nothing on the pipeline-creation path
-//! needs it — `VkComputePipelineCreateInfo` (`src/vulkan.zig:4649-4658`) carries no
-//! workgroup size field.
+//! Effective workgroup sizes are resolved from the module before cache lookup.
+//! Selected device limits are supplied by the caller, not inferred here.
 
+const std = @import("std");
 const vulkan = @import("vulkan");
 
 const vk = @import("../vk/dispatch.zig");
@@ -31,10 +27,28 @@ pub fn validateComputePipelineDescriptor(
     if (descriptor.compute.stage != .compute) return error.StageMismatch;
 }
 
+/// Rejects zero dimensions, axis excess, arithmetic overflow and invocation excess.
+/// The product uses u64 so three u32 axes cannot wrap into a valid small workgroup.
+pub fn validateWorkgroupSize(
+    size: [3]u32,
+    limits: pipeline.ComputeLimits,
+) PipelineError!void {
+    var invocations: u64 = 1;
+    for (size, limits.max_workgroup_size) |axis, maximum| {
+        if (axis == 0) return error.WorkgroupAxisZero;
+        if (axis > maximum) return error.WorkgroupAxisAboveLimit;
+        invocations = std.math.mul(u64, invocations, axis) catch
+            return error.WorkgroupProductOverflow;
+    }
+    if (invocations > limits.max_invocations) return error.WorkgroupInvocationsAboveLimit;
+}
+
 /// The create info, filled. Dawn builds the same struct at
 /// `vulkan/ComputePipelineVk.cpp:128-139`.
 fn makeCreateInfo(
     descriptor: pipeline.ComputePipelineDescriptor,
+    entry_point: [:0]const u8,
+    constants: ?*const vulkan.VkSpecializationInfo,
 ) vulkan.VkComputePipelineCreateInfo {
     return .{
         .sType = vulkan.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -42,23 +56,26 @@ fn makeCreateInfo(
             .sType = vulkan.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = vulkan.VK_SHADER_STAGE_COMPUTE_BIT,
             .module = descriptor.compute.module,
-            .pName = descriptor.compute.entry_point.ptr,
+            .pName = entry_point.ptr,
+            .pSpecializationInfo = constants,
         },
         .layout = descriptor.layout.handle,
     };
 }
 
-/// Creates the `VkPipeline` and nothing else.
+/// Creates the `VkPipeline`; `constants` and its map/data storage are borrowed
+/// through the driver call. Null requests the module's encoded defaults.
+/// `entry_point` is the validated stage name with its native terminator.
 pub fn createComputePipeline(
     backend: *const Backend,
-    layout: vulkan.VkPipelineLayout,
+    constants: ?*const vulkan.VkSpecializationInfo,
     descriptor: pipeline.ComputePipelineDescriptor,
+    entry_point: [:0]const u8,
     pipeline_cache: vulkan.VkPipelineCache,
 ) BackendError!vulkan.VkPipeline {
-    _ = layout;
     const create = backend.create_compute_pipelines orelse
         return error.CreateComputePipelinesNotLoaded;
-    var create_info = makeCreateInfo(descriptor);
+    var create_info = makeCreateInfo(descriptor, entry_point, constants);
     var handle: vulkan.VkPipeline = null;
     try vk.checkVkSuccess(create(
         backend.device,

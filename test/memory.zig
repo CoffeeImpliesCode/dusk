@@ -1,5 +1,5 @@
-//! M6 acceptance: the buddy offset tree, the serial-released size tracker, the
-//! allocation record, the heap-allocator seam and the VMA declaration binding.
+//! M6 acceptance: offset trees, serial size tracking, allocation records,
+//! composed heap/buddy and block/slab ownership, and the VMA declaration binding.
 //!
 //! **What this shard claims.** One hundred thousand allocate-and-free cycles
 //! with sizes drawn from a fixed-seed PRNG between 64 B and 4 MiB. Every cycle
@@ -35,6 +35,10 @@ const resource_heap = memory.resource_heap;
 const resource_heap_allocator = memory.resource_heap_allocator;
 const allocation_record = memory.resource_memory_allocation;
 const size_tracker = memory.size_tracker;
+const HeapPool = memory.heap_pool.HeapPool;
+const BuddyMemoryAllocator = memory.buddy_memory_allocator.BuddyMemoryAllocator;
+const BlockPool = memory.block_pool.BlockPool;
+const SlabAllocator = memory.slab_allocator.SlabAllocator;
 
 /// `SizeTracker` threads `io` before `self` in every operation it declares
 /// (`src/memory/size_tracker.zig:90`), so Zig builds no member function for any
@@ -1393,4 +1397,401 @@ test "the VMA binding matches the pinned header's numbering and layout" {
     // produce an object to link. The `VkDeviceMemory` layer is therefore a
     // declared seam with no body, and it lands when a hand-written C shim
     // exists to give it one.
+}
+
+const ComposedHeapParent = struct {
+    acquired_count: usize = 0,
+    released_count: usize = 0,
+    live_count: usize = 0,
+    reject_next: bool = false,
+
+    const OwnedHeap = struct {
+        heap: resource_heap.Heap,
+        allocator: std.mem.Allocator,
+    };
+
+    const vtable: resource_heap_allocator.VTable = .{
+        .allocateResourceHeap = acquire,
+        .deallocateResourceHeap = release,
+    };
+
+    fn interface(self: *ComposedHeapParent) resource_heap_allocator.ResourceHeapAllocator {
+        return resource_heap_allocator.ResourceHeapAllocator.init(self, &vtable);
+    }
+
+    fn acquire(
+        allocator: std.mem.Allocator,
+        context: *anyopaque,
+        size_byte_count: u64,
+    ) resource_heap_allocator.AllocateError!*resource_heap.Heap {
+        const self: *ComposedHeapParent = @ptrCast(@alignCast(context));
+        if (self.reject_next) {
+            self.reject_next = false;
+            return error.OutOfMemory;
+        }
+        const owned = try allocator.create(OwnedHeap);
+        owned.* = .{
+            .heap = .{
+                .memory = null,
+                .memory_type_index = @intCast(self.acquired_count),
+                .size_byte_count = size_byte_count,
+            },
+            .allocator = allocator,
+        };
+        self.acquired_count += 1;
+        self.live_count += 1;
+        return &owned.heap;
+    }
+
+    fn release(context: *anyopaque, heap: *resource_heap.Heap) void {
+        const self: *ComposedHeapParent = @ptrCast(@alignCast(context));
+        const owned: *OwnedHeap = @fieldParentPtr("heap", heap);
+        const allocator = owned.allocator;
+        std.debug.assert(self.live_count > 0);
+        self.live_count -= 1;
+        self.released_count += 1;
+        allocator.destroy(owned);
+    }
+};
+
+test "pooled buddy records retain their heap until the last release and reuse it after recycling" {
+    const allocator = std.testing.allocator;
+    var parent: ComposedHeapParent = .{};
+    var pool = try HeapPool.init(allocator, parent.interface(), .{
+        .block_size_byte_count = 64,
+        .max_recycled_heap_count = 1,
+    });
+    defer pool.deinit(allocator) catch @panic("heap pool still owns resources");
+    defer pool.releaseRecycled();
+    var buddy = try BuddyMemoryAllocator.init(allocator, pool.asResourceHeapAllocator(), .{
+        .max_system_size_byte_count = 128,
+        .memory_block_size_byte_count = 64,
+    });
+    defer buddy.deinit(allocator) catch @panic("buddy still owns allocations");
+
+    var first = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+        .size_byte_count = 17,
+        .alignment_byte_count = 8,
+        .is_lazy_allocated = true,
+    });
+    var second = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+        .size_byte_count = 17,
+        .alignment_byte_count = 8,
+    });
+    const shared_heap = try first.getResourceHeap();
+    try std.testing.expect(try second.getResourceHeap() == shared_heap);
+    try std.testing.expectEqual(@as(usize, 1), parent.acquired_count);
+    try std.testing.expectEqual(@as(u64, 17), first.getInfo().requested_size_byte_count);
+    try std.testing.expect(first.getInfo().is_lazy_allocated);
+    try std.testing.expect(first.getInfo().block_offset_byte_count !=
+        second.getInfo().block_offset_byte_count);
+    try std.testing.expectEqual(@as(usize, 1), buddy.liveHeapCount());
+    try std.testing.expectError(error.LiveAllocationsRemain, buddy.deinit(allocator));
+    try std.testing.expectError(error.OutstandingHeaps, pool.deinit(allocator));
+
+    var other = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+        .size_byte_count = 64,
+        .alignment_byte_count = 64,
+    });
+    try std.testing.expect(try other.getResourceHeap() != shared_heap);
+    try std.testing.expectEqual(@as(u64, 0), try other.getOffset());
+    try std.testing.expectEqual(@as(u64, 64), other.getInfo().block_offset_byte_count);
+    try std.testing.expectEqual(@as(usize, 2), buddy.liveHeapCount());
+
+    // A malformed borrowed record must not consume a reference or a tree leaf.
+    const second_heap = second.resource_heap;
+    second.resource_heap = try other.getResourceHeap();
+    try std.testing.expectError(error.UnknownAllocation, buddy.deallocate(allocator, &second));
+    second.resource_heap = second_heap;
+    try std.testing.expectEqual(@as(usize, 2), buddy.liveHeapCount());
+    try std.testing.expectEqual(@as(usize, 0), parent.released_count);
+
+    try buddy.deallocate(allocator, &first);
+    try std.testing.expect(first.isInvalid());
+    try std.testing.expectEqual(@as(usize, 0), pool.recycledCount());
+    try std.testing.expectEqual(@as(u64, 64), (try second.getResourceHeap()).size_byte_count);
+    try buddy.deallocate(allocator, &second);
+    try std.testing.expectEqual(@as(usize, 1), pool.recycledCount());
+    var reused = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+        .size_byte_count = 64,
+        .alignment_byte_count = 64,
+    });
+    try std.testing.expect(try reused.getResourceHeap() == shared_heap);
+    try std.testing.expectEqual(@as(usize, 2), parent.acquired_count);
+    try buddy.deallocate(allocator, &reused);
+    try buddy.deallocate(allocator, &other);
+    try std.testing.expectEqual(@as(usize, 0), buddy.liveHeapCount());
+    try std.testing.expectEqual(@as(usize, 1), parent.released_count);
+    try std.testing.expectError(error.RecycledHeapsRemain, pool.deinit(allocator));
+    pool.releaseRecycled();
+    try std.testing.expectEqual(@as(usize, 0), pool.recycledCount());
+    try std.testing.expectEqual(@as(usize, 0), parent.live_count);
+    try std.testing.expectEqual(parent.acquired_count, parent.released_count);
+}
+
+fn constructPooledBuddy(allocator: std.mem.Allocator) !void {
+    var parent: ComposedHeapParent = .{};
+    var pool = try HeapPool.init(allocator, parent.interface(), .{
+        .block_size_byte_count = 64,
+        .max_recycled_heap_count = 1,
+    });
+    defer pool.deinit(allocator) catch @panic("heap pool leaked after allocation failure");
+    defer pool.releaseRecycled();
+    var buddy = try BuddyMemoryAllocator.init(allocator, pool.asResourceHeapAllocator(), .{
+        .max_system_size_byte_count = 128,
+        .memory_block_size_byte_count = 64,
+    });
+    defer buddy.deinit(allocator) catch @panic("buddy leaked after allocation failure");
+    var record = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+        .size_byte_count = 3,
+        .alignment_byte_count = 4,
+    });
+    try buddy.deallocate(allocator, &record);
+    pool.releaseRecycled();
+    try std.testing.expectEqual(@as(usize, 0), parent.live_count);
+}
+
+test "every pooled buddy construction allocation unwinds ownership" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, constructPooledBuddy, .{});
+}
+
+test "pooled buddy acquisition failures preserve capacity for a retry and complete drain" {
+    const allocator = std.testing.allocator;
+    const failure_bound = 128;
+    var reached_success = false;
+    var observed_failure = false;
+    for (0..failure_bound) |fail_index| {
+        var parent: ComposedHeapParent = .{};
+        var pool = try HeapPool.init(allocator, parent.interface(), .{
+            .block_size_byte_count = 64,
+            .max_recycled_heap_count = 1,
+        });
+        defer pool.deinit(allocator) catch @panic("retry left pooled ownership live");
+        defer pool.releaseRecycled();
+        var buddy = try BuddyMemoryAllocator.init(allocator, pool.asResourceHeapAllocator(), .{
+            .max_system_size_byte_count = 128,
+            .memory_block_size_byte_count = 64,
+        });
+        defer buddy.deinit(allocator) catch @panic("retry left buddy records live");
+
+        parent.reject_next = true;
+        try std.testing.expectError(error.OutOfMemory, BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+            .size_byte_count = 3,
+            .alignment_byte_count = 4,
+        }));
+        try std.testing.expectEqual(@as(usize, 0), buddy.liveHeapCount());
+        try std.testing.expectEqual(@as(usize, 0), parent.live_count);
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var first = BuddyMemoryAllocator.allocate(failing.allocator(), &buddy, .{
+            .size_byte_count = 3,
+            .alignment_byte_count = 4,
+        }) catch |err| retry: {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            observed_failure = true;
+            try std.testing.expectEqual(@as(usize, 0), buddy.liveHeapCount());
+            try std.testing.expectEqual(@as(usize, 0), parent.live_count);
+            break :retry try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+                .size_byte_count = 3,
+                .alignment_byte_count = 4,
+            });
+        };
+        reached_success = !failing.has_induced_failure;
+        try buddy.deallocate(allocator, &first);
+        // Filling both complete heaps detects a lost split, not just a usable leaf.
+        var left = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+            .size_byte_count = 64,
+            .alignment_byte_count = 64,
+        });
+        var right = try BuddyMemoryAllocator.allocate(allocator, &buddy, .{
+            .size_byte_count = 64,
+            .alignment_byte_count = 64,
+        });
+        try std.testing.expect(try left.getResourceHeap() != try right.getResourceHeap());
+        try buddy.deallocate(allocator, &right);
+        try buddy.deallocate(allocator, &left);
+        pool.releaseRecycled();
+        try std.testing.expectEqual(@as(usize, 0), parent.live_count);
+        try std.testing.expectEqual(parent.acquired_count, parent.released_count);
+        if (reached_success) break;
+    }
+    try std.testing.expect(observed_failure);
+    try std.testing.expect(reached_success);
+}
+
+const SlabObject = struct {
+    own_address: usize,
+    value: u64,
+    destructor_count: *usize,
+
+    fn initialize(self: *SlabObject, value: u64, destructor_count: *usize) void {
+        self.* = .{
+            .own_address = @intFromPtr(self),
+            .value = value,
+            .destructor_count = destructor_count,
+        };
+    }
+
+    fn deinit(self: *SlabObject) void {
+        self.destructor_count.* += 1;
+        self.* = undefined;
+    }
+};
+
+const ObjectSlab = SlabAllocator(SlabObject);
+const slab_object_count = 3;
+const slab_budget_byte_count = slab_object_count * @sizeOf(SlabObject);
+
+fn drainSlabObjects(
+    allocator: std.mem.Allocator,
+    slab: *ObjectSlab,
+    pool: *BlockPool,
+    objects: []?*SlabObject,
+) !void {
+    for (objects) |*slot| {
+        if (slot.*) |object| {
+            try slab.deallocate(object);
+            slot.* = null;
+        }
+    }
+    try ObjectSlab.destroyAllSlabs(allocator, slab);
+    try std.testing.expectEqual(@as(usize, 0), slab.allocatedSlabCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.recycledBlockCount());
+    try slab.deinit();
+}
+
+test "caller-owned zero-retention pool drains recycled slabs without destroying objects" {
+    const allocator = std.testing.allocator;
+    var options = try ObjectSlab.poolOptions(slab_budget_byte_count);
+    options.keep_alive_tick_count = 0;
+    var pool = try BlockPool.init(options);
+    defer BlockPool.deinit(allocator, &pool);
+    var slab = try ObjectSlab.init(.{
+        .pool = &pool,
+        .object_budget_byte_count = slab_budget_byte_count,
+    });
+    var objects = [_]?*SlabObject{null} ** (slab_object_count * 2);
+    errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
+        std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
+    };
+    var destructor_count: usize = 0;
+    for (objects[0 .. slab_object_count + 1], 0..) |*slot, index| {
+        const object = try ObjectSlab.allocate(allocator, &slab);
+        slot.* = object;
+        object.initialize(@intCast(index), &destructor_count);
+        try std.testing.expectEqual(@intFromPtr(object), object.own_address);
+    }
+    try std.testing.expectEqual(@as(usize, 2), slab.allocatedSlabCount());
+    try std.testing.expectError(error.LiveAllocations, ObjectSlab.destroyAllSlabs(allocator, &slab));
+    try std.testing.expectError(error.SlabsNotDestroyed, slab.deinit());
+    var foreign: SlabObject = undefined;
+    foreign.initialize(99, &destructor_count);
+    try std.testing.expectError(error.InvalidPointer, slab.deallocate(&foreign));
+
+    const returned = objects[1].?;
+    try slab.deallocate(returned);
+    objects[1] = null;
+    try std.testing.expectError(error.AlreadyFreed, slab.deallocate(returned));
+    try std.testing.expectEqual(@as(usize, 0), destructor_count);
+    // Available capacity and the returned recycled slot must suffice without backing growth.
+    // There is no cross-slab promise that the next object has the returned address.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    for ([_]usize{ 1, 4, 5 }) |index| {
+        const reused = try ObjectSlab.allocate(failing.allocator(), &slab);
+        objects[index] = reused;
+        reused.initialize(if (index == 1) 77 else @intCast(index + 100), &destructor_count);
+        try std.testing.expectEqual(@intFromPtr(reused), reused.own_address);
+        try std.testing.expectEqual(@as(usize, 2), slab.allocatedSlabCount());
+    }
+    try std.testing.expect(!failing.has_induced_failure);
+    for (objects, 0..) |slot, index| {
+        const object = slot.?;
+        const expected: u64 = if (index == 1) 77 else if (index >= 4) @intCast(index + 100) else @intCast(index);
+        try std.testing.expectEqual(expected, object.value);
+        try std.testing.expectEqual(@intFromPtr(object), object.own_address);
+    }
+    try drainSlabObjects(allocator, &slab, &pool, &objects);
+    try std.testing.expectEqual(@as(usize, 0), destructor_count);
+    // Slab teardown leaves the caller's pool usable rather than taking ownership.
+    const bytes = try BlockPool.allocate(allocator, &pool, options.block_size_byte_count);
+    try BlockPool.returnBlock(allocator, &pool, bytes);
+    try std.testing.expectEqual(@as(usize, 0), pool.recycledBlockCount());
+}
+
+test "failed slab acquisition preserves full objects and retries into a second slab" {
+    const allocator = std.testing.allocator;
+    var options = try ObjectSlab.poolOptions(slab_budget_byte_count);
+    options.keep_alive_tick_count = 0;
+    var pool = try BlockPool.init(options);
+    defer BlockPool.deinit(allocator, &pool);
+    var slab = try ObjectSlab.init(.{
+        .pool = &pool,
+        .object_budget_byte_count = slab_budget_byte_count,
+    });
+    var objects = [_]?*SlabObject{null} ** (slab_object_count + 1);
+    errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
+        std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
+    };
+    var destructor_count: usize = 0;
+    for (objects[0..slab_object_count], 0..) |*slot, index| {
+        const object = try ObjectSlab.allocate(allocator, &slab);
+        slot.* = object;
+        object.initialize(@intCast(index + 10), &destructor_count);
+    }
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, ObjectSlab.allocate(failing.allocator(), &slab));
+    try std.testing.expectEqual(@as(usize, 1), slab.allocatedSlabCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.recycledBlockCount());
+    const retry = try ObjectSlab.allocate(allocator, &slab);
+    objects[slab_object_count] = retry;
+    retry.initialize(42, &destructor_count);
+    try std.testing.expectEqual(@as(usize, 2), slab.allocatedSlabCount());
+    for (objects[0..slab_object_count], 0..) |slot, index| {
+        const object = slot.?;
+        try std.testing.expectEqual(@as(u64, @intCast(index + 10)), object.value);
+        try std.testing.expectEqual(@intFromPtr(object), object.own_address);
+    }
+    try std.testing.expectEqual(@as(u64, 42), retry.value);
+    try std.testing.expectEqual(@intFromPtr(retry), retry.own_address);
+    for (objects) |slot| slot.?.deinit();
+    try drainSlabObjects(allocator, &slab, &pool, &objects);
+    try std.testing.expectEqual(@as(usize, slab_object_count + 1), destructor_count);
+}
+
+fn constructAndDrainSlabs(allocator: std.mem.Allocator) !void {
+    var options = try ObjectSlab.poolOptions(slab_budget_byte_count);
+    options.keep_alive_tick_count = 0;
+    var pool = try BlockPool.init(options);
+    defer BlockPool.deinit(allocator, &pool);
+    var slab = try ObjectSlab.init(.{
+        .pool = &pool,
+        .object_budget_byte_count = slab_budget_byte_count,
+    });
+    var objects = [_]?*SlabObject{null} ** (slab_object_count + 1);
+    errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
+        std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
+    };
+    var destructor_count: usize = 0;
+    for (&objects, 0..) |*slot, index| {
+        const object = ObjectSlab.allocate(allocator, &slab) catch |err| {
+            // Each injected acquisition failure must drain before returning its original error.
+            try drainSlabObjects(allocator, &slab, &pool, &objects);
+            try std.testing.expectEqual(@as(usize, 0), destructor_count);
+            return err;
+        };
+        slot.* = object;
+        object.initialize(@intCast(index), &destructor_count);
+    }
+    try std.testing.expectEqual(@as(usize, 2), slab.allocatedSlabCount());
+    for (objects, 0..) |slot, index| {
+        const object = slot.?;
+        try std.testing.expectEqual(@as(u64, @intCast(index)), object.value);
+        try std.testing.expectEqual(@intFromPtr(object), object.own_address);
+    }
+    try drainSlabObjects(allocator, &slab, &pool, &objects);
+    try std.testing.expectEqual(@as(usize, 0), destructor_count);
+}
+
+test "every composed slab acquisition failure returns backing to the caller-owned pool" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, constructAndDrainSlabs, .{});
 }

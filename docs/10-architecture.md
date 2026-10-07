@@ -72,59 +72,67 @@ same split Dawn makes at `CommandBufferVk.cpp:1132`.
 
 ## Object model
 
-Every WebGPU object is a handle. Internally each is a pointer to a refcounted
-struct allocated from the device's arena.
+The generated WebGPU surface uses borrowed `core.Handle` values.
+Copying a handle does not create an owned reference.
+Core host objects occupy the device arena until `Device.deinit`.
+Destroyed objects retain readable state only while that arena remains live.
+Device teardown invalidates their handles.
 
-```zig
-pub const Device = struct {
-    arena: std.heap.ArenaAllocator,
-    // ...
-};
+The typed native facade has a separate ownership contract.
+`engine.Device` creates real Vulkan resources through synchronous factories.
+`Device.release` can destroy a native payload before device teardown.
+It refuses pending GPU use and live dependents.
+Host wrapper storage remains arena-owned.
+Core reference counts retain dependencies and cached pipeline references.
+`native_resources.destroyAll` walks the core object list during teardown.
+These counts and lists do not reproduce Dawn's general intrusive `Ref<T>` model.
 
-pub fn createBuffer(dev: *Device, desc: BufferDescriptor) Error!Buffer { ... }
-pub fn destroyBuffer(dev: *Device, buf: Buffer) void { ... }
-```
+Native instance and device contexts initialize at stable heap addresses.
+Their queues, dispatch tables, caches, and handle counts borrow that storage.
+Keep the high-level instance, adapter lists, and device unmoved while children borrow them.
+Counted lists retain the instance. Devices retain their adapter, physical record, and instance.
+List and instance teardown refuse live children.
 
-A handle carries no state of its own, so copying one is free and cannot
-double-free. The last reference releases into the arena, which is reclaimed when
-the device is destroyed. There is no per-object free, and therefore no use-after-
-free: a stale handle reads memory the arena still owns, which the debug layer
-reports as a validation error rather than as undefined behaviour.
-
-This is the deliberate departure from Dawn's intrusive `Ref<T>` with a two-bit
-payload refcount (`docs/02-dawn-design.md` §4.1). The trade is documented in
-`docs/30-port-design.md`.
+Current `Device.destroy` retires children, frees the native context, and releases the core arena.
+It does not retain a new reference-counted host shell after destruction.
+See `docs/30-port-design.md` §1 and §9.1 for the release and operation contracts.
 
 ---
 
 ## Threading
 
-One device mutex, one serial timeline, one worker pool. That is Dawn's model and
-it is correct: WebGPU's ordering guarantees are a serial order.
+The native device owns a real queue and one serial timeline.
+Recorded work follows serial order.
 
-- The **device mutex** guards every public entry point. Public API calls are
-  never blocking; they enqueue.
-- The **serial timeline** is a monotonic counter. Work submitted at serial *n*
-  completes before work submitted at serial *n+1*.
-- The **worker pool** runs exactly two jobs: SPIR-V validation at shader-module
-  creation, and pipeline creation when the caller asked for it asynchronously.
+- Native operations take explicit `std.Io` values for each operation.
+  They pin the device before native access or a wait for `DeviceMutex`.
+- Synchronous resource creators call native factories.
+  `Device.wait(io, serial)` explicitly blocks for completion.
+  The recorded command surface does not make every public call enqueue-only.
+- `Device.getQueue(io)` returns a scoped `QueueLease`.
+  The lease owns the queue-operation gate and one device pin. It stores no `Io`.
+  Its queue borrow ends at `lease.deinit(io)`.
+- Destroy refuses active operations without changing ownership or admission.
+  A nonterminal completion failure preserves the stopped owner for retry.
+  `VulkanDeviceLost` permits lifetime cleanup, not valid work or readback.
 
-Nothing else starts a thread. A fence is polled from the device tick, never from
-a thread of its own.
+The worker pool is separate from this synchronous native path.
+Async registries, callbacks, and pipeline requests remain Phase 3 work.
+This integration does not establish a complete WebGPU procedure-table implementation.
 
 ---
 
 ## The command path
 
-A consumer records into an encoder. The encoder appends typed commands into a
-block arena (`command`). At submit, the device replays that stream into Vulkan
-entry points (`engine` → `vk`).
+A consumer records typed commands into a command arena.
+`Device.submit` replays the finished stream into Vulkan through the native queue.
+Synchronous native resource creation precedes this recorded path.
+It does not require a command-stream entry for each created object.
 
-This is Dawn's architecture verbatim: a 38-tag command stream in
-`Commands.h:55-94`, replayed by `CommandBufferVk::RecordCommands`. Keeping it
-buys three things — the front end is testable with no GPU, validation can run
-against recorded state rather than live objects, and the Vulkan backend stays a
-leaf module.
+The record/replay split follows the upstream evidence in `docs/02-dawn-design.md`.
+`docs/40-plan.md` owns the exact function map.
+The split permits frontend tests without a GPU and validation against recorded state.
+It does not make Dusk's ownership and creation policy identical to Dawn's.
 
 ---
 
@@ -148,3 +156,21 @@ A device is in compatibility mode when the `core features and limits` feature is
 absent. That single rule drives limit selection and every per-object compat
 check, exactly as Dawn does it (`docs/02-dawn-design.md` §5). It is a runtime
 derivation, never a build flag.
+
+## Native capability boundary
+
+Raw Vulkan queries and frontend capability policy are separate.
+`native_capabilities.fromNative` advertises `core_features_and_limits` only when Core guards and limits pass.
+It advertises `depth_clip_control` only when queried `depthClamp` is available.
+The native device enables depth clamp only when the caller requires that feature.
+Optional compression feature bits remain unadvertised.
+
+Core admission checks robust access, compression eligibility, four descriptor-array dynamic-indexing flags, fragment atomics, full draw indices, and Core-only flags.
+The Core-only flags are independent blend, depth-bias clamp, cube arrays, and sample-rate shading.
+Native creation enables the queried baseline flags.
+This corrected hardware baseline does not establish full Dawn Core parity.
+
+Offered limits respect descriptor budgets, fragment outputs, and Dusk implementation capacities.
+Device creation reifies defaults within those capabilities and preserves accepted required limits.
+Maintenance4 support controls the native LocalSizeId path.
+Vulkan is the implemented native backend. The null backend remains a separate test path.

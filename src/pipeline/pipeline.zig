@@ -2,33 +2,38 @@
 //!
 //! **What this file is.** Dawn's `PipelineBase`
 //! (`src/dawn/native/Pipeline.h:71`) with the two leaves that hang off it and
-//! the device cache that decides whether a leaf is built at all. The cache
-//! identity is one thing: the bytes `buildRenderPipelineKey` and
-//! `buildComputePipelineKey` write, and the layout's own bytes are the first
-//! state field in each (`Pipeline.cpp:385` records the layout first and
-//! `Pipeline.cpp:400` compares it first).
+//! the device cache that decides whether a leaf is built at all. Keys identify
+//! the actual canonical layout owner, or the raw layout's definition bytes.
+//! The two ownership domains never share a cached pipeline.
 //!
-//! **What this file does not claim.** It does not claim Dawn's reference
-//! counting, its `WeakRef` promotion, or its `mSpecializations` map. The port's
-//! object lives in the device arena and the store keys on bytes, so the
-//! specialization map has no job: one descriptor is one specialization.
+//! Every successful guarded create returns one reference of the caller's
+//! required user/lease class, including cache hits. The weak index borrows
+//! arena objects and evicts before payload retirement. All cache and payload
+//! access uses the canonical ObjectList guard.
 //!
 //! **What it does not claim either.** Attachment formats are `VkFormat`, not
 //! the WebGPU `TextureFormat`. M7 owns the WebGPU format table and the
-//! conversion, and a Vulkan pipeline needs the Vulkan value
-//! (`VkPipelineRenderingCreateInfo`, `src/vulkan.zig:7580`). Naming the Vulkan
-//! value here keeps one table in the project instead of two.
+//! conversion, and a Vulkan pipeline needs the Vulkan value for attachment
+//! compatibility with its traditional render pass.
+//! Naming the Vulkan value here keeps one table instead of two.
 
 const std = @import("std");
 const vulkan = @import("vulkan");
 
+const api = @import("../api/root.zig");
 const core = @import("../core/root.zig");
+const command_constants = @import("../command/constants.zig");
+const dispatch = @import("../vk/dispatch.zig");
+const spirv = @import("../spirv/root.zig");
+const specialization = @import("specialization.zig");
 
 const cache = @import("cache.zig");
 const pipeline_backend = @import("pipeline_backend.zig");
 const pipeline_binding_info = @import("pipeline_binding_info.zig");
 const pipeline_compute = @import("pipeline_compute.zig");
 const pipeline_render = @import("pipeline_render.zig");
+const layout_internal = @import("layout_internal.zig");
+const layout_vk = @import("layout_vk.zig");
 
 pub const Backend = pipeline_backend.Backend;
 pub const Cache = cache.Cache;
@@ -106,29 +111,242 @@ pub const StageInput = struct {
     module: vulkan.VkShaderModule = null,
     entry_point: []const u8 = "",
     stage: Stage = .vertex,
-    /// The bytes that identify this module's contents in a cache key. M13
-    /// passes the caller's own SPIR-V words.
+    /// Authoritative SPIR-V bytes for this native module. They must match
+    /// `module`; compute creation always validates and reflects these bytes.
     content_bytes: []const u8 = &.{},
+    /// Borrowed overrides; an empty slice requests the module's defaults.
+    /// Keys are canonical decimal SpecIds or unambiguous OpName aliases.
+    /// Values are finite f64 scalars converted to the declaration's type.
+    /// Keep the entries and their key bytes alive and unchanged during creation
+    /// and cache-key construction.
+    constants: []const api.descriptors.ConstantEntry = &.{},
     usage: StageUsage = .{},
 };
 
-/// The pipeline layout, and the bytes that put it in a cache key.
+/// Cache-key preparation failures. Invalid overrides never reach a cache lookup.
+pub const KeyError = spirv.ErrorOrOutOfMemory || specialization.Error;
+
+/// Compute preparation includes authoritative entry-point and device-limit validation.
+pub const ComputeError = KeyError || PipelineError || spirv.Module.WorkgroupError;
+
+fn prepareCompute(
+    allocator: std.mem.Allocator,
+    descriptor: ComputePipelineDescriptor,
+) ComputeError!specialization.Specialization {
+    try pipeline_compute.validateComputePipelineDescriptor(descriptor);
+    if (descriptor.compute.content_bytes.len == 0) return error.ComputeStageMissing;
+    const words = try spirv.wordsFromBytes(allocator, descriptor.compute.content_bytes);
+    defer allocator.free(words);
+    try spirv.validate(words);
+    const reflected = try spirv.reflect(allocator, words);
+    defer reflected.deinit();
+    var selected: ?spirv.EntryPoint = null;
+    var named_wrong_model = false;
+    for (reflected.entry_points) |entry| {
+        if (!std.mem.eql(u8, entry.name, descriptor.compute.entry_point)) continue;
+        if (entry.execution_model != .gl_compute) {
+            named_wrong_model = true;
+            continue;
+        }
+        if (selected != null) return error.EntryPointCountAboveLimit;
+        selected = entry;
+    }
+    const entry = selected orelse {
+        if (named_wrong_model) return error.StageMismatch;
+        return error.StageMissingForEntryPoint;
+    };
+    if (entry.has_local_size_id and !descriptor.local_size_id_supported) {
+        return error.LocalSizeIdUnsupported;
+    }
+    var constants = try specialization.Specialization.init(
+        allocator,
+        reflected.specialization_constants,
+        descriptor.compute.constants,
+    );
+    errdefer constants.deinit(allocator);
+    const size = try reflected.resolveWorkgroupSizeCanonical(entry.id, constants.canonical_bytes);
+    try pipeline_compute.validateWorkgroupSize(size, descriptor.limits);
+    return constants;
+}
+
+fn prepareSpecialization(
+    allocator: std.mem.Allocator,
+    stage: StageInput,
+) KeyError!specialization.Specialization {
+    if (stage.constants.len == 0) return specialization.Specialization.init(allocator, &.{}, &.{});
+    const words = try spirv.wordsFromBytes(allocator, stage.content_bytes);
+    defer allocator.free(words);
+    try spirv.validate(words);
+    const reflected = try spirv.reflect(allocator, words);
+    defer reflected.deinit();
+    return specialization.Specialization.init(
+        allocator,
+        reflected.specialization_constants,
+        stage.constants,
+    );
+}
+
+/// Descriptor set layout contents. Handles may differ for identical definitions.
+/// `fromInternal` and `clone` return owned arrays released with `deinit`.
+pub const GroupLayout = struct {
+    handle: vulkan.VkDescriptorSetLayout,
+    bindings: []const vulkan.VkDescriptorSetLayoutBinding,
+    has_external_texture: bool = false,
+    /// Zero identifies ordinary layouts. Automatic layouts share one nonzero token.
+    compatibility_token: u64 = 0,
+    /// Sum of physical combined-image-sampler descriptors needed for one set.
+    combined_image_sampler_descriptor_count: u32 = 0,
+
+    /// Builds public-number native definitions with owned immutable sampler arrays.
+    pub fn fromInternal(
+        allocator: std.mem.Allocator,
+        handle: vulkan.VkDescriptorSetLayout,
+        internal: *const layout_internal.Layout,
+        immutable_samplers: []const layout_vk.ImmutableSamplerBinding,
+    ) layout_vk.Error!GroupLayout {
+        var external = false;
+        for (internal.entries) |entry| {
+            if (entry.layout == .external_texture) external = true;
+        }
+        const combined_count = try layout_vk.combinedImageSamplerDescriptorCount(internal);
+        return .{
+            .handle = handle,
+            .bindings = try layout_vk.descriptorBindings(allocator, internal, immutable_samplers),
+            .has_external_texture = external,
+            .combined_image_sampler_descriptor_count = combined_count,
+        };
+    }
+
+    /// Copies all descriptor definitions, including immutable sampler arrays.
+    pub fn clone(self: GroupLayout, allocator: std.mem.Allocator) std.mem.Allocator.Error!GroupLayout {
+        const bindings = try allocator.dupe(vulkan.VkDescriptorSetLayoutBinding, self.bindings);
+        var copied: usize = 0;
+        errdefer {
+            for (bindings[0..copied]) |binding| {
+                if (binding.pImmutableSamplers != null) {
+                    allocator.free(binding.pImmutableSamplers[0..binding.descriptorCount]);
+                }
+            }
+            allocator.free(bindings);
+        }
+        for (bindings) |*binding| {
+            if (binding.pImmutableSamplers != null) {
+                const samplers = try allocator.dupe(
+                    vulkan.VkSampler,
+                    binding.pImmutableSamplers[0..binding.descriptorCount],
+                );
+                binding.pImmutableSamplers = samplers.ptr;
+            }
+            copied += 1;
+        }
+        return .{
+            .handle = self.handle,
+            .bindings = bindings,
+            .has_external_texture = self.has_external_texture,
+            .compatibility_token = self.compatibility_token,
+            .combined_image_sampler_descriptor_count = self.combined_image_sampler_descriptor_count,
+        };
+    }
+
+    /// Releases owned definitions and invalidates self, without destroying the Vulkan handle.
+    pub fn deinit(self: *GroupLayout, allocator: std.mem.Allocator) void {
+        layout_vk.freeDescriptorBindings(allocator, self.bindings);
+        self.* = undefined;
+    }
+
+    /// Compares descriptor definitions without relying on Vulkan handle identity.
+    pub fn compatible(self: GroupLayout, other: GroupLayout) bool {
+        if (self.compatibility_token != other.compatibility_token) return false;
+        if (self.combined_image_sampler_descriptor_count != other.combined_image_sampler_descriptor_count)
+            return false;
+        if (self.has_external_texture != other.has_external_texture) return false;
+        if (self.bindings.len != other.bindings.len) return false;
+        for (self.bindings, other.bindings) |left, right| {
+            if (left.binding != right.binding or left.descriptorType != right.descriptorType or
+                left.descriptorCount != right.descriptorCount or left.stageFlags != right.stageFlags)
+                return false;
+            if ((left.pImmutableSamplers == null) != (right.pImmutableSamplers == null)) return false;
+            if (left.pImmutableSamplers != null) {
+                if (!std.mem.eql(
+                    vulkan.VkSampler,
+                    left.pImmutableSamplers[0..left.descriptorCount],
+                    right.pImmutableSamplers[0..right.descriptorCount],
+                )) return false;
+            }
+        }
+        return true;
+    }
+};
+
+/// Native layout input and its replay definitions.
 ///
-/// Dawn streams `layout->GetCacheKey()` into the pipeline key
-/// (`src/dawn/native/vulkan/RenderPipelineVk.cpp:925`), and that key is the
-/// descriptor set layout create infos, the resource-table flag and the
-/// immediate data range (`src/dawn/native/vulkan/PipelineLayoutVk.cpp:127`).
-/// So "the same pipeline with a different layout is a different key" is not a
-/// rule this module invents; it is what the layout's own bytes do.
+/// Canonical inputs must describe their owner's exact immutable native layout.
+/// Standalone inputs borrow a caller-owned native handle through pipeline retirement.
 pub const LayoutInput = struct {
     handle: vulkan.VkPipelineLayout = null,
     content_bytes: []const u8 = &.{},
+    /// Null selects standalone raw ownership. Otherwise the factory retains this actual owner.
+    canonical_layout_header: ?*core.Object = null,
+    /// Zero identifies ordinary layouts. Every group must use this same token.
+    compatibility_token: u64 = 0,
+    /// Canonical groups stay immutable under the retained layout lease.
+    /// Raw groups are borrowed only during creation. At most `command.constants.max_bind_groups`.
+    groups: []const GroupLayout = &.{},
+    /// Offset-zero, all-stage native push constant range; zero means no range.
+    immediate_size: u32 = 0,
+
+    /// Creates a native layout from these exact groups and immediate range.
+    /// The returned input borrows `groups`; the caller destroys its native handle.
+    pub fn create(
+        procs: *const dispatch.DeviceProcs,
+        device: vulkan.VkDevice,
+        groups: []const GroupLayout,
+        immediate_size: u32,
+    ) layout_vk.Error!LayoutInput {
+        const input: LayoutInput = .{ .groups = groups, .immediate_size = immediate_size };
+        _ = input.immediateMask() catch return error.ImmediateSizeInvalid;
+        if (groups.len > command_constants.max_bind_groups) return error.TooManyBindGroups;
+        var handles: [command_constants.max_bind_groups]vulkan.VkDescriptorSetLayout = @splat(null);
+        for (groups, 0..) |group, index| handles[index] = group.handle;
+        return .{
+            .handle = try layout_vk.createPipelineLayout(
+                procs,
+                device,
+                handles[0..groups.len],
+                immediate_size,
+            ),
+            .groups = groups,
+            .immediate_size = immediate_size,
+        };
+    }
+
+    /// One bit per covered four-byte word. Replay supports at most 64 words.
+    pub fn immediateMask(self: LayoutInput) error{ImmediateSizeInvalid}!u64 {
+        if (self.immediate_size > 256 or self.immediate_size % 4 != 0)
+            return error.ImmediateSizeInvalid;
+        const words = self.immediate_size / 4;
+        return if (words == 64) std.math.maxInt(u64) else (@as(u64, 1) << @as(u6, @intCast(words))) - 1;
+    }
+
+    /// Empty descriptor sets do not require a bound group at draw or dispatch.
+    pub fn bindGroupMask(self: LayoutInput) error{BindGroupCountAboveLimit}!u8 {
+        if (self.groups.len > command_constants.max_bind_groups) return error.BindGroupCountAboveLimit;
+        var mask: u8 = 0;
+        for (self.groups, 0..) |group, index| {
+            if (group.bindings.len != 0) mask |= @as(u8, 1) << @as(u3, @intCast(index));
+        }
+        return mask;
+    }
 };
 
 /// Every rule a descriptor can break. One member per `DAWN_INVALID_IF` site, so
 /// a caller matches on the rule instead of on the message text
 /// (`AGENTS.md` §2).
 pub const PipelineError = error{
+    CompatibleRenderPassMissing,
+    ImmediateSizeInvalid,
+    BindGroupCountAboveLimit,
+    ExternalTexturePipelineUnsupported,
     // `native/Pipeline.cpp` — `ValidateProgrammableStage` (`:92`).
     StageMissingForEntryPoint,
     StageMismatch,
@@ -150,20 +368,24 @@ pub const PipelineError = error{
     DepthStencilFormatSetWithoutState,
     DepthStencilCompareUndefined,
     DepthCompareUndefinedWithDepthWrite,
-    StencilOperationUndefined,
+    StencilStateWithoutStencilAspect,
     MultisampleCountUnsupported,
     MultisampleCountNotOne,
     SampleMaskNotOne,
     AlphaToCoverageWithSampleCountNotOne,
     ColorTargetCountAboveLimit,
-    ColorTargetFormatUndefined,
     ColorTargetFormatNotRenderable,
-    ColorWriteMaskEmpty,
+    ColorWriteMaskInvalid,
     BlendFactorUndefined,
     BlendOperationUndefined,
     CompatibilityDepthBiasClampNonZero,
     // `native/ComputePipeline.cpp:37`.
     ComputeStageMissing,
+    LocalSizeIdUnsupported,
+    WorkgroupAxisZero,
+    WorkgroupAxisAboveLimit,
+    WorkgroupProductOverflow,
+    WorkgroupInvocationsAboveLimit,
     // `native/BindingInfo.cpp:174`.
     StaticSamplerAndExternalTextureInSamePipeline,
     DynamicUniformBuffersAboveLimit,
@@ -181,16 +403,11 @@ pub const PipelineError = error{
     StorageTexturesInFragmentStageAboveLimit,
 };
 
-/// What a create call can report: a rule the caller broke, a handle the arena
-/// rejects, an allocation failure, a lock the caller cancelled, a Vulkan call
-/// the seam could not make, or the device gone.
-///
-/// `core.ValidationError` is in the union because the getters below resolve a
-/// handle, and `Device.resolve` (`src/core/device.zig:120`) answers a stale or
-/// wrongly-kinded one through that set. `src/engine/buffer.zig:194` composes
-/// it the same way.
+/// Finite validation, ownership, allocation and native creation failures.
+/// A failed factory publishes no handle and transfers no reference.
 pub const CreateError = PipelineError || core.ValidationError || core.UnrecoverableError ||
-    std.mem.Allocator.Error || error{Canceled} || pipeline_backend.BackendError;
+    core.CreateError || core.ReferenceError || ComputeError ||
+    pipeline_backend.BackendError;
 
 /// Which pipeline a handle names.
 pub const Kind = enum {
@@ -199,6 +416,9 @@ pub const Kind = enum {
 };
 
 pub const RenderPipelineDescriptor = struct {
+    /// Borrowed through native creation; compatible attachment formats and
+    /// sample count at subpass zero. The handle is not part of cache identity.
+    compatible_render_pass: vulkan.VkRenderPass,
     label: []const u8 = "",
     layout: LayoutInput = .{},
     vertex: StageInput = .{ .stage = .vertex },
@@ -211,10 +431,21 @@ pub const RenderPipelineDescriptor = struct {
     color_targets: []const ColorTargetState = &.{},
 };
 
+/// Selected device limits, in invocations per axis and per workgroup.
+/// Callers supply negotiated limits, not a pipeline module default.
+pub const ComputeLimits = struct {
+    max_workgroup_size: [3]u32,
+    max_invocations: u32,
+};
+
 pub const ComputePipelineDescriptor = struct {
     label: []const u8 = "",
     layout: LayoutInput = .{},
     compute: StageInput = .{ .stage = .compute },
+    limits: ComputeLimits,
+    /// True only when the Vulkan device enables LocalSizeId execution support.
+    /// False rejects that execution mode without rewriting shader words.
+    local_size_id_supported: bool = false,
 };
 
 /// What the pipeline replay and the cache key need, kept after creation.
@@ -231,7 +462,8 @@ pub const RenderState = struct {
 };
 
 pub const ComputeState = struct {
-    entry_point: []const u8 = "",
+    /// Owned, terminated native name. Null is unpublished or retired state.
+    entry_point: ?[:0]const u8 = null,
 };
 
 pub const State = union(enum) {
@@ -268,11 +500,8 @@ pub const Pipeline = struct {
     header: core.Object,
     /// The seam `destroy` reaches. The device owns the value, so it outlives
     /// every pipeline the arena holds.
-    // SAFETY: both create paths below assign `backend`, `destroy_pipeline`,
-    // `allocator`, `vk_pipeline`, `vk_layout`, `key` and `state` before
-    // `header.attach()`, and `attach` is what puts the object on the device's
-    // list. Nothing reads these fields before the attach, because nothing can
-    // reach the object before the attach.
+    // Both create paths initialize all payload fields before fallible work;
+    // publication follows native creation and successful weak insertion.
     backend: *const Backend = undefined,
     /// The seam's `vkDestroyPipeline`, read once by the create paths. The
     /// teardown below calls this pointer and never unwraps it, so a seam that
@@ -281,36 +510,117 @@ pub const Pipeline = struct {
     // SAFETY: assigned by both create paths before `header.attach()`, as the
     // `backend` field above states.
     destroy_pipeline: DestroyPipelineFn = undefined,
-    /// Where the key bytes and the owned state slices came from. Copied, not
-    /// reached through: the store is emptied before the arena tears these
-    /// objects down, and `destroy` still has to free what they own.
+    /// Allocator used for owned payload state; outlives its final cleanup.
     // SAFETY: assigned by both create paths before `header.attach()`, as the
     // `backend` field above states.
     allocator: std.mem.Allocator = undefined,
     vk_pipeline: vulkan.VkPipeline = null,
     vk_layout: vulkan.VkPipelineLayout = null,
+    /// Owns one actual layout lease. Null means the native layout remains caller-owned.
+    canonical_layout_header: ?*core.Object = null,
+    compatibility_token: u64 = 0,
     key: CacheKey = CacheKey.init(),
     state: State = .{ .compute = .{} },
+    immediate_mask: u64 = 0,
+    immediate_size: u32 = 0,
+    immediate_stages: vulkan.VkShaderStageFlags = 0,
+    bind_group_mask: u8 = 0,
+    /// Borrows canonical immutable definitions, or owns a standalone raw snapshot.
+    group_layouts: []const GroupLayout = &.{},
 
-    /// The arena's liveness test, which is what makes a dead entry safe to
-    /// leave in the cache map: `cache.Cache.find` skips an entry whose object
-    /// no longer answers true.
-    pub fn isAlive(self: *const Pipeline) bool {
-        return self.header.isAlive();
+    /// Vulkan compatibility for set N requires identical definitions through N
+    /// and identical push constant ranges.
+    pub fn compatibleForGroup(
+        self: *const Pipeline,
+        guard: *const core.ObjectGuard,
+        other: *const Pipeline,
+        index: u32,
+    ) bool {
+        guard.assertOwns(self.header.tracking);
+        guard.assertOwns(other.header.tracking);
+        if (self.compatibility_token != other.compatibility_token) return false;
+        if (self.immediate_size != other.immediate_size or
+            self.immediate_stages != other.immediate_stages) return false;
+        if (index >= self.group_layouts.len or index >= other.group_layouts.len) return false;
+        for (self.group_layouts[0 .. index + 1], other.group_layouts[0 .. index + 1]) |left, right| {
+            if (!left.compatible(right)) return false;
+        }
+        return true;
     }
 
-    pub fn queryKind(self: *const Pipeline) Kind {
+    /// Retains a canonical layout and borrows its immutable replay definitions.
+    /// Raw input owns no native handle here and copies its replay definitions.
+    /// Requires initialized allocator state and no existing layout edge or snapshot.
+    pub fn initLayout(
+        self: *Pipeline,
+        guard: *const core.ObjectGuard,
+        input: LayoutInput,
+    ) (PipelineError || core.ValidationError || core.ReferenceError ||
+        std.mem.Allocator.Error)!void {
+        guard.assertOwns(self.header.tracking);
+        std.debug.assert(self.group_layouts.len == 0);
+        std.debug.assert(self.canonical_layout_header == null);
+        try validateCanonicalLayoutLocked(guard, input);
+        try validateLayout(input);
+        const immediate_mask = try input.immediateMask();
+        const bind_group_mask = try input.bindGroupMask();
+        if (input.canonical_layout_header) |header| {
+            try header.retainLeaseLocked(guard);
+            self.canonical_layout_header = header;
+            self.group_layouts = input.groups;
+        } else {
+            const groups = try self.allocator.alloc(GroupLayout, input.groups.len);
+            var copied: usize = 0;
+            errdefer {
+                for (groups[0..copied]) |*group| group.deinit(self.allocator);
+                self.allocator.free(groups);
+            }
+            for (input.groups, groups) |source, *target| {
+                target.* = try source.clone(self.allocator);
+                copied += 1;
+            }
+            self.group_layouts = groups;
+        }
+        self.compatibility_token = input.compatibility_token;
+        self.immediate_mask = immediate_mask;
+        self.immediate_size = input.immediate_size;
+        self.immediate_stages = if (input.immediate_size == 0) 0 else vulkan.VK_SHADER_STAGE_ALL;
+        self.bind_group_mask = bind_group_mask;
+    }
+
+    /// Reports core payload liveness under its owner guard.
+    pub fn isAlive(self: *const Pipeline, guard: *const core.ObjectGuard) bool {
+        return self.header.isAlive(guard);
+    }
+
+    /// Reads the kind of a borrowed live payload.
+    pub fn queryKind(self: *const Pipeline, guard: *const core.ObjectGuard) Kind {
+        guard.assertOwns(self.header.tracking);
         return switch (self.state) {
             .render => .render,
             .compute => .compute,
         };
     }
 
-    /// Releases the Vulkan object and the bytes the object owns. The arena's
-    /// block stays, so a handle taken before this reads a destroyed object
-    /// rather than freed memory (`src/core/object.zig:130`).
-    pub fn destroy(self: *Pipeline, reason: core.DestroyReason) void {
+    /// Releases payload state once; the core header retains late alias counts.
+    /// The core invokes weak eviction before this callback.
+    pub fn destroy(
+        self: *Pipeline,
+        guard: *const core.ObjectGuard,
+        io: std.Io,
+        reason: core.DestroyReason,
+    ) void {
         _ = reason;
+        self.deinitPayloadLocked(guard, io);
+    }
+
+    /// Cleans only fields initialized by the factory, including rollback.
+    fn deinitPayloadLocked(
+        self: *Pipeline,
+        guard: *const core.ObjectGuard,
+        io: std.Io,
+    ) void {
+        guard.assertOwns(self.header.tracking);
         if (self.vk_pipeline) |handle| {
             self.destroy_pipeline(self.backend.device, handle, null);
             self.vk_pipeline = null;
@@ -328,17 +638,31 @@ pub const Pipeline = struct {
                 render.color_write_masks.deinit(allocator);
                 render.blend_enabled.deinit(allocator);
             },
-            .compute => {},
+            .compute => |*compute| {
+                if (compute.entry_point) |name| allocator.free(name);
+                compute.entry_point = null;
+            },
         }
         self.key.deinit(allocator);
+        const canonical_layout = self.canonical_layout_header;
+        if (canonical_layout == null) {
+            for (self.group_layouts) |group| {
+                var owned = group;
+                owned.deinit(allocator);
+            }
+            allocator.free(self.group_layouts);
+        }
+        self.group_layouts = &.{};
+        self.canonical_layout_header = null;
         self.header.label = "";
+        if (canonical_layout) |header| header.releaseLeaseLocked(guard, io);
     }
 };
 
-/// The device's pipeline caches: Dawn's `DeviceBase::Caches`
-/// (`src/dawn/native/Device.cpp:102`) narrowed to the two entries the pipeline
-/// path owns, plus the `VkPipelineCache` map that
-/// `GetOrCreatePipelineCacheImpl` (`vulkan/DeviceVk.cpp:275`) keeps.
+/// Weak pipeline index and bounded native driver-cache ownership.
+/// Init borrows the external stable list, never its own address. The store
+/// must stay stable from first pipeline publication through eager eviction.
+/// Retire/release every indexed payload before deinit; maps outlive callbacks.
 pub const PipelineStore = struct {
     /// How many `VkPipelineCache` handles the device keeps before one is
     /// evicted. Dawn creates one per pipeline key and never bounds the set
@@ -347,69 +671,95 @@ pub const PipelineStore = struct {
     pub const pipeline_cache_capacity = 32;
 
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    pipelines: cache.Cache(Pipeline),
+    objects: *core.ObjectList,
+    pipelines: cache.GuardedCache(Pipeline),
     pipeline_caches: cache.LruCache([]const u8, cache.PipelineCache, pipeline_cache_capacity) =
         .init(),
 
-    pub fn init(allocator: std.mem.Allocator) PipelineStore {
+    /// Creates empty caches bound to the caller's allocator and stable list.
+    pub fn init(gpa: std.mem.Allocator, objects: *core.ObjectList) PipelineStore {
         return .{
-            .allocator = allocator,
-            .pipelines = cache.Cache(Pipeline).init(allocator),
+            .allocator = gpa,
+            .objects = objects,
+            .pipelines = cache.GuardedCache(Pipeline).init(gpa, objects),
         };
     }
 
-    /// Reports rather than returning `void`, because every cache handle it
-    /// destroys goes through a dispatch field and `AGENTS.md` §3.1 makes a
-    /// field the loader left null a typed error. A refusal stops the sweep at
-    /// the handle it reached, which is what `Queue.deinit`
-    /// (`src/engine/queue.zig:260`-`:263`) already states for the same shape:
-    /// the entry point is bound once, so a missing one costs the caller the
-    /// rest of the teardown and not a trap.
-    pub fn deinit(self: *PipelineStore) cache.PipelineCache.DestroyError!void {
-        for (self.pipeline_caches.entries.items) |entry| {
+    /// Frees cache backing after all payload hooks have evicted. A live weak
+    /// entry refuses teardown unchanged. Missing native destroy dispatch keeps
+    /// remaining entries valid for retry; successfully destroyed keys are freed.
+    pub fn deinit(
+        self: *PipelineStore,
+        guard: *const core.ObjectGuard,
+    ) (cache.PipelineCache.DestroyError || error{ResourceInUse})!void {
+        guard.assertOwns(self.objects);
+        if (!self.pipelines.isEmpty(guard)) return error.ResourceInUse;
+        while (self.pipeline_caches.entries.items.len != 0) {
+            const entry = self.pipeline_caches.entries.items[
+                self.pipeline_caches.entries.items.len - 1
+            ];
             try entry.value.destroy();
+            const removed = self.pipeline_caches.remove(self.allocator, entry.key);
+            std.debug.assert(removed != null);
             self.allocator.free(entry.key);
         }
         self.pipeline_caches.deinit(self.allocator);
-        self.pipelines.deinit();
-        // A poisoned store is what a caller gets: the arena outlives it and
-        // destroys its pipelines through `Pipeline.allocator`, never through
-        // this value, so nothing reads the store again.
+        self.pipelines.deinit(guard);
         self.* = undefined;
     }
 
-    pub fn queryPipelineCount(self: *const PipelineStore) usize {
-        return self.pipelines.queryEntryCount();
+    /// Counts live weak entries, excluding retained retired headers.
+    pub fn queryPipelineCount(
+        self: *const PipelineStore,
+        guard: *const core.ObjectGuard,
+    ) usize {
+        guard.assertOwns(self.objects);
+        return self.pipelines.queryEntryCount(guard);
+    }
+
+    fn removePipelineLocked(
+        context: *anyopaque,
+        guard: *const core.ObjectGuard,
+        header: *core.Object,
+    ) void {
+        const self: *PipelineStore = @ptrCast(@alignCast(context));
+        guard.assertOwns(self.objects);
+        const object: *Pipeline = @fieldParentPtr("header", header);
+        self.pipelines.remove(guard, object);
     }
 };
 
-/// Creates a render pipeline, or returns the one an identical descriptor
-/// already made.
-///
-/// Dawn's order is `DeviceBase::CreateRenderPipeline`
-/// (`src/dawn/native/Device.cpp:2215`): look in the cache first, and only build
-/// when the lookup misses. That order is the acceptance of this milestone — the
-/// second identical descriptor must reach the same `VkPipeline`, and a
-/// different `PipelineLayout` must reach a different one.
-pub fn createRenderPipeline(
+/// Creates or acquires one render pipeline reference of the required class.
+/// Caller holds the device's guard through lookup, native creation and publish.
+/// Store and backend outlive payload retirement; returned handles do not own
+/// copies. Balance the class via resolveReference, including after retirement.
+/// Failure transfers no reference and leaves existing cached consumers intact.
+pub fn createRenderPipelineLocked(
+    gpa: std.mem.Allocator,
     io: std.Io,
+    guard: *const core.ObjectGuard,
     dev: *core.Device,
     store: *PipelineStore,
     backend: *const Backend,
     descriptor: RenderPipelineDescriptor,
+    result_reference_class: core.ReferenceClass,
 ) CreateError!core.Handle {
+    try checkFactoryLocked(gpa, guard, dev, store);
+    try validateCanonicalLayoutLocked(guard, descriptor.layout);
+    if (descriptor.compatible_render_pass == null) return error.CompatibleRenderPassMissing;
     try pipeline_render.validateRenderPipelineDescriptor(descriptor);
+    try validateLayout(descriptor.layout);
 
-    var key = try buildRenderPipelineKey(store.allocator, descriptor);
-    defer key.deinit(store.allocator);
+    var vertex = try prepareSpecialization(gpa, descriptor.vertex);
+    defer vertex.deinit(gpa);
+    var fragment = try prepareSpecialization(gpa, descriptor.fragment orelse .{});
+    defer fragment.deinit(gpa);
+    var key = try buildPreparedRenderKey(gpa, descriptor, &vertex, &fragment);
+    defer key.deinit(gpa);
 
-    store.mutex.lock(io) catch return error.Canceled;
-    defer store.mutex.unlock(io);
-    _ = store.pipelines.prune();
-
-    if (store.pipelines.find(&key)) |found| {
-        return handleFor(found);
+    if (store.pipelines.find(guard, &key)) |found| {
+        try acquireCachedReferenceLocked(guard, found, result_reference_class);
+        return dev.handleFor(guard, Pipeline, found, .pipeline);
     }
 
     // A seam that cannot destroy must not create: `Pipeline.destroy` returns
@@ -417,188 +767,232 @@ pub fn createRenderPipeline(
     // here, where `CreateError` carries it.
     const destroy_pipeline = try destroyEntryPoint(backend);
 
-    const object = try dev.create(Pipeline, .{
+    const object = try dev.create(gpa, guard, Pipeline, .{
         .kind = .pipeline,
         .label = descriptor.label,
+        .initial_reference = result_reference_class,
     });
-    const created = dev.handleFor(Pipeline, object, .pipeline);
-    // `destroy` reads `allocator`, `key`, `state` and `vk_pipeline`, and the
-    // arena leaves the bytes after the header undefined
-    // (`src/core/object.zig:332-334`), so each one is written before the first
-    // `try` that can fail below: `buildRenderState` writes `state` before its
-    // first allocation (`pipeline_render.zig:573`).
-    //
-    // The rollback destroy reports `HandleError`, and `created` names the object
-    // this function made and attached below, so neither `HandleKindMismatch`
-    // nor `StaleHandle` (`Device.resolveHeader`, `src/core/device.zig:177`)
-    // can fire here. Both are named rather than dropped: the caller is
-    // unwinding with the error that got it here, and that error is the one
-    // worth reporting, so any other member is a defect this path cannot cause
-    // and is reported as one.
-    errdefer dev.destroy(created) catch |rollback_error| switch (rollback_error) {
-        error.HandleKindMismatch,
-        error.StaleHandle,
-        => {},
-        else => std.debug.panic(
-            "pipeline: the render rollback destroy failed with an error the create path cannot cause",
-            .{},
-        ),
+    errdefer object.header.discardUnpublishedLocked(guard) catch unreachable;
+    object.* = .{
+        .header = object.header,
+        .backend = backend,
+        .destroy_pipeline = destroy_pipeline,
+        .allocator = gpa,
+        .vk_layout = descriptor.layout.handle,
     };
-    object.backend = backend;
-    object.destroy_pipeline = destroy_pipeline;
-    object.allocator = store.allocator;
-    object.key = CacheKey.init();
-    object.vk_pipeline = null;
-    object.vk_layout = descriptor.layout.handle;
-    // Every field `destroy` reads is written, so the object can enter the list.
-    // The attach is what makes the rollback above reachable.
-    object.header.attach();
+    errdefer object.deinitPayloadLocked(guard, io);
+    try object.initLayout(guard, descriptor.layout);
 
     var scratch: pipeline_render.Scratch = .{};
-    defer scratch.deinit(store.allocator);
+    defer scratch.deinit(gpa);
     try pipeline_render.buildRenderState(
-        store.allocator,
+        gpa,
         descriptor,
         &object.state,
         &scratch,
     );
 
+    var vertex_info = vertex.info();
+    var fragment_info = fragment.info();
+    if (vertex.map_entries.len != 0) scratch.stages[0].pSpecializationInfo = &vertex_info;
+    if (fragment.map_entries.len != 0) scratch.stages[1].pSpecializationInfo = &fragment_info;
+
     object.vk_pipeline = try pipeline_render.createGraphicsPipeline(
         backend,
-        descriptor.layout.handle,
-        descriptor,
         &scratch,
     );
 
-    // The handoff: the bytes move into the entry and `key` is left empty, so
-    // the `defer` above frees nothing on this path.
-    try store.pipelines.insert(&key, object);
-
-    return created;
+    // No fallible work follows insertion. Hooks only capture the stable store
+    // after successful construction, never an unpublished partial payload.
+    try store.pipelines.insert(guard, &key, object);
+    object.header.attach(guard, io);
+    object.header.setCacheRemovalLocked(guard, store, PipelineStore.removePipelineLocked);
+    return dev.handleFor(guard, Pipeline, object, .pipeline);
 }
 
-/// Creates a compute pipeline, or returns the one an identical descriptor
-/// already made.
-pub fn createComputePipeline(
+/// Creates or acquires one compute pipeline reference of the required class.
+/// Ownership, guard, backend lifetime and failure rules match the render factory.
+pub fn createComputePipelineLocked(
+    gpa: std.mem.Allocator,
     io: std.Io,
+    guard: *const core.ObjectGuard,
     dev: *core.Device,
     store: *PipelineStore,
     backend: *const Backend,
     descriptor: ComputePipelineDescriptor,
+    result_reference_class: core.ReferenceClass,
 ) CreateError!core.Handle {
+    try checkFactoryLocked(gpa, guard, dev, store);
+    try validateCanonicalLayoutLocked(guard, descriptor.layout);
     try pipeline_compute.validateComputePipelineDescriptor(descriptor);
+    try validateLayout(descriptor.layout);
 
-    var key = try buildComputePipelineKey(store.allocator, descriptor);
-    defer key.deinit(store.allocator);
+    var constants = try prepareCompute(gpa, descriptor);
+    defer constants.deinit(gpa);
+    var key = try buildPreparedComputeKey(gpa, descriptor, &constants);
+    defer key.deinit(gpa);
 
-    store.mutex.lock(io) catch return error.Canceled;
-    defer store.mutex.unlock(io);
-    _ = store.pipelines.prune();
-
-    if (store.pipelines.find(&key)) |found| {
-        return handleFor(found);
+    if (store.pipelines.find(guard, &key)) |found| {
+        try acquireCachedReferenceLocked(guard, found, result_reference_class);
+        return dev.handleFor(guard, Pipeline, found, .pipeline);
     }
 
     // The same entry point and the same reason as the render path above.
     const destroy_pipeline = try destroyEntryPoint(backend);
 
-    const object = try dev.create(Pipeline, .{
+    const object = try dev.create(gpa, guard, Pipeline, .{
         .kind = .pipeline,
         .label = descriptor.label,
+        .initial_reference = result_reference_class,
     });
-    const created = dev.handleFor(Pipeline, object, .pipeline);
-    // The same rollback and the same reason as the render path above. The set
-    // is matched with an `else`, so a member added to `HandleError` that this
-    // path cannot cause is a reported defect rather than a dropped failure.
-    errdefer dev.destroy(created) catch |rollback_error| switch (rollback_error) {
-        error.HandleKindMismatch,
-        error.StaleHandle,
-        => {},
-        else => std.debug.panic(
-            "pipeline: the compute rollback destroy failed with an error the create path cannot cause",
-            .{},
-        ),
+    errdefer object.header.discardUnpublishedLocked(guard) catch unreachable;
+    object.* = .{
+        .header = object.header,
+        .backend = backend,
+        .destroy_pipeline = destroy_pipeline,
+        .allocator = gpa,
+        .vk_layout = descriptor.layout.handle,
     };
-    object.backend = backend;
-    object.destroy_pipeline = destroy_pipeline;
-    object.allocator = store.allocator;
-    object.key = CacheKey.init();
-    object.vk_pipeline = null;
-    object.vk_layout = descriptor.layout.handle;
-    object.state = .{ .compute = .{ .entry_point = descriptor.compute.entry_point } };
-    // `state` is written, so `destroy` reads a tag and not arena fill, and the
-    // object can enter the list. The attach is what makes the rollback reachable.
-    object.header.attach();
+    errdefer object.deinitPayloadLocked(guard, io);
+    try object.initLayout(guard, descriptor.layout);
+    object.state.compute.entry_point = try gpa.dupeZ(u8, descriptor.compute.entry_point);
 
     // Upstream asks the device for a pipeline cache
     // (`GetOrCreatePipelineCacheImpl`, `vulkan/DeviceVk.cpp:275`) and passes its
     // handle (`vulkan/ComputePipelineVk.cpp:207`); the store's map holds none
     // until a create path asks for one, so the port passes `null`, which Vulkan
     // defines as "no cache", as the render path does (`pipeline_render.zig:970`).
+    var constants_info = constants.info();
     object.vk_pipeline = try pipeline_compute.createComputePipeline(
         backend,
-        descriptor.layout.handle,
+        if (constants.map_entries.len == 0) null else &constants_info,
         descriptor,
+        object.state.compute.entry_point.?,
         null,
     );
 
-    // The same handoff as the render path above: the bytes move into the
-    // entry and `key` is left empty, so the `defer` above frees nothing.
-    try store.pipelines.insert(&key, object);
-    return created;
+    try store.pipelines.insert(guard, &key, object);
+    object.header.attach(guard, io);
+    object.header.setCacheRemovalLocked(guard, store, PipelineStore.removePipelineLocked);
+    return dev.handleFor(guard, Pipeline, object, .pipeline);
 }
 
-/// The handle an arena object answers with. The kind byte is the one the arena
-/// recorded at creation, so a handle never names one object as another
-/// (`src/core/handle.zig:29`).
-fn handleFor(object: *Pipeline) core.Handle {
-    return .{ .ptr = @as(core.ObjectPtr, object), .kind = .pipeline };
+fn validateCanonicalLayoutLocked(
+    guard: *const core.ObjectGuard,
+    input: LayoutInput,
+) (core.ValidationError || core.ReferenceError)!void {
+    const header = input.canonical_layout_header orelse return;
+    if (header.tracking != guard.objects) return error.ResourceDeviceMismatch;
+    guard.assertOwns(header.tracking);
+    if (header.kind != .pipeline_layout) return error.HandleKindMismatch;
+    if (header.state != .alive or !header.isAlive(guard)) return error.ResourceDestroyed;
+}
+
+fn validateLayout(input: LayoutInput) (PipelineError || core.ValidationError)!void {
+    _ = try input.immediateMask();
+    _ = try input.bindGroupMask();
+    for (input.groups) |group| {
+        if (group.compatibility_token != input.compatibility_token)
+            return error.BindGroupLayoutMismatch;
+        // Canonical high factories check unchanged shader bindings against real owners.
+        if (group.has_external_texture and input.canonical_layout_header == null)
+            return error.ExternalTexturePipelineUnsupported;
+    }
+}
+
+fn checkFactoryLocked(
+    gpa: std.mem.Allocator,
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    store: *PipelineStore,
+) (core.CreateError || core.ReferenceError)!void {
+    guard.assertOwns(dev.borrow().objectList());
+    guard.assertOwns(store.objects);
+    if (store.objects != dev.borrow().objectList()) return error.ResourceDeviceMismatch;
+    try dev.arena.checkAllocator(guard, gpa);
+    if (store.allocator.ptr != gpa.ptr or store.allocator.vtable != gpa.vtable) {
+        return error.AllocatorMismatch;
+    }
+    if (store.objects.marked_destroyed) return error.ResourceDestroyed;
+}
+
+fn acquireCachedReferenceLocked(
+    guard: *const core.ObjectGuard,
+    object: *Pipeline,
+    class: core.ReferenceClass,
+) core.ReferenceError!void {
+    switch (class) {
+        .user => try object.header.acquireUserLocked(guard),
+        .lease => try object.header.retainLeaseLocked(guard),
+    }
 }
 
 /// The `VkPipeline` behind a handle. Dawn's `GetHandle`
 /// (`vulkan/RenderPipelineVk.cpp:1111`).
-pub fn vkPipeline(dev: *core.Device, target: core.Handle) CreateError!vulkan.VkPipeline {
-    const resolved = try dev.resolve(Pipeline, target);
+pub fn vkPipeline(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!vulkan.VkPipeline {
+    const resolved = try dev.resolve(guard, Pipeline, target);
     return resolved.vk_pipeline;
 }
 
 /// The `VkPipelineLayout` the pipeline was created with. Dawn's `GetVkLayout`
 /// (`vulkan/RenderPipelineVk.cpp:1116`, `vulkan/ComputePipelineVk.cpp:252`).
-pub fn vkLayout(dev: *core.Device, target: core.Handle) CreateError!vulkan.VkPipelineLayout {
-    const resolved = try dev.resolve(Pipeline, target);
+pub fn vkLayout(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!vulkan.VkPipelineLayout {
+    const resolved = try dev.resolve(guard, Pipeline, target);
     return resolved.vk_layout;
 }
 
 /// Which of the two a handle names. Dawn's `GetType`
 /// (`src/dawn/native/ComputePipeline.cpp:119`).
-pub fn queryKind(dev: *core.Device, target: core.Handle) CreateError!Kind {
-    const resolved = try dev.resolve(Pipeline, target);
-    return resolved.queryKind();
+pub fn queryKind(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!Kind {
+    const resolved = try dev.resolve(guard, Pipeline, target);
+    return resolved.queryKind(guard);
 }
 
-/// The render state, borrowed from the arena. The slices live until the
-/// pipeline is destroyed, which is what lets M18's replay read them without a
-/// copy.
-pub fn renderState(dev: *core.Device, target: core.Handle) CreateError!*const RenderState {
-    const resolved = try dev.resolve(Pipeline, target);
+/// Borrows render state only while the guard is held and payload remains live.
+pub fn renderState(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!*const RenderState {
+    const resolved = try dev.resolve(guard, Pipeline, target);
     return switch (resolved.state) {
         .render => |*render| render,
         .compute => error.StaleHandle,
     };
 }
 
-pub fn computeState(dev: *core.Device, target: core.Handle) CreateError!*const ComputeState {
-    const resolved = try dev.resolve(Pipeline, target);
+/// Borrows compute state only while the guard is held and payload remains live.
+pub fn computeState(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!*const ComputeState {
+    const resolved = try dev.resolve(guard, Pipeline, target);
     return switch (resolved.state) {
         .compute => |*compute| compute,
         .render => error.StaleHandle,
     };
 }
 
-/// The bytes the cache recorded for this pipeline, which is what the next
-/// descriptor is compared against.
-pub fn cacheKeyOf(dev: *core.Device, target: core.Handle) CreateError!*const CacheKey {
-    const resolved = try dev.resolve(Pipeline, target);
+/// Borrows key storage only while the guard is held and payload remains live.
+pub fn cacheKeyOf(
+    guard: *const core.ObjectGuard,
+    dev: *core.Device,
+    target: core.Handle,
+) CreateError!*const CacheKey {
+    const resolved = try dev.resolve(guard, Pipeline, target);
     return &resolved.key;
 }
 
@@ -611,15 +1005,39 @@ pub fn cacheKeyOf(dev: *core.Device, target: core.Handle) CreateError!*const Cac
 /// blend, depth-stencil, vertex attributes and buffers, the primitive tuple and
 /// multisample. The port writes exactly that order, so a key that differs
 /// anywhere differs in the bytes too.
+/// Nonempty overrides validate the authoritative SPIR-V bytes before encoding
+/// sorted SpecIds, scalar types and converted bits. Release the returned key
+/// with the same allocator. No partial key survives an error.
 pub fn buildRenderPipelineKey(
     allocator: std.mem.Allocator,
     descriptor: RenderPipelineDescriptor,
+) KeyError!CacheKey {
+    var vertex = try prepareSpecialization(allocator, descriptor.vertex);
+    defer vertex.deinit(allocator);
+    var fragment = try prepareSpecialization(allocator, descriptor.fragment orelse .{});
+    defer fragment.deinit(allocator);
+    return buildPreparedRenderKey(allocator, descriptor, &vertex, &fragment);
+}
+
+fn buildPreparedRenderKey(
+    allocator: std.mem.Allocator,
+    descriptor: RenderPipelineDescriptor,
+    vertex: *const specialization.Specialization,
+    fragment: *const specialization.Specialization,
 ) std.mem.Allocator.Error!CacheKey {
     var key = CacheKey.init();
     errdefer key.deinit(allocator);
 
     try key.appendKind(allocator, .render_pipeline);
-    try appendBaseKey(allocator, &key, descriptor.layout, descriptor.vertex, descriptor.fragment);
+    try appendBaseKey(
+        allocator,
+        &key,
+        descriptor.layout,
+        descriptor.vertex,
+        descriptor.fragment,
+        vertex,
+        fragment,
+    );
 
     for (descriptor.vertex_buffers) |buffer| {
         try key.appendEnum(allocator, buffer.step_mode);
@@ -654,6 +1072,11 @@ pub fn buildRenderPipelineKey(
         // `VkFormat` is a `c_uint` at this pin (`src/vulkan.zig:2866`), not an
         // enumeration, so the number itself is what the key records.
         try key.appendWord(allocator, target.format);
+        if (target.format == vulkan.VK_FORMAT_UNDEFINED) {
+            try key.appendWord(allocator, 0);
+            try key.appendWord(allocator, 0);
+            continue;
+        }
         try key.appendWord(allocator, target.write_mask);
         if (target.blend) |blend| {
             try key.appendWord(allocator, 1);
@@ -677,41 +1100,92 @@ pub fn buildRenderPipelineKey(
 /// (`src/dawn/native/Pipeline.cpp:398`) — layout, stage mask, and per
 /// stage the module, the entry point and the override constants. A compute
 /// pipeline has no other state, so the base key is the whole key.
+/// Validates compute metadata, effective workgroup size and selected limits before key creation.
 pub fn buildComputePipelineKey(
     allocator: std.mem.Allocator,
     descriptor: ComputePipelineDescriptor,
+) ComputeError!CacheKey {
+    var constants = try prepareCompute(allocator, descriptor);
+    defer constants.deinit(allocator);
+    return buildPreparedComputeKey(allocator, descriptor, &constants);
+}
+
+fn buildPreparedComputeKey(
+    allocator: std.mem.Allocator,
+    descriptor: ComputePipelineDescriptor,
+    constants: *const specialization.Specialization,
 ) std.mem.Allocator.Error!CacheKey {
     var key = CacheKey.init();
     errdefer key.deinit(allocator);
     try key.appendKind(allocator, .compute_pipeline);
-    try appendBaseKey(allocator, &key, descriptor.layout, descriptor.compute, null);
+    try appendBaseKey(
+        allocator,
+        &key,
+        descriptor.layout,
+        descriptor.compute,
+        null,
+        constants,
+        null,
+    );
     return key;
 }
 
-/// The layout, then the stages. Dawn records the layout first
-/// (`Pipeline.cpp:385`) and compares it first (`Pipeline.cpp:400`), so the two
-/// orders agree; the port keeps the first.
+/// Appends actual canonical owner identity or complete standalone raw definitions.
 fn appendBaseKey(
     allocator: std.mem.Allocator,
     key: *CacheKey,
     layout: LayoutInput,
     first: StageInput,
     second: ?StageInput,
+    first_constants: *const specialization.Specialization,
+    second_constants: ?*const specialization.Specialization,
 ) std.mem.Allocator.Error!void {
-    try key.appendBytes(allocator, layout.content_bytes);
+    if (layout.canonical_layout_header) |header| {
+        try key.appendWord(allocator, 1);
+        try key.appendWord(allocator, @intFromPtr(header));
+    } else {
+        try key.appendWord(allocator, 0);
+        try key.appendBytes(allocator, layout.content_bytes);
+        try key.appendWord(allocator, layout.immediate_size);
+        try key.appendWord(allocator, layout.compatibility_token);
+        try key.appendWord(allocator, layout.groups.len);
+        for (layout.groups) |group| {
+            try key.appendWord(allocator, group.compatibility_token);
+            try key.appendWord(allocator, group.combined_image_sampler_descriptor_count);
+            try key.appendWord(allocator, @intFromBool(group.has_external_texture));
+            try key.appendWord(allocator, group.bindings.len);
+            for (group.bindings) |binding| {
+                try key.appendWord(allocator, binding.binding);
+                try key.appendWord(allocator, binding.descriptorType);
+                try key.appendWord(allocator, binding.descriptorCount);
+                try key.appendWord(allocator, binding.stageFlags);
+                try key.appendWord(allocator, @intFromBool(binding.pImmutableSamplers != null));
+                if (binding.pImmutableSamplers != null) {
+                    for (binding.pImmutableSamplers[0..binding.descriptorCount]) |sampler| {
+                        try key.appendWord(
+                            allocator,
+                            if (sampler) |handle| @intFromPtr(handle) else 0,
+                        );
+                    }
+                }
+            }
+        }
+    }
     try key.appendWord(allocator, stageMask(first, second));
-    try appendStageKey(allocator, key, first);
-    if (second) |stage| try appendStageKey(allocator, key, stage);
+    try appendStageKey(allocator, key, first, first_constants);
+    if (second) |stage| try appendStageKey(allocator, key, stage, second_constants.?);
 }
 
 fn appendStageKey(
     allocator: std.mem.Allocator,
     key: *CacheKey,
     stage: StageInput,
+    constants: *const specialization.Specialization,
 ) std.mem.Allocator.Error!void {
     try key.appendEnum(allocator, stage.stage);
     try key.appendBytes(allocator, stage.entry_point);
     try key.appendBytes(allocator, stage.content_bytes);
+    try key.appendBytes(allocator, constants.canonical_bytes);
 }
 
 fn appendBlendKey(

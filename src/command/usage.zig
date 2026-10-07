@@ -17,14 +17,26 @@
 //! "determinism is a feature" (`AGENTS.md` §3) is the reason the hash is not
 //! there.
 //!
-//! It does not claim the WebGPU hazard-tracking rules are complete. Dawn's
-//! `SyncScopeUsageTracker` merges usages per sync scope; the port does the
-//! same merge and stops there, because the second half of the job — deciding
-//! which merge produces a barrier — belongs to the back end.
+//! It does not claim the WebGPU hazard-tracking rules are complete. Render
+//! scopes reject writable indirect buffers before replay's sanitization prepass.
+//! The back end owns barriers for the other merged usages.
 
 const std = @import("std");
 const commands = @import("commands.zig");
 const core_errors = @import("../core/errors.zig");
+const api = @import("../api/bitmask.zig");
+const core = @import("../core/root.zig");
+const attachment = @import("attachment_state.zig");
+const errors = @import("errors.zig");
+const constants = @import("constants.zig");
+
+const writable_buffer_usages = (api.BufferUsage{
+    .map_write = true,
+    .copy_dst = true,
+    .storage = true,
+    .query_resolve = true,
+    .texel_buffer = true,
+}).toFlags() | (1 << 31);
 
 /// How one buffer is used and by which stages
 /// (`src/dawn/native/PassResourceUsage.h:54-57`). The two fields are the
@@ -51,12 +63,12 @@ pub const TextureSyncInfo = struct {
     }
 };
 
-/// Texture usage inside a pass is tracked per subresource, so one field of the
-/// struct below is the storage Dawn gets from
-/// `SubresourceStorage<TextureSyncInfo>` (`PassResourceUsage.h:67-68`). A
-/// subresource is a mip level, one array layer and one aspect
-/// (`src/dawn/native/Subresource.h`).
+/// One texture subresource in the flat usage list. The texture reference keeps
+/// equal mip, layer, and aspect coordinates on different textures separate.
+/// Dawn stores these entries per texture in `SubresourceStorage<TextureSyncInfo>`
+/// (`PassResourceUsage.h:67-68`; `src/dawn/native/Subresource.h`).
 pub const TextureSubresourceSyncInfo = struct {
+    texture: commands.Ref,
     mip_level: u32 = 0,
     array_layer: u32 = 0,
     aspect: commands.TextureAspect = .undefined_,
@@ -86,6 +98,18 @@ pub const SyncScopeResourceUsage = struct {
 
     pub fn init(allocator: std.mem.Allocator) SyncScopeResourceUsage {
         return .{ .allocator = allocator };
+    }
+
+    pub fn validateIndirectReadonly(self: *const SyncScopeResourceUsage) errors.Error!void {
+        const buffer_count = self.buffers.items.len;
+        if (buffer_count != self.buffer_sync_infos.items.len) return error.CommandStreamTruncated;
+        if (buffer_count > constants.max_bundle_command_count) return error.CommandCountExhausted;
+        const indirect_usage = (api.BufferUsage{ .indirect = true }).toFlags();
+        for (self.buffer_sync_infos.items) |info| {
+            if (info.usage & indirect_usage != 0 and info.usage & writable_buffer_usages != 0) {
+                return error.IndirectBufferWrittenInRenderPass;
+            }
+        }
     }
 
     pub fn deinit(self: *SyncScopeResourceUsage) void {
@@ -135,8 +159,11 @@ pub fn writableTexturesInto(
         const texture = scope.textures.items[texture_index];
         var writable = false;
         for (scope.texture_sync_infos.items) |subresource| {
-            if (subresource.info.usage & writable_texture_usage_bit != 0) writable = true;
-            break;
+            if (subresource.texture != texture) continue;
+            if (subresource.info.usage & writable_texture_usage_bit != 0) {
+                writable = true;
+                break;
+            }
         }
         if (!writable) continue;
         var seen = false;
@@ -196,6 +223,7 @@ pub const RenderPassResourceUsage = struct {
     /// One entry per query set: whether each of its queries is available.
     query_availabilities: std.ArrayList(std.ArrayList(bool)) = .empty,
     uses_framebuffer_fetch: bool = false,
+    attachment_state: ?*attachment.CanonicalAttachmentState = null,
 
     pub fn init(allocator: std.mem.Allocator) RenderPassResourceUsage {
         return .{
@@ -204,14 +232,37 @@ pub const RenderPassResourceUsage = struct {
         };
     }
 
-    pub fn deinit(self: *RenderPassResourceUsage) void {
+    /// Acquires one lease without consuming the producer's user alias.
+    pub fn retainAttachmentLocked(
+        self: *RenderPassResourceUsage,
+        guard: *const core.ObjectGuard,
+        state: *attachment.CanonicalAttachmentState,
+    ) (core.ReferenceError || error{HandleKindMismatch})!void {
+        std.debug.assert(self.attachment_state == null);
+        std.debug.assert(guard.held);
+        if (state.header.tracking != guard.objects) return error.ResourceDeviceMismatch;
+        guard.assertOwns(state.header.tracking);
+        if (state.header.kind != .attachment_state) return error.HandleKindMismatch;
+        if (state.header.state != .alive or !state.header.node.linked) {
+            return error.ResourceDestroyed;
+        }
+        try state.header.retainLeaseLocked(guard);
+        self.attachment_state = state;
+    }
+
+    pub fn deinit(self: *RenderPassResourceUsage, io: std.Io, guard: *const core.ObjectGuard) void {
+        std.debug.assert(guard.held);
+        if (self.attachment_state) |state| guard.assertOwns(state.header.tracking);
         for (self.query_availabilities.items) |*availability| {
             availability.deinit(self.allocator);
         }
         self.query_availabilities.deinit(self.allocator);
         self.query_sets.deinit(self.allocator);
         self.scope.deinit();
-        self.* = undefined;
+        const state = self.attachment_state;
+        self.attachment_state = null;
+        if (state) |owned| owned.header.releaseLeaseLocked(guard, io);
+        self.* = RenderPassResourceUsage.init(self.allocator);
     }
 };
 
@@ -229,8 +280,12 @@ pub const CommandBufferResourceUsage = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *CommandBufferResourceUsage) void {
-        for (self.render_passes.items) |*usage| usage.deinit();
+    pub fn deinit(
+        self: *CommandBufferResourceUsage,
+        io: std.Io,
+        guard: *const core.ObjectGuard,
+    ) void {
+        for (self.render_passes.items) |*usage| usage.deinit(io, guard);
         self.render_passes.deinit(self.allocator);
         for (self.compute_passes.items) |*usage| usage.deinit();
         self.compute_passes.deinit(self.allocator);
@@ -300,12 +355,15 @@ pub const SyncScopeUsageTracker = struct {
         }
         if (!known) try self.scope.textures.append(self.allocator, texture);
         for (self.scope.texture_sync_infos.items) |*entry| {
-            if (entry.subresourceMatches(mip_level, array_layer, aspect)) {
+            if (entry.texture == texture and
+                entry.subresourceMatches(mip_level, array_layer, aspect))
+            {
                 entry.info.merge(info);
                 return;
             }
         }
         try self.scope.texture_sync_infos.append(self.allocator, .{
+            .texture = texture,
             .mip_level = mip_level,
             .array_layer = array_layer,
             .aspect = aspect,
@@ -316,23 +374,13 @@ pub const SyncScopeUsageTracker = struct {
     /// Dawn's `MergeTextureUsage` (`PassResourceUsageTracker.cpp:88-105`).
     pub fn mergeTextureUsage(
         self: *SyncScopeUsageTracker,
+        texture: commands.Ref,
         mip_level: u32,
         array_layer: u32,
         aspect: commands.TextureAspect,
         info: TextureSyncInfo,
     ) std.mem.Allocator.Error!void {
-        for (self.scope.texture_sync_infos.items) |*entry| {
-            if (entry.subresourceMatches(mip_level, array_layer, aspect)) {
-                entry.info.merge(info);
-                return;
-            }
-        }
-        try self.scope.texture_sync_infos.append(self.allocator, .{
-            .mip_level = mip_level,
-            .array_layer = array_layer,
-            .aspect = aspect,
-            .info = info,
-        });
+        try self.textureRangeUsedAs(texture, mip_level, array_layer, aspect, info);
     }
 
     /// Dawn's `SetUsedResourceTable` (`PassResourceUsageTracker.cpp:229-232`).
@@ -431,10 +479,14 @@ pub const RenderPassResourceUsageTracker = struct {
         };
     }
 
-    pub fn deinit(self: *RenderPassResourceUsageTracker) void {
+    pub fn deinit(
+        self: *RenderPassResourceUsageTracker,
+        io: std.Io,
+        guard: *const core.ObjectGuard,
+    ) void {
         self.sync_scope.deinit();
-        self.usage.deinit();
-        self.* = undefined;
+        self.usage.deinit(io, guard);
+        self.* = RenderPassResourceUsageTracker.init(self.allocator);
     }
 
     pub fn bufferUsedAs(
@@ -458,12 +510,13 @@ pub const RenderPassResourceUsageTracker = struct {
 
     pub fn mergeTextureUsage(
         self: *RenderPassResourceUsageTracker,
+        texture: commands.Ref,
         mip_level: u32,
         array_layer: u32,
         aspect: commands.TextureAspect,
         info: TextureSyncInfo,
     ) std.mem.Allocator.Error!void {
-        return self.sync_scope.mergeTextureUsage(mip_level, array_layer, aspect, info);
+        return self.sync_scope.mergeTextureUsage(texture, mip_level, array_layer, aspect, info);
     }
 
     pub fn setUsedResourceTable(self: *RenderPassResourceUsageTracker, table: commands.Ref) void {
@@ -483,7 +536,8 @@ pub const RenderPassResourceUsageTracker = struct {
         options: BindGroupResources,
     ) std.mem.Allocator.Error!void {
         for (options.buffers) |entry| {
-            _ = try self.bufferUsedAs(entry.buffer, entry.usage);
+            const index = try self.bufferUsedAs(entry.buffer, entry.usage);
+            self.sync_scope.scope.buffer_sync_infos.items[index].shader_stages |= entry.shader_stages;
         }
         for (options.textures) |entry| {
             try self.textureRangeUsedAs(
@@ -507,11 +561,10 @@ pub const RenderPassResourceUsageTracker = struct {
     /// holds at most `Limits` queries. The port's own budget note is that
     /// `Limits` bounds this list, not the pass's draw count.
     ///
-    /// The declared set names the two sets the body draws on and nothing
-    /// more. The bound reports `LimitExceeded`, which is a member of
-    /// `core.ValidationError` (`core/errors.zig:29`), and the three appends
-    /// fail with `std.mem.Allocator.Error`; `core.Error` would swallow the
-    /// device-lost members the body cannot return.
+    /// The bound reports `LimitExceeded`, a member of `core.ValidationError`.
+    /// List reservations and appends can return `std.mem.Allocator.Error`.
+    /// Reserve both outer lists before publishing either entry, because their
+    /// indices must name the same query set after allocation failure.
     pub fn trackQueryAvailability(
         self: *RenderPassResourceUsageTracker,
         query_set: commands.Ref,
@@ -523,8 +576,10 @@ pub const RenderPassResourceUsageTracker = struct {
             if (set == query_set) existing = &self.usage.query_availabilities.items[index];
         }
         if (existing == null) {
-            try self.usage.query_sets.append(self.allocator, query_set);
-            try self.usage.query_availabilities.append(self.allocator, .empty);
+            try self.usage.query_sets.ensureUnusedCapacity(self.allocator, 1);
+            try self.usage.query_availabilities.ensureUnusedCapacity(self.allocator, 1);
+            self.usage.query_sets.appendAssumeCapacity(query_set);
+            self.usage.query_availabilities.appendAssumeCapacity(.empty);
             existing = &self.usage.query_availabilities.items[self.usage.query_availabilities.items.len - 1];
         }
         var target = existing.?;
@@ -552,12 +607,8 @@ pub const RenderPassResourceUsageTracker = struct {
         out.query_sets = self.usage.query_sets;
         out.query_availabilities = self.usage.query_availabilities;
         out.uses_framebuffer_fetch = self.usage.uses_framebuffer_fetch;
-        // The two query lists moved into `out`, so the source empties them
-        // before its own `deinit`. That call then releases the old scope and
-        // two empty arrays, and touches nothing `out` now owns.
-        self.usage.query_sets = .empty;
-        self.usage.query_availabilities = .empty;
-        self.usage.deinit();
+        out.attachment_state = self.usage.attachment_state;
+        self.usage.scope.deinit();
         self.usage = RenderPassResourceUsage.init(self.allocator);
         return out;
     }
@@ -568,6 +619,9 @@ pub const RenderPassResourceUsageTracker = struct {
 pub const BindGroupBuffer = struct {
     buffer: commands.Ref,
     usage: u32,
+    /// API ShaderStage flags. Render callers without resolved visibility use
+    /// both graphics stages; compute scopes select their own compute stage.
+    shader_stages: u32 = (api.ShaderStage{ .vertex = true, .fragment = true }).toFlags(),
 };
 
 /// One texture binding of a bind group, as the caller resolved it.
@@ -607,4 +661,191 @@ fn appendUnique(
         if (existing == value) return;
     }
     try list.append(allocator, value);
+}
+
+test "query availability keeps query lists paired after allocation failure" {
+    var mutex: std.Io.Mutex = .init;
+    var callback_context: u8 = 0;
+    var device = core.Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = unexpectedUsageError,
+    });
+    var guard = core.ObjectGuard.lockUncancelable(std.testing.io, device.borrow().objects);
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var query_set: u8 = 0;
+    for (0..4) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        var tracker = RenderPassResourceUsageTracker.init(failing.allocator());
+        defer tracker.deinit(std.testing.io, &guard);
+        tracker.trackQueryAvailability(&query_set, 3) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(
+                tracker.usage.query_sets.items.len,
+                tracker.usage.query_availabilities.items.len,
+            );
+            continue;
+        };
+        try std.testing.expectEqual(@as(usize, 1), tracker.usage.query_sets.items.len);
+        try std.testing.expectEqual(@as(usize, 1), tracker.usage.query_availabilities.items.len);
+        try std.testing.expectEqualSlices(
+            bool,
+            &.{ false, false, false },
+            tracker.usage.query_availabilities.items[0].items,
+        );
+        tracker.markQueryAvailable(&query_set, 1);
+        try tracker.trackQueryAvailability(&query_set, 3);
+        try std.testing.expect(tracker.usage.query_availabilities.items[0].items[1]);
+    }
+}
+
+test "texture usage merges only matching texture subresources" {
+    var first_texture: u8 = 0;
+    var second_texture: u8 = 0;
+    var tracker = SyncScopeUsageTracker.init(std.testing.allocator);
+    defer tracker.deinit();
+    try tracker.textureRangeUsedAs(&first_texture, 2, 3, .all, .{
+        .usage = 1,
+        .shader_stages = 1,
+    });
+    try tracker.textureRangeUsedAs(&second_texture, 2, 3, .all, .{
+        .usage = 2,
+        .shader_stages = 2,
+    });
+    try tracker.textureRangeUsedAs(&first_texture, 2, 3, .all, .{
+        .usage = 4,
+        .shader_stages = 4,
+    });
+    try std.testing.expectEqual(@as(usize, 2), tracker.scope.textures.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tracker.scope.texture_sync_infos.items.len);
+    const first = tracker.scope.texture_sync_infos.items[0];
+    const second = tracker.scope.texture_sync_infos.items[1];
+    try std.testing.expectEqual(@as(commands.Ref, &first_texture), first.texture);
+    try std.testing.expectEqual(@as(commands.Ref, &second_texture), second.texture);
+    try std.testing.expectEqual(@as(u32, 5), first.info.usage);
+    try std.testing.expectEqual(@as(u32, 5), first.info.shader_stages);
+    try std.testing.expectEqual(@as(u32, 2), second.info.usage);
+    try std.testing.expectEqual(@as(u32, 2), second.info.shader_stages);
+}
+
+test "writable texture collection uses each subresource texture identity" {
+    var read_texture: u8 = 0;
+    var write_texture: u8 = 0;
+    var tracker = SyncScopeUsageTracker.init(std.testing.allocator);
+    defer tracker.deinit();
+    try tracker.textureRangeUsedAs(&read_texture, 0, 0, .all, .{ .usage = 1 });
+    try tracker.textureRangeUsedAs(&write_texture, 0, 0, .all, .{
+        .usage = writable_texture_usage_bit,
+    });
+    try tracker.textureRangeUsedAs(&write_texture, 1, 0, .all, .{
+        .usage = writable_texture_usage_bit,
+    });
+    var writable: std.ArrayList(commands.Ref) = .empty;
+    defer writable.deinit(std.testing.allocator);
+    try writableTexturesInto(std.testing.allocator, &tracker.scope, &writable);
+    try std.testing.expectEqual(@as(usize, 1), writable.items.len);
+    try std.testing.expectEqual(@as(commands.Ref, &write_texture), writable.items[0]);
+}
+
+fn unexpectedUsageError(
+    _: std.mem.Allocator,
+    _: std.Io,
+    _: *anyopaque,
+    _: core.ErrorView,
+) void {
+    @panic("unexpected uncaptured error");
+}
+
+fn createUsageAttachment(
+    device: *core.Device,
+    guard: *const core.ObjectGuard,
+) !*attachment.CanonicalAttachmentState {
+    const state = try device.create(std.testing.allocator, guard, attachment.CanonicalAttachmentState, .{
+        .kind = .attachment_state,
+        .initial_reference = .user,
+    });
+    state.value = .{};
+    state.cache_hash = 0;
+    state.cache_next = null;
+    state.header.attach(guard, std.testing.io);
+    return state;
+}
+
+test "render usage moves exactly one canonical attachment lease" {
+    var mutex: std.Io.Mutex = .init;
+    var callback_context: u8 = 0;
+    var device = core.Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = unexpectedUsageError,
+    });
+    var guard = core.ObjectGuard.lockUncancelable(std.testing.io, device.borrow().objects);
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    const state = try createUsageAttachment(&device, &guard);
+    var tracker = RenderPassResourceUsageTracker.init(std.testing.allocator);
+    defer tracker.deinit(std.testing.io, &guard);
+    try tracker.usage.retainAttachmentLocked(&guard, state);
+    try std.testing.expectEqual(@as(u32, 2), state.header.reference_count);
+    try state.header.releaseUserLocked(&guard, std.testing.io);
+    var moved = tracker.acquireResourceUsage();
+    defer moved.deinit(std.testing.io, &guard);
+    try std.testing.expect(tracker.usage.attachment_state == null);
+    try std.testing.expectEqual(state, moved.attachment_state.?);
+    try std.testing.expectEqual(@as(u32, 1), state.header.reference_count);
+    tracker.deinit(std.testing.io, &guard);
+    try std.testing.expect(state.header.isAlive(&guard));
+    try std.testing.expectError(error.ResourceInUse, device.deinit(std.testing.allocator, &guard));
+    moved.deinit(std.testing.io, &guard);
+    try std.testing.expectEqual(@as(u32, 0), state.header.reference_count);
+    try std.testing.expectEqual(@as(usize, 0), device.arena.queryTrackedCount(&guard));
+}
+
+test "attachment lease refusals leave the ownership slot and counts unchanged" {
+    var mutex: std.Io.Mutex = .init;
+    var foreign_mutex: std.Io.Mutex = .init;
+    var callback_context: u8 = 0;
+    var device = core.Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = unexpectedUsageError,
+    });
+    var foreign = core.Device.init(std.testing.allocator, .{
+        .object_mutex = &foreign_mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = unexpectedUsageError,
+    });
+    var guard = core.ObjectGuard.lockUncancelable(std.testing.io, device.borrow().objects);
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var foreign_guard = core.ObjectGuard.lockUncancelable(std.testing.io, foreign.borrow().objects);
+    defer foreign_guard.unlock(std.testing.io);
+    defer foreign.deinit(std.testing.allocator, &foreign_guard) catch @panic("references leaked");
+    const state = try createUsageAttachment(&device, &guard);
+    defer state.header.releaseUserLocked(&guard, std.testing.io) catch @panic("alias leaked");
+    var pass_usage = RenderPassResourceUsage.init(std.testing.allocator);
+    defer pass_usage.deinit(std.testing.io, &guard);
+    try std.testing.expectError(
+        error.ResourceDeviceMismatch,
+        pass_usage.retainAttachmentLocked(&foreign_guard, state),
+    );
+    try std.testing.expect(pass_usage.attachment_state == null);
+    try std.testing.expectEqual(@as(u32, 1), state.header.reference_count);
+    device.arena.objects.total_reference_count = std.math.maxInt(u64);
+    const retain_result = pass_usage.retainAttachmentLocked(&guard, state);
+    device.arena.objects.total_reference_count = 1;
+    try std.testing.expectError(error.ReferenceCountOverflow, retain_result);
+    try std.testing.expect(pass_usage.attachment_state == null);
+    try std.testing.expectEqual(@as(u32, 1), state.header.reference_count);
+    device.retirePayloadsLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectError(
+        error.ResourceDestroyed,
+        pass_usage.retainAttachmentLocked(&guard, state),
+    );
+    try std.testing.expect(pass_usage.attachment_state == null);
+    try std.testing.expectEqual(@as(u32, 1), state.header.reference_count);
 }

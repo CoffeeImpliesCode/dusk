@@ -1,12 +1,11 @@
-//! The handle, and the one byte that says what it points at.
+//! Borrowed object handles and the immutable canonical device locator.
 //!
-//! **What this file is.** `docs/30-port-design.md` §1.1 fixes a handle as a
-//! pointer into the device arena plus one byte of kind.
-//!
-//! **What this file does not claim.** It does not claim the handle is safe
-//! after the device is destroyed. The arena owns the memory, so a stale handle
-//! reads defined memory until `Device.deinit`, and it dangles after. §1.1 says
-//! the model does not cover that case.
+//! Handle copies and CoreDeviceBorrow copies acquire no reference. Payload
+//! retirement preserves retained headers; final core Device.deinit invalidates
+//! all pointers. A caller must hold a real owned alias/lease while borrowing
+//! identity, and ObjectGuard while resolving or reading payload/header state.
+
+const object = @import("object.zig");
 
 /// The alignment every handle pointer carries.
 ///
@@ -45,6 +44,15 @@ pub const Handle = struct {
         texture_view,
         sampler,
         query_set,
+        shader_module,
+        bind_group_layout,
+        pipeline_layout,
+        bind_group,
+        native_pipeline,
+        native_buffer,
+        attachment_state,
+        render_bundle,
+        external_texture,
     };
 };
 
@@ -53,3 +61,21 @@ pub const Handle = struct {
 pub fn kindName(kind: Handle.Kind) []const u8 {
     return @tagName(kind);
 }
+
+/// Borrows the list at its final stable address, without another header or
+/// allocation. High owner metadata is bound once before resource publication.
+/// Locating that owner grants no payload access or host lifetime pin by itself.
+pub const CoreDeviceBorrow = struct {
+    objects: *object.ObjectList,
+
+    /// The immutable lock/ownership locator, valid through final core deinit.
+    pub fn objectList(self: CoreDeviceBorrow) *object.ObjectList {
+        return self.objects;
+    }
+
+    /// The once-bound high owner, or null for standalone core. Read only after
+    /// binding/resource publication; the caller must then obtain its host pin.
+    pub fn highOwner(self: CoreDeviceBorrow) ?*anyopaque {
+        return self.objects.high_owner;
+    }
+};

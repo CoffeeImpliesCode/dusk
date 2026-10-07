@@ -31,7 +31,7 @@ const Record = struct {
     completed_count: std.atomic.Value(usize) = .init(0),
 };
 
-fn runTask(context: *anyopaque) void {
+fn runTask(_: std.Io, context: *anyopaque) void {
     const slot: *TaskSlot = @ptrCast(@alignCast(context));
 
     slot.record.runner_thread_ids[slot.index] = std.Thread.getCurrentId();
@@ -109,4 +109,135 @@ test "test-worker-pool" {
         error.PoolShutDown,
         platform.WorkerPool.postTask(io, &pool, .{ .run = runTask, .context = &task_slots[0] }),
     );
+}
+
+const ShutdownTask = struct {
+    runs: usize = 0,
+
+    fn run(_: std.Io, context: *anyopaque) void {
+        const task: *ShutdownTask = @ptrCast(@alignCast(context));
+        task.runs += 1;
+    }
+};
+
+const ShutdownBlocker = struct {
+    started: platform.CompletionEvent = .{},
+    release: platform.CompletionEvent = .{},
+    runs: usize = 0,
+
+    fn run(io: std.Io, context: *anyopaque) void {
+        const blocker: *ShutdownBlocker = @ptrCast(@alignCast(context));
+        blocker.runs += 1;
+        platform.CompletionEvent.signal(io, &blocker.started);
+        platform.CompletionEvent.wait(io, &blocker.release) catch
+            @panic("shutdown blocker wait canceled");
+    }
+};
+
+const ShutdownJoiner = struct {
+    pool: *platform.WorkerPool,
+    started: platform.CompletionEvent = .{},
+
+    fn run(io: std.Io, joiner: *ShutdownJoiner) void {
+        platform.CompletionEvent.signal(io, &joiner.started);
+        platform.WorkerPool.join(io, joiner.pool);
+    }
+};
+
+test "worker shutdown drains every accepted borrowed context" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // All contexts outlive both pool shutdown and the joiner thread.
+    var blocker: ShutdownBlocker = .{};
+    var sentinel: ShutdownTask = .{};
+    var probes: [platform.WorkerPool.max_queued_task_count - 1]ShutdownTask =
+        @splat(.{});
+    var rejected: ShutdownTask = .{};
+    var pool: platform.WorkerPool = undefined;
+    try platform.WorkerPool.init(io, &pool, .{ .worker_count = 1 });
+    var joined = false;
+    defer if (!joined) platform.WorkerPool.deinit(io, &pool);
+    defer platform.CompletionEvent.signal(io, &blocker.release);
+
+    try platform.WorkerPool.postTask(io, &pool, .{
+        .run = ShutdownBlocker.run,
+        .context = &blocker,
+    });
+    try platform.CompletionEvent.waitTimeout(io, &blocker.started, wait_timeout_ns);
+    try platform.WorkerPool.postTask(io, &pool, .{
+        .run = ShutdownTask.run,
+        .context = &sentinel,
+    });
+
+    var joiner: ShutdownJoiner = .{ .pool = &pool };
+    const joiner_thread = try std.Thread.spawn(.{}, ShutdownJoiner.run, .{ io, &joiner });
+    defer if (!joined) {
+        platform.CompletionEvent.signal(io, &blocker.release);
+        joiner_thread.join();
+        joined = true;
+    };
+    try platform.CompletionEvent.waitTimeout(io, &joiner.started, wait_timeout_ns);
+
+    // A started joiner does not prove shutdown took the pool lock. Only a
+    // rejected post proves that; keep every accepted probe in a stable slot.
+    // A full queue is retried within the bound, never treated as shutdown.
+    var accepted_probe_count: usize = 0;
+    var saw_shutdown = false;
+    const max_post_probes = 1 << 24;
+    for (0..max_post_probes) |_| {
+        const context = if (accepted_probe_count < probes.len)
+            &probes[accepted_probe_count]
+        else
+            &rejected;
+        platform.WorkerPool.postTask(io, &pool, .{
+            .run = ShutdownTask.run,
+            .context = context,
+        }) catch |err| {
+            switch (err) {
+                error.PoolShutDown => {
+                    saw_shutdown = true;
+                    break;
+                },
+                error.TaskQueueFull => {},
+                else => return err,
+            }
+            std.atomic.spinLoopHint();
+            continue;
+        };
+        // The blocked sole worker leaves room for precisely probes.len tasks.
+        std.debug.assert(accepted_probe_count < probes.len);
+        accepted_probe_count += 1;
+    }
+
+    // Release even on a failed probe assertion, then inspect only after join.
+    platform.CompletionEvent.signal(io, &blocker.release);
+    joiner_thread.join();
+    joined = true;
+    try std.testing.expect(saw_shutdown);
+    try std.testing.expectEqual(@as(usize, 1), blocker.runs);
+    try std.testing.expectEqual(@as(usize, 1), sentinel.runs);
+    for (probes[0..accepted_probe_count]) |probe| {
+        try std.testing.expectEqual(@as(usize, 1), probe.runs);
+    }
+    for (probes[accepted_probe_count..]) |probe| {
+        try std.testing.expectEqual(@as(usize, 0), probe.runs);
+    }
+    try std.testing.expectEqual(@as(usize, 0), rejected.runs);
+
+    const counts = platform.WorkerPool.counts(io, &pool);
+    try std.testing.expectEqual(2 + accepted_probe_count, counts.posted_task_count);
+    try std.testing.expectEqual(counts.posted_task_count, counts.completed_task_count);
+    try std.testing.expectError(error.PoolShutDown, platform.WorkerPool.postTask(io, &pool, .{
+        .run = ShutdownTask.run,
+        .context = &rejected,
+    }));
+    // Rejection retains caller ownership: the caller may still run its context.
+    try std.testing.expectEqual(@as(usize, 0), rejected.runs);
+    ShutdownTask.run(io, &rejected);
+    try std.testing.expectEqual(@as(usize, 1), rejected.runs);
+    const after_rejection = platform.WorkerPool.counts(io, &pool);
+    try std.testing.expectEqual(counts.posted_task_count, after_rejection.posted_task_count);
+    try std.testing.expectEqual(counts.completed_task_count, after_rejection.completed_task_count);
 }

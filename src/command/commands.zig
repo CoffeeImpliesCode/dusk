@@ -1,4 +1,4 @@
-//! The 38-value command tag enum, the payload of each tag, and the two
+//! The 40-value command tag enum, the payload of each tag, and the two
 //! exhaustive switches over them.
 //!
 //! **What this file is.** The port of `src/dawn/native/Commands.h` and the two
@@ -15,18 +15,18 @@
 //! What the port does keep is the *framing*: tag, aligned payload, and a
 //! counted run behind `additional_data` for the six variable-length tags.
 //!
-//! It does not claim `Ref<T>`'s reference counting. Dawn's `Ref<T>` keeps an
-//! object alive while a command buffer names it
-//! (`src/dawn/native/CommandAllocator.h:82-83` records the problem). The port's
-//! arena owns every object until the device is destroyed
-//! (`docs/10-architecture.md`, "Object model"), so a payload holds a pointer
-//! into the arena and nothing else. The queue ordering that keeps a command
-//! buffer from outliving its device is M18's rule.
+//! Ordinary resource references are borrowed, not retained by command storage.
+//! The caller keeps each payload alive through native admission and replay.
+//! Arena storage can survive a destroyed payload and does not extend its lifetime.
+//! Native admission validates provenance and retains roots through submission.
+//! Canonical attachment pointers borrow the containing pass or bundle usage lease.
 
 const std = @import("std");
 const allocator_mod = @import("allocator.zig");
 const constants = @import("constants.zig");
 const errors = @import("errors.zig");
+const attachment = @import("attachment_state.zig");
+const browser_copy = @import("browser_copy.zig");
 
 // --- the recorded value types ------------------------------------------------
 //
@@ -57,9 +57,10 @@ pub const TextureDimension = enum(u32) { undefined_ = 0, _1d = 1, _2d = 2, _3d =
 /// `kQuerySetIndexUndefinedTyped` (`src/dawn/native/Commands.h:101-102`).
 pub const undefined_query_index: u32 = 0xFFFF_FFFF;
 
-/// A pointer into the device arena. One type for every object a command
-/// names: the tag fixes the pointee, so the payload cannot be read as the
-/// wrong kind of object. See the file header for why there is no refcount.
+/// A borrowed resource pointer. Native admission validates its device, kind and liveness.
+/// Pipeline references identify the exact high pipeline header, never its low native pipeline.
+/// Bundle references identify the actual core bundle header, not a host value or payload address.
+/// Copying this pointer does not retain its payload. Keep the resource alive through replay.
 pub const Ref = ?*anyopaque;
 
 /// An RGBA clear or blend value. `dawn.json` "color".
@@ -71,19 +72,23 @@ pub const Extent3D = struct { width: u32, height: u32, depth_or_array_layers: u3
 /// A position in texels or array layers. `dawn.json` "origin 3d".
 pub const Origin3D = struct { x: u32, y: u32, z: u32 };
 
+pub const BrowserCopyOptions = browser_copy.Options;
+pub const BrowserCopyInput = browser_copy.Input;
+pub const AlphaMode = browser_copy.AlphaMode;
+pub const Origin2D = browser_copy.Origin2D;
+pub const Extent2D = browser_copy.Extent2D;
+
 // --- the tag enum ------------------------------------------------------------
 
-/// The command tags, in Dawn's order (`src/dawn/native/Commands.h:55-94`).
+/// Dawn's 38 command tags followed by two browser-copy tags.
 ///
 /// The order is by kind, not by stream position. A pass's commands land in
 /// whatever order the encoder emitted them, so nothing may depend on a tag's
 /// value being near its neighbours.
 ///
-/// The wire values *are* Dawn's, because the enum is written in the same
-/// order and the stream stores the number. That is a convenience, not the
-/// compatibility claim the file header rules out: a version of Dawn that
-/// inserted a tag would renumber this enum, and `docs/50-verification.md` owns
-/// any fixture that would catch it.
+/// The first 38 values preserve Dawn's order (`src/dawn/native/Commands.h:55-94`).
+/// Browser-copy tags append to that range without renumbering existing commands.
+/// This preserves tag numbers, not the wire compatibility the file header rules out.
 pub const Tag = enum(u32) {
     begin_compute_pass,
     begin_occlusion_query,
@@ -123,15 +128,16 @@ pub const Tag = enum(u32) {
     set_resource_table,
     write_buffer,
     write_timestamp,
+    copy_texture_for_browser,
+    copy_external_texture_for_browser,
 };
 
-/// How many tags the enum has. Dawn has 38 (`Commands.h:55-94`); the count is a
-/// number in the file so `test/command_stream.zig` can assert it and a tag
-/// added upstream cannot pass unnoticed.
+/// Dawn's 38 tags plus two fixed browser-copy commands.
+/// The count is checked here and in `test/command_stream.zig`.
 pub const tag_count: usize = @typeInfo(Tag).@"enum".fields.len;
 
 comptime {
-    if (tag_count != 38) @compileError("the command tag count moved from Dawn's 38");
+    if (tag_count != 40) @compileError("the command tag count moved from 40");
     // The two sentinels live above every real tag, so a raw id can tell them
     // apart without a second domain (`CommandAllocator.h:91-92`).
     if (constants.end_of_block <= tag_count - 1) @compileError("the sentinels must outrank every tag");
@@ -249,7 +255,8 @@ pub const BeginOcclusionQueryCmd = struct {
 };
 
 pub const BeginRenderPassCmd = struct {
-    attachment_state: Ref = null,
+    /// Borrows the containing render-pass usage's canonical attachment lease.
+    attachment_state: *attachment.CanonicalAttachmentState,
     // The element type is spelled out because an inferred array literal leaves
     // the repeat's operand untyped, and an untyped `.{}` is an anonymous empty
     // struct that does not coerce to the attachment. Naming the element type
@@ -299,6 +306,31 @@ pub const CopyTextureToTextureCmd = struct {
     source: TextureCopy = .{},
     destination: TextureCopy = .{},
     copy_size: Extent3D = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 },
+};
+
+/// Browser copy between borrowed TextureView payloads selecting one mip and layer.
+/// Origins and extent use texels. Options are copied inline, with no trailing data.
+pub const CopyTextureForBrowserCmd = struct {
+    source: Ref,
+    destination: Ref,
+    source_origin: Origin2D,
+    destination_origin: Origin2D,
+    copy_size: Extent2D,
+    options: BrowserCopyOptions,
+};
+
+/// Browser copy from a borrowed ExternalTexture header to a TextureView payload.
+/// The destination selects one mip and layer. Origins and extent use texels.
+/// Options are copied inline, with no trailing data.
+pub const CopyExternalTextureForBrowserCmd = struct {
+    source: Ref,
+    destination: Ref,
+    source_origin: Origin2D,
+    destination_origin: Origin2D,
+    copy_size: Extent2D,
+    /// Source geometry supplied by the caller, distinct from the apparent size.
+    natural_size: Extent2D,
+    options: BrowserCopyOptions,
 };
 
 pub const DispatchCmd = struct { x: u32 = 0, y: u32 = 0, z: u32 = 0 };
@@ -365,15 +397,16 @@ pub const ResolveQuerySetCmd = struct {
     destination_offset: u64 = 0,
 };
 
+/// Identifies the exact high compute-pipeline header, never its low native pipeline.
 pub const SetComputePipelineCmd = struct { pipeline: Ref = null };
 
-/// Dawn records the pipeline at
-/// `src/dawn/native/CommandBufferStateTracker.cpp:846-849` and reads its
-/// attachment state back off that pointer at
-/// `src/dawn/native/RenderEncoderBase.cpp:551-556`. The port records the
-/// interned attachment state too, so the replay never has to read a pipeline
-/// object back out of the arena.
-pub const SetRenderPipelineCmd = struct { pipeline: Ref = null, attachment_state: Ref = null };
+/// The pipeline reference identifies the exact high render-pipeline header.
+/// The required canonical pointer borrows the containing pass or bundle usage lease.
+/// Native replay resolves that high owner and checks its attachment against both pointers.
+pub const SetRenderPipelineCmd = struct {
+    pipeline: Ref = null,
+    attachment_state: *attachment.CanonicalAttachmentState,
+};
 
 pub const SetStencilReferenceCmd = struct { reference: u32 = 0 };
 
@@ -439,7 +472,7 @@ pub const WriteTimestampCmd = struct {
 
 // --- the two exhaustive switches ---------------------------------------------
 
-/// The payload type of a tag. One function, one switch, 38 arms: a tag added
+/// The payload type of a tag. One function, one switch, 40 arms: a tag added
 /// to the enum without a payload is a compile error.
 ///
 /// Dawn has no equivalent, because its C++ switch in `Commands.cpp` names the
@@ -485,6 +518,8 @@ pub fn Payload(comptime tag: Tag) type {
         .set_resource_table => SetResourceTableCmd,
         .write_buffer => WriteBufferCmd,
         .write_timestamp => WriteTimestampCmd,
+        .copy_texture_for_browser => CopyTextureForBrowserCmd,
+        .copy_external_texture_for_browser => CopyExternalTextureForBrowserCmd,
     };
 }
 
@@ -499,11 +534,23 @@ pub fn DataElement(comptime tag: Tag) type {
     return switch (tag) {
         // A string is copied with its terminator, so the run is bytes
         // (`Commands.cpp:433-448`).
-        .insert_debug_marker, .push_debug_group, .set_immediates, .write_buffer => u8,
+        .begin_compute_pass, .insert_debug_marker, .push_debug_group, .set_immediates, .write_buffer => u8,
         // Only above zero: Dawn writes no run for an empty dynamic-offset list.
         .set_bind_group => u32,
         .execute_bundles => Ref,
+        .copy_texture_for_browser, .copy_external_texture_for_browser => void,
         else => void,
+    };
+}
+
+fn dataCount(comptime tag: Tag, cmd: *const Payload(tag)) usize {
+    return switch (tag) {
+        .begin_compute_pass => cmd.label_length,
+        .insert_debug_marker, .push_debug_group => cmd.length,
+        .set_immediates, .write_buffer => cmd.size,
+        .set_bind_group => cmd.dynamic_offset_count,
+        .execute_bundles => cmd.count,
+        else => unreachable,
     };
 }
 
@@ -514,27 +561,23 @@ pub fn DataElement(comptime tag: Tag) type {
 /// Dawn writes the stream; the port's stream is input at M18, and a walk that
 /// runs off the end is a refused input rather than a crash.
 pub fn skip(iterator: *allocator_mod.Iterator, tag: Tag) errors.Error!void {
+    switch (tag) {
+        inline else => |known| return skipKnown(known, iterator),
+    }
+}
+
+fn skipKnown(comptime tag: Tag, iterator: *allocator_mod.Iterator) errors.Error!void {
     const payload = Payload(tag);
     const cmd = try iterator.nextCommand(payload);
     const element = DataElement(tag);
     if (element == void) return;
-
-    // `set_bind_group` writes its run only above a zero count
-    // (`programmable_encoder.zig:155-158`), so the count in the payload decides
-    // whether there is anything to skip. Every other tag wrote a run.
-    const count: usize = switch (tag) {
-        .insert_debug_marker, .push_debug_group => cmd.label_length + 1,
-        .set_immediates, .write_buffer => cmd.size,
-        .set_bind_group => cmd.dynamic_offset_count,
-        .execute_bundles => cmd.count,
-        else => unreachable,
-    };
-    // Dawn's skipper guards the same way (`Commands.cpp:392-397`): `nextData`
-    // consumes a tag before it reads a byte, so a bind group with no dynamic
-    // offsets would eat the next command's tag and report a truncation the
-    // stream does not hold. Only this tag guards, because it is the only one
-    // whose run is conditional.
-    if (tag == .set_bind_group and count == 0) return;
+    const count = dataCount(tag, cmd);
+    // Empty compute labels and dynamic-offset lists have no data sentinel.
+    if ((tag == .begin_compute_pass or tag == .set_bind_group) and count == 0) return;
+    if (tag == .begin_compute_pass or tag == .insert_debug_marker or tag == .push_debug_group) {
+        _ = try nextNullTerminatedString(iterator, @intCast(count));
+        return;
+    }
     _ = try iterator.nextData(element, count);
 }
 

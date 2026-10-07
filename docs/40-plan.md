@@ -162,6 +162,40 @@ comptime assertion that the declaration exists and matches. A new upstream
 object is a compile error until the port handles it (`AGENTS.md` §3). The test
 also asserts the emitted member count is 571 and the method count is 205.
 
+**Phase-1 source contract.** Procedure-table fields use the native Zig calling convention.
+`tools/gen_api.zig.methodReturnType` supplies each method's return projection.
+No return declaration gives `void`. An explicit return gives `errors.Error!T`.
+The generic `Proc` return applies to `getProcAddress`, not every method.
+The shared helper preserves structured return nullability.
+An optional buffer return gives `errors.Error!?objects.Buffer` in objects and the table.
+Mapped-pointer returns keep one optional pointer layer.
+Generated types do not promise Dawn's C ABI. See `docs/02-dawn-design.md` §2.
+Parent regeneration and verification remain pending.
+
+**Callback-info source contract.** All nine callback-info method arguments remain record values named `callback_info`.
+Callback-info values stay last and outside grouped options.
+The five descriptor uses retain their schema member names, including the device-descriptor chain copy.
+Their records preserve mode where present, typed callbacks, and synthetic Zig userdata.
+Nullable callback fields retain typed `null` defaults.
+The schema census remains 347 objects, 205 methods, and 571 members.
+
+At pin `32f77c02294310054a660c393feded4bcb3f203c`, method arguments appear in `src/dawn/dawn.json`
+at `:163-165`, `:660-662`, `:1365-1367`, `:1401-1403`, `:1584-1586`, `:1598-1600`,
+`:2722-2724`, `:3065-3067`, and `:3859-3861`.
+Descriptor members appear at `:220-223`, `:310-313`, and `:2048-2057`.
+Native record signatures are in `src/dawn/native/Adapter.h:68-69`, `Buffer.h:198-202`,
+`Device.h:282-286,328-330`, `Instance.h:82-83`, `Queue.h:78-79`, and `ShaderModule.h:417`.
+See `docs/30-port-design.md` §3.1 for the exact method mapping and native record consumers.
+`tools/gen_api.zig.emitCallbackFunction` renders the `callback function` category with the default native Zig calling convention.
+Callbacks retain their synthetic userdata-first parameter and projected Zig arguments.
+This generator mapping does not promise Dawn's C ABI or define an upstream implementation.
+The procedure table remains a native Zig contract, not a C-ABI dispatch table.
+API consumer tests cover exact signatures and descriptor field types, not source-text matches or callback-mode mocks.
+No permanent callback-convention, type-wiring, forwarding, or mock-echo test defines this change.
+A temporary compiler reproduction checks a real native Zig callback definition and invocation against the generated API.
+Regeneration and that consumer check remain the parent's responsibility.
+
+
 **Gate line.** `zig build test -- test-api-surface && zig-gate`.
 
 **Row budget.** Zero rows in the function mapping table, because `dawn.json`
@@ -203,6 +237,28 @@ test-error-scope && zig-gate`.
 
 **Row budget.** 141 rows.
 
+**Owned-error component status.** BG133 passed 15/15 tests in Debug and 15/15 in explicit ReleaseSafe through `core/root`.
+The recorded run exited 0 in 38.99 seconds.
+It covers ten new ownership tests and five existing error tests.
+`core.ErrorDraft`, `ErrorReservation`, `ErrorRef`, and `ErrorView` are original Dusk glue, not new Dawn function ports.
+The existing mutable `ErrorData` API remains available.
+`ErrorData.init` now frees copied context text on late initialization failure.
+
+The draft records its payload allocator. The reservation records a separate header allocator.
+`ErrorReservation.prepare` reserves the header.
+`reserveReferences` prepays reference slots. `seal` moves the draft without allocation and clears its borrowed trace.
+`sealOutOfMemory`, `sealDeviceLostFallback`, and `sealNativeError` use static diagnostics without payload allocation.
+The loss fallback preserves the supplied loss code. Native error text comes from `@errorName`.
+`ErrorRef.view` exposes const borrowed slices.
+`retain` has a 64-attempt strong-CAS bound and reports overflow or contention without creating a reference.
+`releaseMany` consumes caller-owned slots, including unused prepaid slots.
+The final release frees payload and header exactly once with their recorded allocators.
+
+This result covers the owned-error component only.
+BG133 did not establish owned scope integration, registries, callbacks, or async completion.
+The current native implementations and later external consumer evidence are recorded under M14 and `docs/50-verification.md`.
+Native consumer integration and a full gate are not established by BG133.
+
 ---
 
 ### M4 — Platform, threads and the serial timeline
@@ -227,6 +283,36 @@ Twenty-four files, 4,494 lines.
 **Acceptance.** `test/worker_pool.zig` submits 1,000 tasks, asserts all 1,000
 complete, asserts each ran on a pool thread and not on the submitting thread,
 shuts the pool down and asserts every thread joined.
+The shutdown regression queues a task with a borrowed context and proves that
+`join` waits until its callback returns. A successful post borrows the context
+through that return. A rejected post does not borrow it.
+Shutdown and worker exhaustion stop acceptance, then drain accepted tasks.
+The worker loop has a normal iteration bound plus a bounded queued tail.
+BG127 passed both worker tests in Debug and actual ReleaseSafe.
+This worker result does not implement Phase 3 async futures, events, or requests.
+The later explicit Task-Io cutover changes the callback signature to
+`*const fn (io: std.Io, context: *anyopaque) void`.
+BG132 passed the standalone shutdown regression in Debug and actual ReleaseSafe.
+The full two-test worker shard after this cutover remains pending.
+
+**Native operation safety status.** BG134 passed 10/10 tests in Debug and explicit ReleaseSafe.
+The recorded run exited 0 in 113.56 seconds.
+The five original BG131 regressions now pass.
+The added tests cover `QueueLease`, device loss, idle failure, and a pin held while waiting for `DeviceMutex`.
+
+An admitted operation pins native context before it waits for the device mutex.
+`Device.getQueue(io)` returns `OperationError!QueueLease`.
+The lease owns the queue-operation gate and one device pin. It stores no `Io`.
+Its queue borrow lasts until `deinit(io)`, which publishes real low-level submissions and releases the gate and pin.
+The same lease remains readable after deinitialization, and repeated deinitialization is harmless.
+Copies are not independent leases. High-level submit, unmap, and release refuse a live lease.
+
+Destroy refuses active pins without changing ownership or admission.
+Nonterminal completion failure preserves the stopped owner and GPU-referenced children for a later retry.
+Successful completion or terminal Vulkan device loss permits child-before-parent retirement.
+Device loss permits lifetime-only retirement. It does not report normal serial completion.
+This component result does not establish native consumer integration, async Phase 3, or a full gate.
+
 `test/serial_timeline.zig` submits 10,000 serials and asserts they complete in
 increasing serial order under the device mutex.
 
@@ -259,6 +345,33 @@ reflects them, and asserts the vertex entry point takes no inputs, the fragment
 entry point takes one input at set 0 binding 1, and the SPIR-V version word is
 1.4. A second test feeds a deliberately corrupted fixture — one decoration word
 replaced with `OpNop` — and asserts `error.SpirvMalformed`.
+
+**Historical native specialization addition, 2026-10-08.** The reflector owns a sorted
+module-scope scalar `SpecId` array. It borrows `OpName` strings from input words.
+Invalid scalar targets, repeated SpecId decorations on one result, and malformed declarations return
+`SpirvMalformed`. Shared IDs across results remain valid metadata. BG94 passed 14/14 before the review correction.
+BG97 passed the corrected decoder 15/15.
+
+**Phase-1 workgroup source contract.** M5 records each entry point's workgroup source
+as missing, literal `LocalSize`, ID-based `LocalSizeId`, or `WorkgroupSize` builtin.
+The builtin takes precedence over execution modes.
+`EntryPoint.has_local_size_id` independently records execution-mode presence.
+Builtin precedence does not remove M14's feature gate.
+`Module.words` borrows immutable input words. The resolver uses encoded defaults
+and normalized specialization bytes without rewriting those words.
+`Module.resolveWorkgroupSizeCanonical` consumes the existing canonical encoding.
+The bounded evaluator reports missing, unsupported, cyclic, malformed, or excessive dependencies through explicit errors.
+It preserves signed two's-complement bit patterns and wraps supported scalar integer arithmetic at the component width.
+Dependencies support 8/16/32/64-bit integers. Final axes require 32-bit integers.
+Opcode-specific type rules permit independent shift-count widths.
+`UDiv` and `UMod` require exact unsigned operand/result types.
+Literal `LocalSize` zero is malformed. Evaluated zero reaches M14's `AxisZero` policy error.
+This adds no no-wrap decoration policy, native integer-feature enablement, or full conformance claim.
+`docs/30-port-design.md` records the first-party integer and Vulkan feature contracts.
+These decoder and evaluator functions are new native code, not Dawn ports.
+M14 owns the `LocalSizeId` support gate and selected-device limit checks.
+Full SPIR-V conformance, workgroup storage accounting, and subgroup rules remain open.
+Parent phase-1 verification remains pending.
 
 **Gate line.** `zig build test -- test-spirv && zig-gate`, with `spirv-val`
 run first as a test tool, not as a build input
@@ -307,8 +420,8 @@ and sampler handle still resolves inside the arena.
 
 ### M7 — Formats, features, limits and toggles
 
-**Goal.** The format table, the feature table, the limit table and the toggle
-table exist as comptime data, so a compat check is a field read.
+**Goal.** Static format metadata defines every canonical row. Runtime feature
+membership determines capabilities in a caller-owned format table.
 
 **Upstream modules.** `native/Format.{h,cpp}` (1,178),
 `native/Features.{h,cpp}` (611), `native/Limits.{h,cpp}` (689),
@@ -326,13 +439,16 @@ table.
 
 **Zig modules.** `engine`, `core`, `api`.
 
-**Acceptance.** `test/limits.zig` asserts the limits table has exactly 36 rows
-and that every row's compat value is less than or equal to its tier 0 value. A
-second test asserts `format` tables for `rgba8unorm`, `depth24plus`,
-`bgra8unorm` and `r11b10ufloat-renderable` agree between the API descriptor and
-the engine's capability table.
+**Acceptance.** `test/limits.zig` declares the 36-row limits checks.
+`test/formats.zig:181` declares canonical metadata and typed-block agreement
+for every retained API format. `:205` checks the runtime
+`rg11b10_ufloat_renderable` capability gate without a Vulkan-name change.
+The format module declares canonical row, aspect, feature, and conversion tests.
+Parent artifact 211 passed these selected paths in Debug and actual ReleaseSafe.
+The migrated consumers passed. This is not full M7 upstream conformance.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
 
-**Gate line.** `zig build test -- test-limits test-formats && zig-gate`.
+**Gate line.** `zig build test-limits && zig build test-formats && zig-gate`.
 
 **Row budget.** 174 rows.
 
@@ -395,6 +511,14 @@ into a 4 KiB buffer, submits it, waits on a fence with a 5,000 ms bound, and
 asserts `vkGetFenceStatus` returned `VK_SUCCESS`. It then tears the device down
 and asserts the live-handle set is empty, which is the no-leak assertion that
 needs a leak-detecting allocator to be meaningful (`AGENTS.md` §5).
+
+The instance requests the loader's API up to Vulkan 1.3; admission still accepts
+Vulkan 1.1. The device records the lower of the requested instance API and its
+physical-device API. Shader-module validation uses that effective API: core
+Vulkan 1.1 accepts SPIR-V through 1.3, Vulkan 1.2 through 1.5, and Vulkan 1.3
+through 1.6. The traditional-render-pass backend enables no dynamic-rendering
+extension or feature. Host-visible device-local memory is legal, including
+lavapipe's UMA memory; neither buffer mapping nor this fill test forbids it.
 
 **Gate line.** `zig build test -- test-vulkan-device && zig-gate`, run with
 `VK_LOADER_LAYERS_DISABLE` set so the no-layer path is the one under test
@@ -508,6 +632,34 @@ The words handed to `vkCreateShaderModule` are compared word for word against
 the input file, which is the assertion that the port does not rewrite the
 caller's SPIR-V.
 
+**Specialization metadata addition.** `ShaderModule.specialization_constants`
+(`src/pipeline/shader_module.zig:109`) takes ownership from the reflected Module
+without copying. Destruction frees the array once. Names still borrow caller
+words. BG97 passed `test-shader-module` 7/7. This adds no WGSL parse contract.
+
+**Diagnostic ownership addition.** `getCompilationInfo(module)` returns an immutable borrow of the module's diagnostic array and text.
+The view expires at `ShaderModule.destroy`. Do not release it with `Messages.deinit`.
+`shader_compilation_messages.snapshot(allocator, source)`, `Messages.clone(allocator, source)`, and `snapshotCompilationInfo(allocator, module)` return independent owners.
+Each copy preserves message types, every byte/UTF-16 position field, and empty text without retaining source pointers.
+Nonempty records use one item allocation and at most one contiguous text allocation. Empty records allocate nothing.
+Keep the source alive and unchanged through the call. Release each owner once with `Messages.deinit`.
+The allocator backing state must remain live through release. Assignment aliases storage, not ownership.
+Allocation failure or checked-size overflow returns `error.OutOfMemory`, frees partial storage, and leaves the source unchanged.
+
+`createErrorShaderModule` copies caller-supplied diagnostic text into module-owned storage.
+The caller may change or release that text after construction returns. The optional label still borrows caller storage.
+The lower-level `shader_compilation_messages.one` owns only its item array and continues to borrow text.
+Snapshot helpers are original Dusk glue, not additional Dawn function ports.
+The synchronous accessor and snapshots alone do not implement public async compilation-info completion.
+The current callback and typed observer routes are `engine/native_async_scope_info.zig:203,235`.
+See `docs/30-port-design.md` §2.2.2 for the ownership contract.
+
+**Bounded evidence.** BG138 passed the published-root shader-module shard: 4/4 Debug build steps and 14/14 tests.
+Explicit ReleaseSafe passed 14/14 tests. The recorded run exited 0 in 67.11 seconds.
+Seven new tests cover text ownership, source-array overwrite, module destruction, cloning, borrowed-builder cleanup, and allocation-failure rollback.
+This result does not establish native GPU consumer integration, public async completion, or a full gate.
+
+
 **Gate line.** `zig build test -- test-shader-module && zig-gate`.
 
 **Row budget.** 113 rows.
@@ -543,6 +695,37 @@ a non-null `VkPipeline`. It creates the identical pipeline a second time and
 asserts the cache returned the same handle rather than a new one. It then runs
 the same pipeline with a different `PipelineLayout` and asserts a new handle,
 which is what proves the cache key includes the layout.
+
+**Phase-1 compute source contract.** `ComputePipelineDescriptor` requires caller-supplied
+`ComputeLimits`, with three dimension limits and one invocation limit.
+The caller supplies selected or negotiated device limits. The pipeline module
+does not import the engine or choose a default ceiling.
+`prepareCompute` validates authoritative content bytes even without overrides.
+It selects the `(name, .gl_compute)` pair and normalizes specialization values once.
+Same-name vertex and compute entries remain valid in either declaration order.
+Only the absence of a matching compute entry permits a wrong-model error.
+It resolves the effective size from those canonical bytes, including encoded defaults.
+It rejects zero dimensions, excessive dimensions, product overflow, and excessive invocations
+before cache-key construction, cache lookup, or native creation.
+`buildComputePipelineKey` uses the same preparation contract.
+`local_size_id_supported` defaults to false and gates execution-mode presence.
+`has_local_size_id` remains true when a builtin supplies the effective size.
+The gate runs before lookup or native creation, independent of builtin precedence.
+Neither the gate nor specialization rewrites the caller's SPIR-V.
+M5 supplies metadata and evaluation. M14 supplies runtime limits and policy.
+These source changes do not establish successful GPU execution or complete M14.
+Parent phase-1 verification remains pending.
+
+**Device weak caches: SourceReadyFrozen.** The stable native context owns canonical BGL, PL, sampler, shader, and attachment indices.
+Full semantic equality includes logical binding order and compatibility domains.
+Owned user aliases and internal leases share the core reference ledger.
+Retirement removes membership before destruction. Failed publication releases temporary owners and native handles without a compatibility shim.
+Real native fail-N render-pass tests also check created-but-uninserted handle destruction and create/destroy balance.
+The observed regression and published Debug/ReleaseSafe consumer evidence is in `docs/50-verification.md`.
+This status freezes the documented source contract. It does not close all M14 rows or prove driver-cache persistence.
+The published consumer passed in Debug and ReleaseSafe, including all six async resource-operation families.
+BG219 separately passed real Adapter/Device requests and reserved loss notification in Debug and ReleaseSafe.
+No utility GPU integration or platform completion follows from this cache result.
 
 **Gate line.** `zig build test -- test-render-pipeline test-pipeline-cache
 && zig-gate`.
@@ -668,15 +851,16 @@ Nine files, 3,768 lines.
 
 **Zig modules.** `command`, `engine`, `vk`.
 
-**Acceptance.** **`test/triangle.zig` renders a one-pixel triangle into a 2×2
-`rgba8unorm` offscreen texture, copies that texture to a host-visible buffer,
-and asserts all four pixels' four channels equal the expected values.** The
-triangle is emitted by a checked-in `.spv` vertex shader from M13 and sampled by
-a checked-in `.spv` fragment shader; nothing is hard-coded on the CPU side. The
-test runs with no swapchain and no surface, because the host is headless
-(`AGENTS.md` §5).
+**Acceptance source.** `test/triangle.zig` records through the front end,
+finishes the stream, replays it, submits, and waits for offscreen readback.
+The original 2x2 scene covers two pixel centers and preserves sixteen channel
+assertions plus untouched staging padding. A second scene exercises a blend
+constant. Both use checked-in SPIR-V and require no surface or swapchain.
+Parent artifact 211 verified selected replay behavior in Debug and actual ReleaseSafe.
+Artifact 216 passed these native GPU scenes with validation layers disabled.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed. This is not full M18 upstream conformance.
 
-**Gate line.** `zig build test -- test-triangle && zig-gate`.
+**Gate line.** `zig build test-command-replay && zig build test-triangle && zig-gate`.
 
 **Row budget.** 95 rows. `StreamImplVk.cpp` holds 36 rows of which 32 are one
 `Write` template; they collapse into one Zig generic.
@@ -691,11 +875,14 @@ Six files, 720 lines.
 
 **Zig modules.** `engine`, `command`.
 
-**Acceptance.** `test/query_set.zig` wraps a draw that covers the whole 2×2
-target from M18 in an occlusion query and asserts the result is exactly 4
-samples. It asserts a query around a draw that is fully clipped away returns 0.
+**Acceptance source.** `test/query_set.zig` uses the front-end→`Finished`→replay→Queue
+path. It asserts 4 covering samples, 0 clipped samples, and an unwritten slot
+zero-filled to 0. Parent artifact 211 verified this native path in Debug and
+actual ReleaseSafe. Artifact 216 also passed it with validation layers disabled.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
+That historical result omitted timestamp conversion. BG222 later passed the implemented conversion shard, as recorded in `docs/50-verification.md`.
 
-**Gate line.** `zig build test -- test-query-set && zig-gate`.
+**Gate line.** `zig build test-query-set && zig-gate`.
 
 **Row budget.** 29 rows.
 
@@ -1145,7 +1332,7 @@ functions**, 216 generated dispatch entries, and three generated loader bodies.
 | `src/dawn/native/vulkan/VulkanInfo.cpp:77` | `VulkanDeviceKnobs::HasExt` | `DeviceInfo.hasExtension` | `src/vk/dispatch.zig` | port | Declared at `VulkanInfo.h:89`. |
 | `src/dawn/native/vulkan/VulkanInfo.cpp:81` | `GatherGlobalInfo` | `gatherGlobalInfo` | `src/vk/dispatch.zig` | port | Declared at `VulkanInfo.h:125`; `vkEnumerateInstanceVersion` is optional at `:86`. |
 | `src/dawn/native/vulkan/VulkanInfo.cpp:140` | `GatherPhysicalDevices` | `gatherPhysicalDevices` | `src/vk/dispatch.zig` | port | Declared at `VulkanInfo.h:126`; tolerates `VK_INCOMPLETE` at `:146`. |
-| `src/dawn/native/vulkan/VulkanInfo.cpp:164` | `GatherDeviceInfo` | `gatherDeviceInfo` | `src/vk/dispatch.zig` | port | Declared at `VulkanInfo.h:129`; the extension set is built at `:229`. |
+| `src/dawn/native/vulkan/VulkanInfo.cpp:164` | `GatherDeviceInfo` | `PhysicalDevice.gather` | `src/engine/vulkan_device.zig:543` | merge | Queries properties, features, memory, and queues. Maintenance4 properties at `:306-309` and properties2/features2 at `:407-412` inform Dusk's max-buffer and LocalSizeId policy. Frontend admission is separate. See `docs/02-dawn-design.md` §4.16.2. |
 | `src/dawn/native/vulkan/VulkanInfo.cpp:441` | `GatherSurfaceInfo` | `gatherSurfaceInfo` | `src/vk/dispatch.zig` | port | Declared at `VulkanInfo.h:130`; per-family present modes at `:458`. |
 | `src/dawn/native/vulkan/VulkanError.cpp:34` | `VkResultAsString` | `vkResultName` | `src/vk/dispatch.zig` | port | Declared at `VulkanError.h:42`; a comptime name table replaces the switch at `:39`. |
 | `src/dawn/native/vulkan/VulkanError.cpp:96` | `CheckVkSuccessImpl` | `checkVkSuccess` | `src/vk/dispatch.zig` | port | Declared at `VulkanError.h:44`; `VK_ERROR_DEVICE_LOST` maps to the device-lost set at `:103`. |
@@ -1316,36 +1503,36 @@ generated code cannot disagree about a count.
 | `src/dawn/dawn.json:4764` "strlen" | `api.constants.Strlen` | `src/api/constants.zig:59` | constant, wire value named |
 | `src/dawn/dawn.json:4769` "invalid binding" | `api.constants.InvalidBinding` | `src/api/constants.zig:64` | constant, wire value named |
 | `src/dawn/dawn.json:60` "proc" | `api.callbacks.Proc` | `src/api/callbacks.zig:14` | function pointer, C function pointer |
-| `src/dawn/dawn.json:98` "request adapter callback" | `api.callbacks.RequestAdapterCallback` | `src/api/callbacks.zig:18` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:98` "request adapter callback" | `api.callbacks.RequestAdapterCallback` | `src/api/callbacks.zig:18` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:106` "request adapter callback info" | `api.callbacks.RequestAdapterCallbackInfo` | `src/api/callbacks.zig:22` | callback info, mode plus callback, userdata added |
 | `src/dawn/dawn.json:246` "dawn load cache data function" | `api.callbacks.DawnLoadCacheDataFunction` | `src/api/callbacks.zig:31` | function pointer, C function pointer |
 | `src/dawn/dawn.json:258` "dawn store cache data function" | `api.callbacks.DawnStoreCacheDataFunction` | `src/api/callbacks.zig:35` | function pointer, C function pointer |
-| `src/dawn/dawn.json:269` "dawn load cache data callback" | `api.callbacks.DawnLoadCacheDataCallback` | `src/api/callbacks.zig:39` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:269` "dawn load cache data callback" | `api.callbacks.DawnLoadCacheDataCallback` | `src/api/callbacks.zig:39` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:280` "dawn load cache data callback info" | `api.callbacks.DawnLoadCacheDataCallbackInfo` | `src/api/callbacks.zig:43` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:287` "dawn store cache data callback" | `api.callbacks.DawnStoreCacheDataCallback` | `src/api/callbacks.zig:51` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:287` "dawn store cache data callback" | `api.callbacks.DawnStoreCacheDataCallback` | `src/api/callbacks.zig:51` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:297` "dawn store cache data callback info" | `api.callbacks.DawnStoreCacheDataCallbackInfo` | `src/api/callbacks.zig:55` | callback info, mode plus callback, userdata added |
 | `src/dawn/dawn.json:763` "callback" | `api.callbacks.Callback` | `src/api/callbacks.zig:63` | function pointer, C function pointer |
-| `src/dawn/dawn.json:778` "buffer map callback" | `api.callbacks.BufferMapCallback` | `src/api/callbacks.zig:67` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:778` "buffer map callback" | `api.callbacks.BufferMapCallback` | `src/api/callbacks.zig:67` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:785` "buffer map callback info" | `api.callbacks.BufferMapCallbackInfo` | `src/api/callbacks.zig:71` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1033` "compilation info callback" | `api.callbacks.CompilationInfoCallback` | `src/api/callbacks.zig:80` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1033` "compilation info callback" | `api.callbacks.CompilationInfoCallback` | `src/api/callbacks.zig:80` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1040` "compilation info callback info" | `api.callbacks.CompilationInfoCallbackInfo` | `src/api/callbacks.zig:84` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1246` "create compute pipeline async callback" | `api.callbacks.CreateComputePipelineAsyncCallback` | `src/api/callbacks.zig:93` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1246` "create compute pipeline async callback" | `api.callbacks.CreateComputePipelineAsyncCallback` | `src/api/callbacks.zig:93` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1254` "create compute pipeline async callback info" | `api.callbacks.CreateComputePipelineAsyncCallbackInfo` | `src/api/callbacks.zig:97` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1271` "create render pipeline async callback" | `api.callbacks.CreateRenderPipelineAsyncCallback` | `src/api/callbacks.zig:106` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1271` "create render pipeline async callback" | `api.callbacks.CreateRenderPipelineAsyncCallback` | `src/api/callbacks.zig:106` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1279` "create render pipeline async callback info" | `api.callbacks.CreateRenderPipelineAsyncCallbackInfo` | `src/api/callbacks.zig:110` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1617` "device lost callback" | `api.callbacks.DeviceLostCallback` | `src/api/callbacks.zig:119` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1617` "device lost callback" | `api.callbacks.DeviceLostCallback` | `src/api/callbacks.zig:119` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1625` "device lost callback info" | `api.callbacks.DeviceLostCallbackInfo` | `src/api/callbacks.zig:123` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1647` "uncaptured error callback" | `api.callbacks.UncapturedErrorCallback` | `src/api/callbacks.zig:132` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1647` "uncaptured error callback" | `api.callbacks.UncapturedErrorCallback` | `src/api/callbacks.zig:132` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1655` "uncaptured error callback info" | `api.callbacks.UncapturedErrorCallbackInfo` | `src/api/callbacks.zig:136` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1670` "pop error scope callback" | `api.callbacks.PopErrorScopeCallback` | `src/api/callbacks.zig:144` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1670` "pop error scope callback" | `api.callbacks.PopErrorScopeCallback` | `src/api/callbacks.zig:144` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1678` "pop error scope callback info" | `api.callbacks.PopErrorScopeCallbackInfo` | `src/api/callbacks.zig:148` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:1777` "logging callback" | `api.callbacks.LoggingCallback` | `src/api/callbacks.zig:157` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:1777` "logging callback" | `api.callbacks.LoggingCallback` | `src/api/callbacks.zig:157` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:1785` "logging callback info" | `api.callbacks.LoggingCallbackInfo` | `src/api/callbacks.zig:161` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:2033` "dispose callback" | `api.callbacks.DisposeCallback` | `src/api/callbacks.zig:169` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:2033` "dispose callback" | `api.callbacks.DisposeCallback` | `src/api/callbacks.zig:169` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:2040` "dispose callback info" | `api.callbacks.DisposeCallbackInfo` | `src/api/callbacks.zig:173` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:3126` "queue work done callback" | `api.callbacks.QueueWorkDoneCallback` | `src/api/callbacks.zig:182` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:3126` "queue work done callback" | `api.callbacks.QueueWorkDoneCallback` | `src/api/callbacks.zig:182` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:3133` "queue work done callback info" | `api.callbacks.QueueWorkDoneCallbackInfo` | `src/api/callbacks.zig:186` | callback info, mode plus callback, userdata added |
-| `src/dawn/dawn.json:3627` "request device callback" | `api.callbacks.RequestDeviceCallback` | `src/api/callbacks.zig:195` | callback function, C function pointer with userdata first |
+| `src/dawn/dawn.json:3627` "request device callback" | `api.callbacks.RequestDeviceCallback` | `src/api/callbacks.zig:195` | callback function, native Zig function pointer with userdata first |
 | `src/dawn/dawn.json:3636` "request device callback info" | `api.callbacks.RequestDeviceCallbackInfo` | `src/api/callbacks.zig:199` | callback info, mode plus callback, userdata added |
 | `src/dawn/dawn.json:43` "INTERNAL_HAVE_EMDAWNWEBGPU_HEADER" | `api.descriptors.INTERNAL_HAVE_EMDAWNWEBGPU_HEADER` | `src/api/descriptors.zig:14` | structure, emitted |
 | `src/dawn/dawn.json:72` "request adapter options" | `api.descriptors.RequestAdapterOptions` | `src/api/descriptors.zig:20` | structure, extensible in, chain type below |
@@ -2371,7 +2558,7 @@ body. The columns are the ones §3.2 uses.
 | `src/dawn/native/ObjectBase.cpp:96` | `ObjectBase::ObjectBase(DeviceBase*, ErrorTag)` | `Object.setInitializedError` | `src/core/object.zig:113` | merge | Merged with the row above. |
 | `src/dawn/native/ObjectBase.cpp:98` | `ObjectBase::ObjectBase(DeviceBase*, DelayedInitializationTag)` | `ObjectArena.CreateOptions.state` | `src/core/object.zig:285` | port | The tag becomes a field the caller writes. |
 | `src/dawn/native/ObjectBase.cpp:101` | `ObjectBase::GetInstance` | — | — | skip | No instance exists before M8. |
-| `src/dawn/native/ObjectBase.cpp:105` | `ObjectBase::GetDevice` | `Device.resolve` | `src/core/device.zig:110` | merge | The caller already holds the device, so the object need not store it. |
+| `src/dawn/native/ObjectBase.cpp:105` | `ObjectBase::GetDevice` | `Device.resolve` | `src/core/device.zig:121` | merge | The caller already holds the device, so the object need not store it. |
 | `src/dawn/native/ObjectBase.cpp:109` | `ApiObjectList::Track` | `ObjectList.track` | `src/core/object.zig:170` | port | Keeps the rule at `:110-113`: a list that is already destroyed takes the object in and destroys it. `Object.attach` is the port's call that carries `GetObjectTrackingList()->Track(this)` from the constructor body, and `ObjectArena.create` deliberately does not call it. |
 | `src/dawn/native/ObjectBase.cpp:117` | `ApiObjectList::Untrack` | `ObjectList.untrack` | `src/core/object.zig:193` | port | Returns the bool that makes a second destroy a no-op. |
 | `src/dawn/native/ObjectBase.cpp:121` | `ApiObjectList::Destroy` | `ObjectList.destroy` | `src/core/object.zig:219` | port | No lock until M4. The bound is the count read before the first destroy. |
@@ -2477,22 +2664,22 @@ body. The columns are the ones §3.2 uses.
 | `src/dawn/native/ErrorSink.h:108` | `ErrorSink::ConsumedError(E, T*, const char*, Args...)` | `ErrorSink.consumeError` | `src/core/error_scope.zig:257` | merge | Merged with the row above. |
 | `src/dawn/native/ErrorSink.h:118` | `ErrorSink::ConsumeError(T, const char*, Args...)` | `ErrorData.appendContext` | `src/core/errors.zig:551` | merge | The context appends, then the sink consumes. Two calls, not one overload. |
 | `src/dawn/native/ErrorSink.h:124` | `ErrorSink::ConsumeError(T, InternalErrorType, const char*, Args...)` | `matchesFilter` | `src/core/error_scope.zig:44` | port | The bitmask test at `:128-130` becomes a filter match over three sets. |
-| `src/dawn/native/ErrorScope.h:62` | `ErrorScope::GetPendingAsyncTaskCount` | — | — | skip | No async task until M4. `src/core/root.zig` records the gap. |
-| `src/dawn/native/ErrorScope.cpp:39` | `ErrorFilterToErrorType` | `matchesFilter` | `src/core/error_scope.zig:44` | port | Dawn maps a filter to a type. The port maps a filter to a set, so `out_of_memory` can name two members. |
-| `src/dawn/native/ErrorScope.cpp:53` | `ErrorScope::ErrorScope(wgpu::ErrorFilter)` | `ErrorScope.init` | `src/core/error_scope.zig:93` | port | The matched type becomes the filter itself. |
+| `src/dawn/native/ErrorScope.h:62` | `ErrorScope::GetPendingAsyncTaskCount` | `ScopeRecord.pending`, `ScopeTicket.isReady` | `src/core/error_scope.zig:75,110` | simplify | A guarded pending counter replaces the task-vector size. Completion waits until the counter reaches zero. |
+| `src/dawn/native/ErrorScope.cpp:39` | `ErrorFilterToErrorType` | `matchesFilter` | `src/core/error_scope.zig:14` | simplify | Maps a typed ErrorCode to the filter domain. |
+| `src/dawn/native/ErrorScope.cpp:53` | `ErrorScope::ErrorScope(wgpu::ErrorFilter)` | `ErrorScopeStack.push` | `src/core/error_scope.zig:537` | merge | Allocates an owned record with its filter and initializes it before publication. |
 | `src/dawn/native/ErrorScope.cpp:56` | `ErrorScope::ErrorScope(wgpu::ErrorType, std::string_view)` | — | — | skip | Dawn builds a scope around an error already in hand. The port takes `captured` through `capture`. |
-| `src/dawn/native/ErrorScope.cpp:59` | `ErrorScope::GetErrorType` | `ErrorScope.captured` | `src/core/error_scope.zig:91` | merge | Field read, and the field is the payload, not a type. |
-| `src/dawn/native/ErrorScope.cpp:63` | `ErrorScope::GetErrorMessage` | `ErrorScope.captured` | `src/core/error_scope.zig:91` | merge | The message is `captured.message`, so there is no empty-string case to handle. |
-| `src/dawn/native/ErrorScope.cpp:70` | `ErrorScope::AcquirePendingAsyncTasks` | — | — | skip | No async task until M4. |
-| `src/dawn/native/ErrorScope.cpp:76` | `ErrorScope::CaptureError` | `ErrorScope.capture` | `src/core/error_scope.zig:104` | port | The assert at `:77` is a filter match. The first error wins, as at `:79-82`. |
-| `src/dawn/native/ErrorScope.cpp:85` | `ErrorScopeStack::ErrorScopeStack()` | `ErrorScopeStack.init` | `src/core/error_scope.zig:151` | merge | An empty stack needs no constructor body. |
-| `src/dawn/native/ErrorScope.cpp:89` | `ErrorScopeStack::Push` | `ErrorScopeStack.push` | `src/core/error_scope.zig:173` | port | One scope, pushed. |
-| `src/dawn/native/ErrorScope.cpp:93` | `ErrorScopeStack::Pop` | `ErrorScopeStack.pop` | `src/core/error_scope.zig:183` | port | The assert at `:94` becomes `error.ErrorScopeStackEmpty`. |
-| `src/dawn/native/ErrorScope.cpp:100` | `ErrorScopeStack::Empty` | `ErrorScopeStack.empty` | `src/core/error_scope.zig:169` | port | A length read. |
-| `src/dawn/native/ErrorScope.cpp:104` | `ErrorScopeStack::GetErrorScopeForErrorType` | `ErrorScopeStack.scopeForCode` | `src/core/error_scope.zig:190` | port | Walks back to front, as at `:105`. |
-| `src/dawn/native/ErrorScope.cpp:115` | `ErrorScopeStack::HandleError` | `ErrorScopeStack.handleError` | `src/core/error_scope.zig:209` | port | The stack owns the payload either way, which is what the bool reports. |
-| `src/dawn/native/ErrorScope.cpp:125` | `ErrorScopeStack::HandleErrorGeneratingAsyncTask` | — | — | skip | No async task until M4. |
-| `src/dawn/native/ErrorScope.cpp:142` | `ErrorScopeStack::HandleErrorGeneratingAsyncTaskErrorType` | — | — | skip | No async task until M4. |
+| `src/dawn/native/ErrorScope.cpp:59` | `ErrorScope::GetErrorType` | `ScopeRecord.captured` | `src/core/error_scope.zig:76` | merge | The owned ErrorRef supplies the typed error code. Null means no captured error. |
+| `src/dawn/native/ErrorScope.cpp:63` | `ErrorScope::GetErrorMessage` | `ScopeRecord.captured` | `src/core/error_scope.zig:76` | merge | The retained diagnostic supplies immutable text instead of a separately borrowed string. |
+| `src/dawn/native/ErrorScope.cpp:70` | `ErrorScope::AcquirePendingAsyncTasks` | `ScopeTicket.take`, `ScopeLeaseSet.settle` | `src/core/error_scope.zig:116,411` | simplify | Pending leases settle into the owned record. Taking a result refuses while work remains, then transfers its ErrorRef. Dusk does not move a Dawn task vector. |
+| `src/dawn/native/ErrorScope.cpp:76` | `ErrorScope::CaptureError` | `ScopeRecord.capture` | `src/core/error_scope.zig:92` | simplify | The first owned error wins. A losing ErrorRef is released immediately. |
+| `src/dawn/native/ErrorScope.cpp:85` | `ErrorScopeStack::ErrorScopeStack()` | `ErrorScopeStack.init` | `src/core/error_scope.zig:495` | simplify | Initializes allocator and uncaptured-error delivery configuration. Binding uses the final stable ObjectList address. |
+| `src/dawn/native/ErrorScope.cpp:89` | `ErrorScopeStack::Push` | `ErrorScopeStack.push` | `src/core/error_scope.zig:537` | merge | Owns one heap record and publishes it only after capacity allocation succeeds. |
+| `src/dawn/native/ErrorScope.cpp:93` | `ErrorScopeStack::Pop` | `ErrorScopeStack.beginPop` | `src/core/error_scope.zig:548` | simplify | Transfers the stack's record reference into a ScopeTicket. Pending accepted work retains the popped record. |
+| `src/dawn/native/ErrorScope.cpp:100` | `ErrorScopeStack::Empty` | `ErrorScopeStack.empty` | `src/core/error_scope.zig:532` | port | Reads the open-stack length under the original guard. |
+| `src/dawn/native/ErrorScope.cpp:104` | `ErrorScopeStack::GetErrorScopeForErrorType` | `ErrorScopeStack.handleError` | `src/core/error_scope.zig:609` | merge | Searches the nearest matching open scope before transferring the diagnostic. |
+| `src/dawn/native/ErrorScope.cpp:115` | `ErrorScopeStack::HandleError` | `ErrorScopeStack.handleError` | `src/core/error_scope.zig:609` | simplify | Consumes an ErrorRef into the nearest scope or returns owned uncaptured delivery. It does not borrow the caller's payload. |
+| `src/dawn/native/ErrorScope.cpp:125` | `ErrorScopeStack::HandleErrorGeneratingAsyncTask` | `ErrorScopeStack.captureLeaseSet` | `src/core/error_scope.zig:582` | merge | Captures routing for each possible error filter and retains ancestor records before task acceptance. |
+| `src/dawn/native/ErrorScope.cpp:142` | `ErrorScopeStack::HandleErrorGeneratingAsyncTaskErrorType` | `ErrorScopeStack.captureLeaseSet` | `src/core/error_scope.zig:582` | merge | The nearest matching scope captures each filter. All captured open records retain pending leases until settlement. |
 | `src/dawn/native/ErrorInjector.h:46` | `MaybeInjectError(ErrorType)` | `ErrorInjector.maybeInjectError` | `src/core/error_injector.zig:103` | port | The candidate list is a slice, so one function covers the overload at `:51`. |
 | `src/dawn/native/ErrorInjector.h:51` | `MaybeInjectError(ErrorType, ErrorTypes...)` | `ErrorInjector.maybeInjectError` | `src/core/error_injector.zig:103` | merge | One candidate per call, as the slice documents. |
 | `src/dawn/native/ErrorInjector.h:64` | `INJECT_ERROR_OR_RUN` | `ErrorInjector.maybeInjectError` | `src/core/error_injector.zig:103` | port | Zig has no macro, so the caller writes the two steps. The file carries the example. |
@@ -2516,9 +2703,9 @@ body. The columns are the ones §3.2 uses.
 | `src/dawn/native/AsyncTask.cpp:127` | `ErrorGeneratingAsyncTask::GetErrorType` | — | — | skip | M4. |
 | `src/dawn/native/AsyncTask.cpp:131` | `ErrorGeneratingAsyncTask::AcquireError` | — | — | skip | M4. |
 | `src/dawn/native/AsyncTask.cpp:136` | `AsyncTaskManager::AsyncTaskManager` | — | — | skip | M4. |
-| `src/dawn/native/AsyncTask.cpp:139` | `~AsyncTaskManager` | `Device.deinit` | `src/core/device.zig:54` | merge | The teardown point is here. The wait for outstanding work lands at M4. |
+| `src/dawn/native/AsyncTask.cpp:139` | `~AsyncTaskManager` | `Device.deinit` | `src/core/device.zig:55` | merge | The teardown point is here. The wait for outstanding work lands at M4. |
 | `src/dawn/native/AsyncTask.cpp:144` | `AsyncTaskManager::PostConstructedTask` | — | — | skip | M4. |
-| `src/dawn/native/AsyncTask.cpp:150` | `AsyncTaskManager::WaitAllPendingTasks` | `Device.deinit` | `src/core/device.zig:54` | merge | Merged with the row above. |
+| `src/dawn/native/AsyncTask.cpp:150` | `AsyncTaskManager::WaitAllPendingTasks` | `Device.deinit` | `src/core/device.zig:55` | merge | Merged with the row above. |
 | `src/dawn/native/AsyncTask.cpp:159` | `AsyncTaskManager::HasPendingTasks` | — | — | skip | M4. |
 | `src/dawn/native/AsyncTask.cpp:163` | `AsyncTaskManager::RunTask` | — | — | skip | M4. |
 | `src/dawn/common/StringViewUtils.h:49` | `ToOutputStringView(const char (&)[N])` | — | — | skip | A C string view belongs to the ABI milestone. |
@@ -2612,23 +2799,23 @@ declaration at its body.
 | `src/dawn/platform/WorkerThread.cpp:43` | `AsyncWaitableEvent::Wait` | `CompletionEvent.wait` | `src/platform/threads.zig` | merge | Merged into `AsyncTaskHandleImpl::Wait`, below. |
 | `src/dawn/platform/WorkerThread.cpp:44` | `AsyncWaitableEvent::IsComplete` | `CompletionEvent.isSignaled` | `src/platform/threads.zig` | merge | Merged into `AsyncTaskHandleImpl::IsComplete`, below. |
 | `src/dawn/platform/WorkerThread.cpp:50` | `AsyncJobHandle::AsyncJobHandle` | — | — | skip | An adapter for `JobHandle`. `WorkerPool.join` joins every worker in one call, so there is no per-job handle. |
-| `src/dawn/platform/WorkerThread.cpp:54` | `AsyncJobHandle::Cancel` | `WorkerPool.join` | `src/platform/threads.zig` | merge | Dawn cancels every job at `:123-125` and then joins each one. The port sets one `shutting_down` flag and joins every thread. |
+| `src/dawn/platform/WorkerThread.cpp:54` | `AsyncJobHandle::Cancel` | `WorkerPool.join` | `src/platform/threads.zig:450-462` | merge | Dawn cancels jobs before joining. The port stops acceptance, drains accepted tasks, and joins all threads. Borrowed contexts and per-task Io backend states remain caller-owned through callback return. |
 | `src/dawn/platform/WorkerThread.cpp:55` | `AsyncJobHandle::Join` | `WorkerPool.join` | `src/platform/threads.zig` | merge | Same row pair as above. |
 | `src/dawn/platform/WorkerThread.cpp:64` | `AsyncTaskHandleImpl::AsyncTaskHandleImpl` | — | — | skip | A private constructor. The port builds a `Task` struct literal. |
 | `src/dawn/platform/WorkerThread.cpp:67` | `AsyncTaskHandleImpl::~AsyncTaskHandleImpl` | — | — | skip | Asserts completion at `:68`. The pool's `completed_task_count` holds that fact and `waitForAllTasks` reads it. |
 | `src/dawn/platform/WorkerThread.cpp:71` | `AsyncTaskHandleImpl::Wait` | `CompletionEvent.wait` | `src/platform/threads.zig` | port | Dawn waits on an atomic with no deadline. The port adds `CompletionEvent.waitTimeout`, because `docs/30-port-design.md` §9.5 makes every wait carry a caller-supplied timeout. |
 | `src/dawn/platform/WorkerThread.cpp:75` | `AsyncTaskHandleImpl::IsComplete` | `CompletionEvent.isSignaled` | `src/platform/threads.zig` | port | A field read, and safe without the lock because the port sets the flag under the lock and only from false to true. |
-| `src/dawn/platform/WorkerThread.cpp:79` | `AsyncTaskHandleImpl::Complete` | worker body in `src/platform/threads.zig` | `src/platform/threads.zig` | port | Dawn runs the callback, then stores the atomic and notifies at `:81-82`. The port runs `task.run`, then takes the pool lock and increments `completed_task_count`. |
+| `src/dawn/platform/WorkerThread.cpp:79` | `AsyncTaskHandleImpl::Complete` | `runWorker` | `src/platform/threads.zig:550-557` | port | Runs the callback with the exact posted Io before incrementing completion under an uncancelable lock. The caller retains the task context and Io backend state through callback return. |
 | `src/dawn/platform/WorkerThread.cpp:87` | `AsyncJobHandleImpl::AsyncJobHandleImpl` | — | — | skip | Spawns the thread in the initializer at `:88`. `WorkerPool.init` spawns every worker, so the handle has nothing to construct. |
 | `src/dawn/platform/WorkerThread.cpp:90` | `AsyncJobHandleImpl::~AsyncJobHandleImpl` | — | — | skip | Asserts `mJoined` at `:91`. `WorkerPool.join` returns only after every `std.Thread` it started has been joined. |
-| `src/dawn/platform/WorkerThread.cpp:94` | `AsyncJobHandleImpl::Cancel` | `WorkerPool.join` | `src/platform/threads.zig` | merge | One flag for the pool instead of one atomic per job. |
-| `src/dawn/platform/WorkerThread.cpp:98` | `AsyncJobHandleImpl::Join` | `WorkerPool.join` | `src/platform/threads.zig` | merge | `std::call_once` becomes one `join` per thread. |
-| `src/dawn/platform/WorkerThread.cpp:105` | `AsyncJobHandleImpl::JobThreadLoop` | `runWorker` | `src/platform/threads.zig` | port | Bounded by `max_worker_iteration_count`, and a worker that reaches the bound reports `error.WorkerExhausted` to the next `postTask`, as `AGENTS.md` §2 requires. |
+| `src/dawn/platform/WorkerThread.cpp:94` | `AsyncJobHandleImpl::Cancel` | `WorkerPool.join` | `src/platform/threads.zig:450-462` | merge | Shutdown stops acceptance, not accepted callbacks. Joins occur only after workers drain their accepted queue. |
+| `src/dawn/platform/WorkerThread.cpp:98` | `AsyncJobHandleImpl::Join` | `WorkerPool.join` | `src/platform/threads.zig:450-462` | merge | Every accepted task has returned when join returns. The initialization Io backend state remains caller-owned through join. |
+| `src/dawn/platform/WorkerThread.cpp:105` | `AsyncJobHandleImpl::JobThreadLoop` | `runWorker` | `src/platform/threads.zig:521-559` | port | The normal bound is `max_worker_iteration_count`. Exhaustion stops acceptance and permits at most `max_queued_task_count` extra iterations per worker to drain accepted work. Worker synchronization uses the explicit initialization Io argument. |
 | `src/dawn/platform/WorkerThread.cpp:114` | `AsyncWorkerThreadPool::AsyncWorkerThreadPool` | `WorkerPool.init` | `src/platform/threads.zig` | port | |
-| `src/dawn/platform/WorkerThread.cpp:119` | `AsyncWorkerThreadPool::~AsyncWorkerThreadPool` | `WorkerPool.deinit` | `src/platform/threads.zig` | port | |
-| `src/dawn/platform/WorkerThread.cpp:131` | `AsyncWorkerThreadPool::PostWorkerTask` | `WorkerPool.postTask` | `src/platform/threads.zig` | port | Dawn starts a thread when tasks outnumber jobs at `:141-154`. The port starts `worker_count` threads in `init`, so that heuristic has nothing left to decide, and a full queue is `error.TaskQueueFull` instead of an unbounded `std::queue`. |
+| `src/dawn/platform/WorkerThread.cpp:119` | `AsyncWorkerThreadPool::~AsyncWorkerThreadPool` | `WorkerPool.deinit` | `src/platform/threads.zig:438-440` | port | Calls `join` to drain accepted borrowed-context tasks before thread teardown. |
+| `src/dawn/platform/WorkerThread.cpp:131` | `AsyncWorkerThreadPool::PostWorkerTask` | `WorkerPool.postTask` | `src/platform/threads.zig:464-482` | port | Rejection precedes acceptance. `QueuedTask` copies the exact posted Io value (`:313-317`). `Task.run` takes `(io: std.Io, context: *anyopaque)` (`:302-310`). Caller-owned context and Io backend state live through run return. |
 | `src/dawn/platform/WorkerThread.cpp:164` | `AsyncWorkerThreadPool::PostWorkerJob` | — | — | skip | A long-running job handle. No M4 consumer posts one. |
-| `src/dawn/platform/WorkerThread.cpp:171` | `AsyncWorkerThreadPool::TaskHandlingJobLoop` | `runWorker` | `src/platform/threads.zig` | port | Dawn's 100 ms poll at `:173` becomes a condition wait, so a task starts when it is posted and not on the next tick. |
+| `src/dawn/platform/WorkerThread.cpp:171` | `AsyncWorkerThreadPool::TaskHandlingJobLoop` | `runWorker` | `src/platform/threads.zig:521-559` | port | The explicit initialization Io handles worker synchronization. Each callback receives its exact posted Io, with no global or pool-Io fallback. Terminal flags stop acceptance, and workers drain accepted tasks before exit. |
 | `src/dawn/common/Mutex.h:50` | `AutoLockBase::AutoLockBase()` | — | — | skip | Default constructor; a Zig field default is the same value. |
 | `src/dawn/common/Mutex.h:51` | `AutoLockBase::AutoLockBase(MutexRef)` | `DeviceMutex.lock` | `src/platform/threads.zig` | port | Declared at `:51`; the port takes the lock as a call instead of through a guard object. |
 | `src/dawn/common/Mutex.h:57` | `AutoLockBase::AutoLockBase(AutoLockBase&&)` | — | — | skip | Zig has no move constructor; a struct copy is the move. |
@@ -2907,35 +3094,38 @@ row names the place a reviewer opens rather than the file to search.
 | `readEntryPoint` | `src/spirv/instruction.zig:65` | Splits `OpEntryPoint` at the end of its name. Both the validator and the reflector need that split. |
 | `Cursor.init` | `src/spirv/instruction.zig:88` | |
 | `Cursor.next` | `src/spirv/instruction.zig:92` | The walk. A zero word count is refused because it would never advance. |
-| `Opcode.fromRaw` | `src/spirv/grammar.zig:36` | The eleven instructions the reader names. |
-| `Decoration.fromRaw` | `src/spirv/grammar.zig:194` | The whole enumeration, because a word outside it is a malformed module and only the full set tells that apart from a legal one. |
-| `StorageClass.fromRaw` | `src/spirv/grammar.zig:230` | The reflector reads one to name a descriptor. |
-| `ExecutionModel.fromRaw` | `src/spirv/grammar.zig:254` | The validator reads one on every entry point. |
-| `Dim.fromRaw` | `src/spirv/grammar.zig:269` | Separates a texel buffer from an image. |
+| `Opcode.fromRaw` | `src/spirv/grammar.zig:48` | Named resource, scalar-type, and specialization instructions. Unknown opcodes still advance by word count. |
+| `Decoration.fromRaw` | `src/spirv/grammar.zig:206` | The whole enumeration, because a word outside it is a malformed module and only the full set tells that apart from a legal one. |
+| `StorageClass.fromRaw` | `src/spirv/grammar.zig:242` | The reflector reads one to name a descriptor. |
+| `ExecutionModel.fromRaw` | `src/spirv/grammar.zig:266` | The validator reads one on every entry point. |
+| `Dim.fromRaw` | `src/spirv/grammar.zig:281` | Separates a texel buffer from an image. |
 | `validate` | `src/spirv/validate.zig:31` | The pass. A pass that returns found nothing, which is the port's "zero diagnostics". |
 | `checkEntryPoint` | `src/spirv/validate.zig:61` | Every id in an entry point is one the module declared. |
 | `checkDecorate` | `src/spirv/validate.zig:72` | The rule a fixture corrupted by writing `OpNop` over a decoration trips. |
 | `checkMemberDecorate` | `src/spirv/validate.zig:83` | The member is a literal index, so the decoration sits one word further along. |
 | `checkId` | `src/spirv/validate.zig:92` | An id is below the bound, and zero is never an id. |
-| `reflect` | `src/spirv/reflect.zig:89` | Walks the module, then answers with a `Module`. |
-| `Module.deinit` | `src/spirv/reflect.zig:72` | Frees what `reflect` owns. The names are borrowed from the caller's words. |
-| `Module.findEntryPoint` | `src/spirv/reflect.zig:77` | The lookup M13 makes when it binds an entry point. |
-| `readEntryPoints` | `src/spirv/reflect.zig:109` | One walk, in declaration order. |
-| `deinitEntryPoints` | `src/spirv/reflect.zig:137` | The error path for the list, whose memory the `ArrayList` still owns. |
-| `freeResources` | `src/spirv/reflect.zig:154` | Skips an empty slice, because `toOwnedSlice` hands back a static one for a list that never grew. |
-| `readResources` | `src/spirv/reflect.zig:164` | Sorts by set and then binding, so two runs agree, and refuses two variables at one slot. |
-| `lessBySetThenBinding` | `src/spirv/reflect.zig:191` | The order. |
-| `DecorationRecord.merge` | `src/spirv/reflect.zig:238` | A target can carry its own decoration and a group's at once. |
-| `Tables.deinit` | `src/spirv/reflect.zig:259` |  |
-| `Tables.readDeclarations` | `src/spirv/reflect.zig:270` | Types and global variables, keyed by id. |
-| `Tables.readDecorations` | `src/spirv/reflect.zig:315` | The five decorations the reflector acts on. |
-| `Tables.applyGroups` | `src/spirv/reflect.zig:342` | `OpGroupDecorate` may name a group declared after it, so the records are collected first. |
-| `Tables.applyRecords` | `src/spirv/reflect.zig:361` | A binding names a variable and `Block` names a struct. A record aimed at anything else is refused. |
-| `Tables.resourceFor` | `src/spirv/reflect.zig:391` | The descriptor at one global variable, or null for an `Input`, an `Output` or a `Private` global. |
-| `readDecorationRecord` | `src/spirv/reflect.zig:410` | Turns one `OpDecorate` into the fields the reflector reads. |
-| `readLiteral` | `src/spirv/reflect.zig:426` | The literal operand, which the instruction must carry. |
-| `classify` | `src/spirv/reflect.zig:431` | Storage class against pointee type. |
-| `classifyImage` | `src/spirv/reflect.zig:460` | `sampled` separates a sampled image from a storage one, and `Dim.buffer` separates a texel buffer. |
+| `reflect` | `src/spirv/reflect.zig:104` | Walks the module, then answers with a `Module`. |
+| `Module.deinit` | `src/spirv/reflect.zig:86` | Frees what `reflect` owns. The names are borrowed from the caller's words. |
+| `Module.findEntryPoint` | `src/spirv/reflect.zig:92` | The lookup M13 makes when it binds an entry point. |
+| `readEntryPoints` | `src/spirv/reflect.zig:128` | One walk, in declaration order. |
+| `deinitEntryPoints` | `src/spirv/reflect.zig:156` | The error path for the list, whose memory the `ArrayList` still owns. |
+| `freeResources` | `src/spirv/reflect.zig:173` | Skips an empty slice, because `toOwnedSlice` hands back a static one for a list that never grew. |
+| `readResources` | `src/spirv/reflect.zig:183` | Sorts by set and then binding, so two runs agree, and refuses two variables at one slot. |
+| `lessBySetThenBinding` | `src/spirv/reflect.zig:210` | The order. |
+| `DecorationRecord.merge` | `src/spirv/reflect.zig:259` | A target can carry its own decoration and a group's at once. |
+| `Tables.deinit` | `src/spirv/reflect.zig:292` |  |
+| `Tables.readDeclarations` | `src/spirv/reflect.zig:310` | Types, module-scope specialization declarations, names, and global variables, keyed by result ID. |
+| `Tables.readDecorations` | `src/spirv/reflect.zig:410` | Resource decorations and scalar `SpecId` records. |
+| `Tables.applyGroups` | `src/spirv/reflect.zig:445` | Collects decoration records before applying group records to targets. |
+| `Tables.applyRecords` | `src/spirv/reflect.zig:466` | Applies resource and specialization records. Invalid targets return `SpirvMalformed`. |
+| `Tables.resourceFor` | `src/spirv/reflect.zig:543` | The descriptor at one global variable, or null for an `Input`, an `Output` or a `Private` global. |
+| `readDecorationRecord` | `src/spirv/reflect.zig:567` | Turns one `OpDecorate` into the fields the reflector reads. |
+| `readLiteral` | `src/spirv/reflect.zig:587` | The literal operand, which the instruction must carry. |
+| `classify` | `src/spirv/reflect.zig:592` | Storage class against pointee type. |
+| `classifyImage` | `src/spirv/reflect.zig:621` | `sampled` separates a sampled image from a storage one, and `Dim.buffer` separates a texel buffer. |
+| `ScalarType`, `SpecializationConstant` | `src/spirv/reflect.zig:59`, `src/spirv/reflect.zig:66` | Native scalar metadata. No Tint object survives. |
+| `Tables.checkId`, `Tables.readSpecializationConstants`, `lessBySpecId` | `src/spirv/reflect.zig:306`, `src/spirv/reflect.zig:500`, `src/spirv/reflect.zig:560` | Native binary validation, scalar collection, and stable ID order. These implement the M13 reflection contract without a WGSL reader. |
+| `ScalarType`, `SpecializationConstant`, `reflect`, `validate`, `wordsFromBytes` exports | `src/spirv/root.zig:41`, `src/spirv/root.zig:42`, `src/spirv/root.zig:55`, `src/spirv/root.zig:56`, `src/spirv/root.zig:57` | Existing module exports expose the native reflection and byte-decoding boundary. |
 
 **What lands.** Nine files under `src/spirv/`, and two fixtures under
 `test/fixtures/`. The WGSL is the source a reviewer reads, and the `.spv` beside
@@ -2961,16 +3151,18 @@ the committed bytes. `docs/50-verification.md` §6.2 owns that command line and
 
 #### M6 — memory
 
-90 rows land, 63 are declared and not yet written. The budget in §1 is 112 and
-§3.3 makes that a floor for the whole milestone. The landed 90 is short of it
-because six planned files are absent from the tree: `heap_pool.zig`,
-`buddy_memory_allocator.zig`, `ring_allocator.zig`, `block_pool.zig`,
-`slab_allocator.zig` and the `HeapPool` half of
-`PooledResourceMemoryAllocator.{h,cpp}`. Their 63 rows are in the second table
-below, not in the first, because `AGENTS.md` §6 says a row is for something
-that is ported and not for something that is planned.
+The original table has 90 rows. The second table retains all 63 formerly
+planned obligations, now mapped to landed code or explicit merge/skip decisions.
+The budget in §1 is 112. These row counts include skipped and merged obligations,
+not 153 distinct implementations.
 
-**What lands.** Eight files under `src/memory/`.
+**Selected-path status, 2026-10-07.** Parent artifact 211 passed the memory
+shard, including successful allocator behavior and fail-N ownership paths,
+in Debug and actual ReleaseSafe. It reports 69/69 build steps and 250 root
+tests per mode. The earlier unverified mapping status is historical.
+This result does not close the upstream M6 row budget or the combined house gate.
+
+**What lands.** Thirteen files under `src/memory/`.
 
 | Zig file | Upstream |
 | --- | --- |
@@ -2982,12 +3174,16 @@ that is ported and not for something that is planned.
 | `src/memory/resource_memory_allocation.zig` | `native/ResourceMemoryAllocation.{h,cpp}` |
 | `src/memory/size_tracker.zig` | `PooledResourceMemoryAllocator.h` class `AllocationSizeTracker` only |
 | `src/memory/buddy_allocator.zig` | `native/BuddyAllocator.{h,cpp}` |
+| `src/memory/heap_pool.zig` | `PooledResourceMemoryAllocator.{h,cpp}`, pool class |
+| `src/memory/buddy_memory_allocator.zig` | `native/BuddyMemoryAllocator.{h,cpp}` |
+| `src/memory/ring_allocator.zig` | `native/RingBufferAllocator.{h,cpp}` |
+| `src/memory/block_pool.zig` | `common/MemoryBlockAllocator.{h,cpp}` |
+| `src/memory/slab_allocator.zig` | `common/SlabAllocator.{h,cpp}` |
 
 One split needs the reason `AGENTS.md` §6 asks for, and it is in its rows.
-`PooledResourceMemoryAllocator.h` holds two classes whose thread policy differs
-— the pool has no lock at `PooledResourceMemoryAllocator.h:64-66` and the
-tracker has one at `:85` — so the header becomes two files, and only the
-tracker half exists today.
+`PooledResourceMemoryAllocator.h` holds two classes with different thread policies.
+The pool has no lock at `PooledResourceMemoryAllocator.h:64-66`.
+The tracker has one at `:85`. Both halves now have separate Zig files.
 
 **Why the buddy tree stays.** §M6 puts VMA below the WebGPU allocation layers.
 It does not follow that the offset tree goes with it. Two facts decide it.
@@ -3008,19 +3204,19 @@ It does not follow that the offset tree goes with it. Two facts decide it.
 What VMA owns is the `VkDeviceMemory` layer: block lifetime, mapping and
 memory-type selection. `src/memory/vma.zig` binds those entry points through
 `VmaVulkanFunctions` (`VMA_DYNAMIC_VULKAN_FUNCTIONS` defaults to 1 at
-`vk_mem_alloc.h:3099`), and nothing calls them until the shim lands. Every
-layer §M6 names as ours — the size tracker, the serial reclamation, the lazy
-flag and the allocation record — is in Zig and is exercised today.
+`vk_mem_alloc.h:3099`), and nothing calls them until the shim lands.
+The size tracker, serial reclamation, lazy flag, and allocation record have Zig
+implementations. Their presence does not establish verified integration or runtime behavior.
 
 **What does not land here, and why.** Four upstream groups in this milestone
 reach past it. Each carries the reason in its rows.
 
 | Group | Lands in | Why |
 | --- | --- | --- |
-| `ScratchBuffer.{h,cpp}` | M10 | `ScratchBuffer.cpp:44` calls `DeviceBase::CreateBuffer` and `:56` returns a `Ref<BufferBase>`. There is no buffer type yet. |
-| `DynamicUploader.{h,cpp}` | M8, M9, M10 | `DynamicUploader.cpp:59` labels a `VkBuffer`, `:81` reads `GetQueue()->GetPendingCommandSerial()`, and `:162` submits. The queue is M9 and the buffer is M10. |
-| `BlockInfo.h` | M7 | `BlockInfo.h:32` includes `dawn_platform.h` for `Origin3D` and `Extent3D`, and `TypedTexelBlockInfo` at `:165` is built from `Format.h:97`. Both are M7. |
-| `PooledResourceMemoryAllocator` heap lifetime | M11 | `DeallocateResourceHeap` (`:70`) destroys a `ResourceHeapBase`, and `vulkan::ResourceHeap` is the only subclass (`ResourceHeapVk.h:37`). M11 supplies the device behind it. |
+| `ScratchBuffer.{h,cpp}` | M10 | `ScratchBuffer.cpp:44` calls `DeviceBase::CreateBuffer` and `:56` returns a `Ref<BufferBase>`. Its buffer integration is outside this table. |
+| `DynamicUploader.{h,cpp}` | M8, M9, M10 | The upstream uploader remains outside this table. `UploadRing.reserve`, `reclaim`, and `cancelLast` in `src/engine/buffer.zig:1738`, `:1793`, and `:1801` consume M6's ring. |
+| `BlockInfo.h` | M7 | `BlockInfo.h:32` includes `dawn_platform.h` for `Origin3D` and `Extent3D`, and `TypedTexelBlockInfo` at `:165` uses `Format.h:97`. Both belong to M7. |
+| Vulkan heap creation and destruction | M11 | `HeapPool` and `BuddyMemoryAllocator` use the injected `ResourceHeapAllocator`. Their bookkeeping does not implement a Vulkan parent or call VMA. |
 
 **What the port does not copy.** Two upstream defects are fixed rather than
 ported, and each is named at its row. `AllocationSizeTracker::GetSize`
@@ -3031,8 +3227,8 @@ every writer takes `mMutex`, which is a data race; the port takes the lock in
 subtraction, so two decrements at two serials can each pass it and together
 exceed the total once both drains run; the port checks the subtraction as well.
 
-By decision, over the landed table: 28 `port`, 8 `merge`, 5 `simplify`, 49
-`skip`.
+By decision, over the original 90-row table: 28 `port`, 8 `merge`, 5 `simplify`,
+49 `skip`. The following 63-row table has its own decisions.
 
 | Upstream file | Landed rows |
 | --- | ---: |
@@ -3063,8 +3259,8 @@ first with their exact offsets.
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/common/Math.h:53` | `IsPowerOfTwo` | `alignment.isPowerOfTwo` | `src/memory/align.zig:25` | port | `Math.h:54` is a `DAWN_RELEASE_ASSUME` compiled out in release, so a zero input is undefined upstream. The port returns `false` for zero, which is the same condition `isPowerOfTwo` states. |
 | `src/dawn/common/Math.h:51` | `Log2` | `alignment.log2PowerOfTwo` | `src/memory/align.zig:35` | simplify | `Math.h:51-52` are two overloads with a body in `Math.cpp`; both are `@bitSizeOf(u64) - 1 - @clz`. The result is `u6` because no level count exceeds it. A non-power-of-two input is `error.NotPowerOfTwo`, which is the condition upstream's own comment states and its code does not check. |
-| `src/dawn/common/Math.h:85` | `NextPowerOfTwo` | `alignment.nextPowerOfTwo` | `src/memory/align.zig:51` | port | Dawn returns zero on overflow and `BuddyMemoryAllocator.cpp:67-70` checks the raw size before calling it precisely so a huge value cannot reach it. The port returns `error.Overflow` instead of a zero, so the order of the two checks is a property of the code and not a comment. |
-| `src/dawn/common/Math.h:98` | `Align` | `alignment.alignForwardByteCount` | `src/memory/align.zig:64` | port | `Math.h:99-101` are three `DAWN_RELEASE_ASSUME`s. The port checks the alignment and returns `error.AlignmentNotPowerOfTwo`, which is what lets `RingAllocator.allocate` reject an alignment a caller built by dividing a block size. |
+| `src/dawn/common/Math.h:85` | `NextPowerOfTwo` | `alignment.nextPowerOfTwo` | `src/memory/align.zig:52` | port | Dawn returns zero on overflow and `BuddyMemoryAllocator.cpp:67-70` checks the raw size before calling it precisely so a huge value cannot reach it. The port returns `error.Overflow` instead of a zero, so the order of the two checks is a property of the code and not a comment. |
+| `src/dawn/common/Math.h:98` | `Align` | `alignment.alignForwardByteCount` | `src/memory/align.zig:65` | port | `Math.h:99-101` are three `DAWN_RELEASE_ASSUME`s. The port checks the alignment and returns `error.AlignmentNotPowerOfTwo`, which is what lets `RingAllocator.allocate` reject an alignment a caller built by dividing a block size. |
 | `src/dawn/native/BuddyAllocator.h:64` | `kInvalidOffset` | `BuddyAllocator.Error` | `src/memory/buddy_allocator.zig:120` | simplify | One sentinel becomes eight named members. Upstream fuses three failures into it at `.cpp:168-170`, so a zero request and an over-large request are the same answer; the port separates them, and the two that name a tree fault instead of a request are not reachable from the public surface. |
 | `src/dawn/native/BuddyAllocator.h:70` | `BlockState` | `State` | `src/memory/buddy_allocator.zig:44` | port | Three enumerators, `Free`/`Split`/`Allocated`, module-private. The port keeps it private because no caller switches on it; `test/memory.zig` reaches the tree through `totalFreeBlockCount` instead. |
 | `src/dawn/native/BuddyAllocator.h:72` | `BuddyBlock` | `Node` | `src/memory/buddy_allocator.zig:58` | port | The link union at `.h:101-110` is resolved into `left`, `free_prev` and `free_next` as separate fields, because upstream writes `mState` before the union member (`.h:74-76`, `.cpp:206-207`) and relies on the order. Three separate fields make that ordering impossible to break and cost three words on a node that a GPU heap allocation dwarfs. `Node` is not exported, which is why the two unreachable error members above cannot be provoked from a test. |
@@ -3079,32 +3275,32 @@ first with their exact offsets.
 | `src/dawn/native/BuddyAllocator.cpp:114` | `InsertFreeBlock` | `BuddyAllocator.insertFreeBlock` | `src/memory/buddy_allocator.zig:309` | port | Head push, O(1). The stale-head-`pPrev` repair at `:125` survives as a field the port writes unconditionally at `:252`, so a free node is in exactly one list by construction rather than by repair. |
 | `src/dawn/native/BuddyAllocator.cpp:132` | `RemoveFreeBlock` | `BuddyAllocator.removeFreeBlock` | `src/memory/buddy_allocator.zig:326` | port | The head case at `:135-137` and the non-head case at `:138-152` are separate branches. `DAWN_ASSERT(pPrev != nullptr)` at `:143` becomes a panic with the reason in the message, because there is no error to return from a function the allocate path calls in a loop. The port clears all three links, where upstream leaves the removed node's links and the new head's `pPrev` stale for the next insert to repair. |
 | `src/dawn/native/BuddyAllocator.cpp:155` | `BuddyAllocator::Allocate` | `BuddyAllocator.allocate` | `src/memory/buddy_allocator.zig:356` | port | Body order at `:156-218` kept whole: reject, find level, split, take. The two size guards at `:156-158` become two named errors rather than one sentinel, so a zero request is not reported as a full allocator. The split loop at `:179-211` is bounded by the tree depth and reports exhaustion as `error.TreeDescentExhausted`, per `AGENTS.md` §2. The children are allocated from the caller's allocator rather than with `new` at `:187-188`. Insert order at `:202-203` is kept — right child first, left child second — because it is what makes allocation lowest-address-first, and `BuddyAllocatorTests.cpp` asserts the resulting offsets. |
-| `src/dawn/native/BuddyAllocator.cpp:220` | `BuddyAllocator::Deallocate` | `BuddyAllocator.deallocate` | `src/memory/buddy_allocator.zig:446` | port | Upstream returns void and reports every fault through `DAWN_CHECK`, so a stale, duplicated or out-of-range offset is a process check failure rather than a value. `error.UnknownOffset` replaces `:239` and `error.OffsetLevelMismatch` replaces `:242`. The merge loop condition at `:248` tests `level > 0` *before* the buddy's state: the root's `pBuddy` is null at `.h:84` and is never set for the node built at `.cpp:42`, so the order of the two tests is the dereference guard. The TODO at `:223-225` asks for the size to be passed in; the port keeps the descent and says so. Release order at `:256-257` is buddy before node, which the port keeps because both come from the caller's allocator and the order is observable to it. |
-| `src/dawn/native/BuddyAllocator.cpp:271` | `DeleteBlock` | `BuddyAllocator.deleteBlock` | `src/memory/buddy_allocator.zig:519` | port | Post-order, right child before left, so the release order at `:275-277` matches the insert order at `:202-203`. Each node goes back to the injected allocator; the port does not call `free`, because the tree owns the nodes through the caller's allocator. `DAWN_ASSERT(block != nullptr)` at `:272` becomes an early return on a split node with no left child, which the port's one-child representation makes possible. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:71` | `AllocationSizeTracker` | `SizeTracker` | `src/memory/size_tracker.zig:38` | merge | The class is a `SerialProcessor` with four instances upstream, registered at `ResourceMemoryAllocatorVk.cpp:164-180`. The port has no base class and one type, so the four instances are four values and the registration is the caller's. The mutex at `:85` becomes `std.Io.Mutex`, because there is no non-`Io` mutex in Zig 0.16 and `AGENTS.md` §3 wants `io` threaded explicitly. `Io` is a parameter of every method, not a field. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:74` | `AllocationSizeTracker::Increment` | `SizeTracker.increment` | `src/memory/size_tracker.zig:90` | port | Body at `.cpp:79-82`, lock included. The addition happens now, which is the asymmetry the whole class is built on. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:76` | `AllocationSizeTracker::Decrement` | `SizeTracker.decrement` | `src/memory/size_tracker.zig:101` | port | Body at `.cpp:84-88`. The size is recorded against the serial and *not* subtracted, so a freed allocation keeps counting until the GPU is past the work that read it. The `DAWN_ASSERT` at `.cpp:86` becomes `error.SizeTrackerUnderflow` and is kept; it is not sufficient, and `updateCompletedSerialTo` checks the subtraction as well, because two decrements at two serials can each pass an enqueue-time check and together exceed the total. The queue is `SerialQueue(u64)` from `src/platform/serial.zig:51`, whose `enqueueMonotonic` returns `error.SerialOrderViolation`. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:78` | `AllocationSizeTracker::GetSize` | `SizeTracker.getSize` | `src/memory/size_tracker.zig:151` | port | An inline definition, so it is keyed here rather than at the `.cpp`. Upstream reads `mTotalSize` with no mutex while every writer takes `mMutex`; that is a data race, and the port takes the lock on the read too. `pendingCount` at `:161` is not upstream: the port needs it to assert that a drain emptied the queue rather than asserting on a byte count alone. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:81` | `AllocationSizeTracker::UpdateCompletedSerialTo` | `SizeTracker.updateCompletedSerialTo` | `src/memory/size_tracker.zig:124` | port | Body at `.cpp:90-96`: `IterateUpTo` then `ClearUpTo`. The port uses `drainUpToInSubmissionOrder`, which is a prefix scan only because `enqueueMonotonic` kept the entries ordered. The drain is inclusive of its serial, which is what lets one serial be used on both the record and the drain. The drain list is a field reused across calls, so this allocates once in the life of the tracker rather than once per tick. |
-| `src/dawn/native/PooledResourceMemoryAllocator.h:82` | `AllocationSizeTracker::AssumeCommandsComplete` | `SizeTracker.assumeCommandsComplete` | `src/memory/size_tracker.zig:139` | port | Body at `.cpp:98-104`: `IterateAll` then `Clear`, at `maxInt(Serial)` because no serial will ever complete. Reached on device loss through `Device.cpp:946` and `ExecutionQueue.cpp:376`; `test/memory.zig` walks that path. |
+| `src/dawn/native/BuddyAllocator.cpp:220` | `BuddyAllocator::Deallocate` | `BuddyAllocator.deallocate` | `src/memory/buddy_allocator.zig:456` | port | Upstream returns void and reports every fault through `DAWN_CHECK`, so a stale, duplicated or out-of-range offset is a process check failure rather than a value. `error.UnknownOffset` replaces `:239` and `error.OffsetLevelMismatch` replaces `:242`. The merge loop condition at `:248` tests `level > 0` *before* the buddy's state: the root's `pBuddy` is null at `.h:84` and is never set for the node built at `.cpp:42`, so the order of the two tests is the dereference guard. The TODO at `:223-225` asks for the size to be passed in; the port keeps the descent and says so. Release order at `:256-257` is buddy before node, which the port keeps because both come from the caller's allocator and the order is observable to it. |
+| `src/dawn/native/BuddyAllocator.cpp:271` | `DeleteBlock` | `BuddyAllocator.deleteBlock` | `src/memory/buddy_allocator.zig:529` | port | Post-order, right child before left, so the release order at `:275-277` matches the insert order at `:202-203`. Each node goes back to the injected allocator; the port does not call `free`, because the tree owns the nodes through the caller's allocator. `DAWN_ASSERT(block != nullptr)` at `:272` becomes an early return on a split node with no left child, which the port's one-child representation makes possible. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:71` | `AllocationSizeTracker` | `SizeTracker` | `src/memory/size_tracker.zig:39` | merge | The class is a `SerialProcessor` with four instances upstream, registered at `ResourceMemoryAllocatorVk.cpp:164-180`. The port has no base class and one type, so the four instances are four values and the registration is the caller's. The mutex at `:85` becomes `std.Io.Mutex`, because there is no non-`Io` mutex in Zig 0.16 and `AGENTS.md` §3 wants `io` threaded explicitly. `Io` is a parameter of every method, not a field. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:74` | `AllocationSizeTracker::Increment` | `SizeTracker.increment` | `src/memory/size_tracker.zig:91` | port | Body at `.cpp:79-82`, lock included. The addition happens now, which is the asymmetry the whole class is built on. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:76` | `AllocationSizeTracker::Decrement` | `SizeTracker.decrement` | `src/memory/size_tracker.zig:102` | port | Body at `.cpp:84-88`. The size is recorded against the serial and *not* subtracted, so a freed allocation keeps counting until the GPU is past the work that read it. The `DAWN_ASSERT` at `.cpp:86` becomes `error.SizeTrackerUnderflow` and is kept; it is not sufficient, and `updateCompletedSerialTo` checks the subtraction as well, because two decrements at two serials can each pass an enqueue-time check and together exceed the total. The queue is `SerialQueue(u64)` from `src/platform/serial.zig:51`, whose `enqueueMonotonic` returns `error.SerialOrderViolation`. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:78` | `AllocationSizeTracker::GetSize` | `SizeTracker.getSize` | `src/memory/size_tracker.zig:152` | port | An inline definition, so it is keyed here rather than at the `.cpp`. Upstream reads `mTotalSize` with no mutex while every writer takes `mMutex`; that is a data race, and the port takes the lock on the read too. `pendingCount` at `:161` is not upstream: the port needs it to assert that a drain emptied the queue rather than asserting on a byte count alone. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:81` | `AllocationSizeTracker::UpdateCompletedSerialTo` | `SizeTracker.updateCompletedSerialTo` | `src/memory/size_tracker.zig:125` | port | Body at `.cpp:90-96`: `IterateUpTo` then `ClearUpTo`. The port uses `drainUpToInSubmissionOrder`, which is a prefix scan only because `enqueueMonotonic` kept the entries ordered. The drain is inclusive of its serial, which is what lets one serial be used on both the record and the drain. The drain list is a field reused across calls, so this allocates once in the life of the tracker rather than once per tick. |
+| `src/dawn/native/PooledResourceMemoryAllocator.h:82` | `AllocationSizeTracker::AssumeCommandsComplete` | `SizeTracker.assumeCommandsComplete` | `src/memory/size_tracker.zig:140` | port | Body at `.cpp:98-104`: `IterateAll` then `Clear`, at `maxInt(Serial)` because no serial will ever complete. Reached on device loss through `Device.cpp:946` and `ExecutionQueue.cpp:376`; `test/memory.zig` walks that path. |
 | `src/dawn/native/ResourceMemoryAllocation.h:42` | `AllocationMethod` | `AllocationMethod` | `src/memory/resource_memory_allocation.zig:50` | port | Four enumerators, `direct`/`sub_allocated`/`external`/`invalid`. `external` has exactly one producer in the whole tree and it is D3D12 (`BufferD3D12.cpp:183`, `TextureD3D12.cpp:231`, `ResourceAllocatorManagerD3D12.cpp:598`); nothing under `src/dawn/native/vulkan/` produces one, and `ResourceMemoryAllocatorVk.cpp:267-310` falls through to `DAWN_UNREACHABLE()`. The port keeps all four so the deallocate switch stays exhaustive, and a fifth method is a compile error until it is handled. |
-| `src/dawn/native/ResourceMemoryAllocation.h:57` | `AllocationInfo` | `AllocationInfo` | `src/memory/resource_memory_allocation.zig:83` | port | Field order `u64, enum, u64, bool` upstream, and it is kept: nothing reads it by layout and upstream declares no `static_assert` on its size. `mBlockOffset` at `:62` is allocator-global and `mOffset` is heap-local; `BuddyMemoryAllocator.cpp:104` computes the second from the first, so the two must not share a name under `AGENTS.md` §2. `mIsLazyAllocated` at `:70` stays on this record because VMA takes `requiredFlags` at create time and exposes nothing afterwards that says "allocated lazily". |
-| `src/dawn/native/ResourceMemoryAllocation.h:74` | `ResourceMemoryAllocation` | `ResourceMemoryAllocation` | `src/memory/resource_memory_allocation.zig:117` | merge | Upstream is a polymorphic value with a defaulted copy constructor, so it has no vtable and no destructor on the Vulkan path: `ResourceMemoryAllocatorVk.cpp:296` copies one by value into a serial queue and `:345` reads that copy back by const reference in `Tick`. The port is a plain struct. `mResourceHeap` at `:97` is a bare non-owning pointer with a `TODO(crbug.com/485825675)` beside it saying it dangles; the port takes `?*Heap` out of the owner and never frees it, which makes the dangling pointer a named field rather than a latent free. |
+| `src/dawn/native/ResourceMemoryAllocation.h:57` | `AllocationInfo` | `AllocationInfo` | `src/memory/resource_memory_allocation.zig:84` | port | Field order `u64, enum, u64, bool` upstream, and it is kept: nothing reads it by layout and upstream declares no `static_assert` on its size. `mBlockOffset` at `:62` is allocator-global and `mOffset` is heap-local; `BuddyMemoryAllocator.cpp:104` computes the second from the first, so the two must not share a name under `AGENTS.md` §2. `mIsLazyAllocated` at `:70` stays on this record because VMA takes `requiredFlags` at create time and exposes nothing afterwards that says "allocated lazily". |
+| `src/dawn/native/ResourceMemoryAllocation.h:74` | `ResourceMemoryAllocation` | `ResourceMemoryAllocation` | `src/memory/resource_memory_allocation.zig:118` | merge | Upstream is a polymorphic value with a defaulted copy constructor, so it has no vtable and no destructor on the Vulkan path: `ResourceMemoryAllocatorVk.cpp:296` copies one by value into a serial queue and `:345` reads that copy back by const reference in `Tick`. The port is a plain struct. `mResourceHeap` at `:97` is a bare non-owning pointer with a `TODO(crbug.com/485825675)` beside it saying it dangles; the port takes `?*Heap` out of the owner and never frees it, which makes the dangling pointer a named field rather than a latent free. |
 | `src/dawn/native/ResourceMemoryAllocation.h:83` | `ResourceMemoryAllocation::ResourceMemoryAllocation(const ResourceMemoryAllocation&)` | — | — | skip | A Zig value copy is the same operation, and the port has exactly two places that copy. |
 | `src/dawn/native/ResourceMemoryAllocation.h:84` | `ResourceMemoryAllocation::operator=` | — | — | skip | Same reason. |
 | `src/dawn/native/ResourceMemoryAllocation.cpp:34` | `ResourceMemoryAllocation::ResourceMemoryAllocation()` | — | — | merge | The default field values, and they are not a convenience: `method = .invalid` is the failure value `BuddyMemoryAllocator.cpp:61` builds and `:64`, `:78` and `:84` each return, and `ResourceMemoryAllocatorVk.cpp:230` tests for it, so a zeroed record must read as "nothing" and never as a zero-size allocation at offset 0. The port checks that with `comptime` at `:206`. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:36` | `ResourceMemoryAllocation::ResourceMemoryAllocation` (4-arg) | `ResourceMemoryAllocation.init` | `src/memory/resource_memory_allocation.zig:150` | port | Member-init list, no body work. `mappedSpan` at `.h:80` becomes `[]u8` with a `.{}` default; `RawSpan<std::byte>` (`src/utils/span.h:105`) is a pointer plus a length, and the upstream getter at `.h:88` hands out a mutable span, so a mutable slice is the faithful mapping and its emptiness is exactly the is-persistently-mapped predicate `BufferVk.cpp:567` reads. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:42` | `ResourceMemoryAllocation::GetResourceHeap` | `ResourceMemoryAllocation.getResourceHeap` | `src/memory/resource_memory_allocation.zig:165` | port | The `DAWN_ASSERT` at `:43` becomes `error.AllocationIsInvalid`. `DAWN_ASSERT` expands to nothing in a release build (`src/utils/assert.h:96-99`), and `AGENTS.md` §2 forbids relying on that. A null heap with a valid method is the same error, because `ResourceMemoryAllocatorVk.cpp:262` hands the record a heap the caller owns and the port cannot prove one is there. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:47` | `ResourceMemoryAllocation::GetOffset` | `ResourceMemoryAllocation.getOffset` | `src/memory/resource_memory_allocation.zig:171` | port | Same guard at `:48`, same reasoning. The field is `offset_byte_count` and `info` holds `block_offset_byte_count`; they are different numbers and must not share a name. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:52` | `ResourceMemoryAllocation::GetInfo` | `ResourceMemoryAllocation.getInfo` | `src/memory/resource_memory_allocation.zig:179` | port | No guard upstream and none here, because the deallocate switch reads the method through it first (`ResourceMemoryAllocatorVk.cpp:266`). The split into two guarded and two unguarded accessors is upstream's, and the port keeps it. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:56` | `ResourceMemoryAllocation::GetMappedSpan` | `ResourceMemoryAllocation.getMappedSpan` | `src/memory/resource_memory_allocation.zig:185` | port | No guard upstream and none here, for the reason at the row above. |
-| `src/dawn/native/ResourceMemoryAllocation.cpp:60` | `ResourceMemoryAllocation::Invalidate` | `ResourceMemoryAllocation.invalidate` | `src/memory/resource_memory_allocation.zig:203` | simplify | Zeroes three fields. `virtual` is dropped: the tree has exactly one override, `ResourceHeapAllocation::Invalidate` (`ResourceHeapAllocationD3D12.cpp:47-50`), and the Vulkan path stores a plain record (`ResourceMemoryAllocatorVk.h:59`). Upstream calls this twice on one record — `ResourceMemoryAllocatorVk.cpp:283` and then unconditionally at `:312` — and a second `Deallocate` takes the `.invalid` arm and does nothing (`:270-271`), so `isInvalid` at `:202` exists to let a caller check that rather than trust it. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:36` | `ResourceMemoryAllocation::ResourceMemoryAllocation` (4-arg) | `ResourceMemoryAllocation.init` | `src/memory/resource_memory_allocation.zig:151` | port | Member-init list, no body work. `mappedSpan` at `.h:80` becomes `[]u8` with a `.{}` default; `RawSpan<std::byte>` (`src/utils/span.h:105`) is a pointer plus a length, and the upstream getter at `.h:88` hands out a mutable span, so a mutable slice is the faithful mapping and its emptiness is exactly the is-persistently-mapped predicate `BufferVk.cpp:567` reads. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:42` | `ResourceMemoryAllocation::GetResourceHeap` | `ResourceMemoryAllocation.getResourceHeap` | `src/memory/resource_memory_allocation.zig:166` | port | The `DAWN_ASSERT` at `:43` becomes `error.AllocationIsInvalid`. `DAWN_ASSERT` expands to nothing in a release build (`src/utils/assert.h:96-99`), and `AGENTS.md` §2 forbids relying on that. A null heap with a valid method is the same error, because `ResourceMemoryAllocatorVk.cpp:262` hands the record a heap the caller owns and the port cannot prove one is there. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:47` | `ResourceMemoryAllocation::GetOffset` | `ResourceMemoryAllocation.getOffset` | `src/memory/resource_memory_allocation.zig:172` | port | Same guard at `:48`, same reasoning. The field is `offset_byte_count` and `info` holds `block_offset_byte_count`; they are different numbers and must not share a name. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:52` | `ResourceMemoryAllocation::GetInfo` | `ResourceMemoryAllocation.getInfo` | `src/memory/resource_memory_allocation.zig:180` | port | No guard upstream and none here, because the deallocate switch reads the method through it first (`ResourceMemoryAllocatorVk.cpp:266`). The split into two guarded and two unguarded accessors is upstream's, and the port keeps it. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:56` | `ResourceMemoryAllocation::GetMappedSpan` | `ResourceMemoryAllocation.getMappedSpan` | `src/memory/resource_memory_allocation.zig:186` | port | No guard upstream and none here, for the reason at the row above. |
+| `src/dawn/native/ResourceMemoryAllocation.cpp:60` | `ResourceMemoryAllocation::Invalidate` | `ResourceMemoryAllocation.invalidate` | `src/memory/resource_memory_allocation.zig:204` | simplify | Zeroes three fields. `virtual` is dropped: the tree has exactly one override, `ResourceHeapAllocation::Invalidate` (`ResourceHeapAllocationD3D12.cpp:47-50`), and the Vulkan path stores a plain record (`ResourceMemoryAllocatorVk.h:59`). Upstream calls this twice on one record — `ResourceMemoryAllocatorVk.cpp:283` and then unconditionally at `:312` — and a second `Deallocate` takes the `.invalid` arm and does nothing (`:270-271`), so `isInvalid` at `:202` exists to let a caller check that rather than trust it. |
 | `src/dawn/native/ResourceHeap.h:36` | `ResourceHeapBase` | `Heap` | `src/memory/resource_heap.zig:33` | merge | An empty class with a defaulted constructor and destructor. It exists only so `ResourceMemoryAllocation.h:38` can forward-declare one name and `ResourceHeapAllocator.h:43-45` can hand out owning pointers to an abstract thing. |
 | `src/dawn/native/vulkan/ResourceHeapVk.h:37` | `vulkan::ResourceHeap` | `Heap` | `src/memory/resource_heap.zig:33` | merge | The one concrete subclass the Vulkan tree has, and the only one the port needs. Three fields (`mMemory`, `mMemoryType`, `mSize` at `:47-49`) and three getters that only read them; under `AGENTS.md` §2 no getter that only reads a field survives, so the fields carry the value. A concrete struct is the smaller change than a vtable with one target, and it is the shape `test/memory.zig` needs: the pool hands a heap back and the test asserts it is the same heap, which a type-erased handle cannot answer. `ToBackend.h:110-113` maps the base pointer to the backend type, so the upstream "downcast" is a static one and needs no virtual. The D3D12 subclass at `d3d12/HeapD3D12.h:42` is not ported, and its allocator at `d3d12/HeapAllocatorD3D12.h:54` is the fourth implementor the vtable does not have to carry. |
-| `src/dawn/native/ResourceHeapAllocator.h:39` | `ResourceHeapAllocator` | `ResourceHeapAllocator` | `src/memory/resource_heap_allocator.zig:71` | port | Two pure virtuals and a defaulted virtual destructor become a two-entry `VTable` at `:60` behind an opaque context. A generic parameter would make every consumer monomorphic over upstream's four implementors, two of which the port does not carry; a table keeps the seam at the boundary. `allocateResourceHeap` takes the allocator because the heap it returns may be heap-allocated, and a table that closed over one would be a hidden allocator. `deallocateResourceHeap` takes none, because it destroys what it was handed. |
+| `src/dawn/native/ResourceHeapAllocator.h:39` | `ResourceHeapAllocator` | `ResourceHeapAllocator` | `src/memory/resource_heap_allocator.zig:73` | port | Two pure virtuals and a defaulted virtual destructor become a two-entry `VTable` at `:60` behind an opaque context. A generic parameter would make every consumer monomorphic over upstream's four implementors, two of which the port does not carry; a table keeps the seam at the boundary. `allocateResourceHeap` takes the allocator because the heap it returns may be heap-allocated, and a table that closed over one would be a hidden allocator. `deallocateResourceHeap` takes none, because it destroys what it was handed. |
 | `src/dawn/native/ResourceHeapAllocator.h:41` | `ResourceHeapAllocator::~ResourceHeapAllocator` | — | — | skip | `= default` at `:41`. A Zig struct has no destructor and the table entry is the whole of the polymorphic surface. |
-| `src/dawn/native/ResourceHeapAllocator.h:43` | `ResourceHeapAllocator::AllocateResourceHeap` | `ResourceHeapAllocator.allocateResourceHeap` | `src/memory/resource_heap_allocator.zig:82` | port | A pure-virtual declaration, so the body is the implementation's and there is nothing to port. Upstream returns `ResultOrError<unique_ptr<ResourceHeapBase>>`; the port returns `*Heap` and owns it through the caller's allocator. The single upstream error is `DAWN_OUT_OF_MEMORY_ERROR` at `ResourceMemoryAllocatorVk.cpp:101-103`, which folds the driver's answer and the caller's request into one bit; the port's `Error` at `:38` splits them into `OutOfDeviceMemory`, `OutOfHostMemory` and `RequestExceedsMaximumHeapSize`. |
-| `src/dawn/native/ResourceHeapAllocator.h:45` | `ResourceHeapAllocator::DeallocateResourceHeap` | `ResourceHeapAllocator.deallocateResourceHeap` | `src/memory/resource_heap_allocator.zig:98` | port | Also a pure-virtual declaration. Upstream takes ownership by value; here the ownership is the pointer and destroying the heap is the implementation's job, which is the one fact a test double has to be told. |
+| `src/dawn/native/ResourceHeapAllocator.h:43` | `ResourceHeapAllocator::AllocateResourceHeap` | `ResourceHeapAllocator.allocateResourceHeap` | `src/memory/resource_heap_allocator.zig:84` | port | A pure-virtual declaration, so the body is the implementation's and there is nothing to port. Upstream returns `ResultOrError<unique_ptr<ResourceHeapBase>>`; the port returns `*Heap` and owns it through the caller's allocator. The single upstream error is `DAWN_OUT_OF_MEMORY_ERROR` at `ResourceMemoryAllocatorVk.cpp:101-103`, which folds the driver's answer and the caller's request into one bit; the port's `Error` at `:38` splits them into `OutOfDeviceMemory`, `OutOfHostMemory` and `RequestExceedsMaximumHeapSize`. |
+| `src/dawn/native/ResourceHeapAllocator.h:45` | `ResourceHeapAllocator::DeallocateResourceHeap` | `ResourceHeapAllocator.deallocateResourceHeap` | `src/memory/resource_heap_allocator.zig:100` | port | Also a pure-virtual declaration. Upstream takes ownership by value; here the ownership is the pointer and destroying the heap is the implementation's job, which is the one fact a test double has to be told. |
 | `src/dawn/native/ScratchBuffer.cpp:34` | `ScratchBuffer::ScratchBuffer` | — | — | skip | Takes a `DeviceBase*` (`.h:62`) and holds it. The device is M8. |
 | `src/dawn/native/ScratchBuffer.cpp:37` | `~ScratchBuffer` | — | — | skip | `= default` at `:37`. |
 | `src/dawn/native/ScratchBuffer.cpp:39` | `ScratchBuffer::Reset` | — | — | skip | Only the device teardown calls it (`InternalPipelineStore.cpp:48-51`, `Device.cpp:2715`). |
@@ -3117,44 +3313,50 @@ first with their exact offsets.
 | `src/dawn/native/DynamicUploader.cpp:143` | `DynamicUploader::MaybeSubmitPendingCommands` | — | — | skip | Takes the device guard at `:150` and submits at `:163`. M8 and M9. |
 | `src/dawn/native/DynamicUploader.cpp:166` | `DynamicUploader::Deallocate` | — | — | skip | Erases rings and drops their `Ref`s (`:177-178`). M9. |
 | `src/dawn/native/DynamicUploader.cpp:186` | `DynamicUploader::UpdateMemoryPendingSubmit` | — | — | skip | Reads the queue's pending serial (`:192`). M9. |
-| `src/dawn/native/BlockInfo.h:46` | `TexelCount` | — | — | skip | A `TypedInteger` wrapper (`src/utils/typed_integer.h`, 323 lines, not in §2's inventory). M7. |
-| `src/dawn/native/BlockInfo.h:47` | `BlockCount` | — | — | skip | Same reason. |
-| `src/dawn/native/BlockInfo.h:57` | `TexelOrigin3D::TexelOrigin3D` | — | — | skip | `dawn_platform.h` is M7. |
-| `src/dawn/native/BlockInfo.h:64` | `TexelOrigin3D::TexelOrigin3D` (Origin3D) | — | — | skip | Same reason. |
-| `src/dawn/native/BlockInfo.h:68` | `TexelOrigin3D::ToOrigin3D` | — | — | skip | Same reason. |
-| `src/dawn/native/BlockInfo.h:73` | `TexelOrigin3D::operator==` | — | — | skip | Zig `==`. |
-| `src/dawn/native/BlockInfo.h:84` | `BlockOrigin3D::BlockOrigin3D` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:90` | `BlockOrigin3D::operator==` | — | — | skip | Zig `==`. |
-| `src/dawn/native/BlockInfo.h:100` | `TexelExtent3D::TexelExtent3D` | — | — | skip | Field defaults. |
-| `src/dawn/native/BlockInfo.h:104` | `TexelExtent3D::TexelExtent3D` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:111` | `TexelExtent3D::TexelExtent3D` (Extent3D) | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:116` | `TexelExtent3D::ToExtent3D` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:122` | `TexelExtent3D::operator==` | — | — | skip | Zig `==`. |
-| `src/dawn/native/BlockInfo.h:125` | `TexelExtent3D::IsEmpty` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:138` | `BlockExtent3D::BlockExtent3D` | — | — | skip | Field defaults. |
-| `src/dawn/native/BlockInfo.h:142` | `BlockExtent3D::BlockExtent3D` | — | — | skip | Field defaults. |
-| `src/dawn/native/BlockInfo.h:148` | `BlockExtent3D::operator==` | — | — | skip | Zig `==`. |
-| `src/dawn/native/BlockInfo.h:151` | `BlockExtent3D::IsEmpty` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:165` | `TypedTexelBlockInfo::TypedTexelBlockInfo` | — | — | skip | Built from `Format.h:97`, and Format is M7. |
-| `src/dawn/native/BlockInfo.h:169` | `TypedTexelBlockInfo::TypedTexelBlockInfo` | — | — | skip | Same reason. |
-| `src/dawn/native/BlockInfo.h:174` | `TypedTexelBlockInfo::TypedTexelBlockInfo` (TexelBlockInfo) | — | — | skip | The only bridge from the untyped struct `GetBlockInfo` returns (`Commands.h:235`). M7. |
-| `src/dawn/native/BlockInfo.h:179` | `TypedTexelBlockInfo::ToTexelBlockInfo` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:184` | `TypedTexelBlockInfo::ToBytes` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:189` | `TypedTexelBlockInfo::BytesToBlocks` | — | — | skip | M7. Its `DAWN_ASSERT` at `:190` becomes a named error and is the enforcement point for a non-block-aligned size. |
-| `src/dawn/native/BlockInfo.h:195` | `TypedTexelBlockInfo::ToBlockHeight` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:201` | `TypedTexelBlockInfo::ToBlockWidth` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:207` | `TypedTexelBlockInfo::ToBlockDepth` | — | — | skip | M7. An identity function that divides by one, kept because `ToBlock` at `:231` calls it. |
-| `src/dawn/native/BlockInfo.h:214` | `TypedTexelBlockInfo::ToTexelWidth` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:219` | `TypedTexelBlockInfo::ToTexelHeight` | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:224` | `TypedTexelBlockInfo::ToTexelDepth` | — | — | skip | M7. An identity function, same reason as `:207`. |
-| `src/dawn/native/BlockInfo.h:231` | `TypedTexelBlockInfo::ToBlock` (TexelOrigin3D) | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:236` | `TypedTexelBlockInfo::ToBlock` (TexelExtent3D) | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:242` | `TypedTexelBlockInfo::ToTexel` (BlockOrigin3D) | — | — | skip | M7. |
-| `src/dawn/native/BlockInfo.h:247` | `TypedTexelBlockInfo::ToTexel` (BlockExtent3D) | — | — | skip | M7. |
+| `src/dawn/native/BlockInfo.h:46` | `TexelCount` | `TexelCount` | `src/engine/block_info.zig:129` | port | Distinct struct with a `u64` value in texels. |
+| `src/dawn/native/BlockInfo.h:47` | `BlockCount` | `BlockCount` | `src/engine/block_info.zig:130` | port | Distinct struct with a `u64` value in blocks. No integer alias. |
+| `src/dawn/native/BlockInfo.h:57` | `TexelOrigin3D::TexelOrigin3D` | `TexelOrigin3D` | `src/engine/block_info.zig:135` | merge | Struct literal accepts typed coordinates. Defaults are zero. |
+| `src/dawn/native/BlockInfo.h:64` | `TexelOrigin3D::TexelOrigin3D` (Origin3D) | `TexelOrigin3D.fromOrigin3D` | `src/engine/block_info.zig:140` | port | Widens API coordinates into texel counts. |
+| `src/dawn/native/BlockInfo.h:68` | `TexelOrigin3D::ToOrigin3D` | `TexelOrigin3D.toOrigin3D` | `src/engine/block_info.zig:148` | port | Returns `NarrowingOverflow` if a coordinate cannot fit `u32`. |
+| `src/dawn/native/BlockInfo.h:73` | `TexelOrigin3D::operator==` | — | — | skip | Use `std.meta.eql` for Zig 0.16 aggregate equality. No wrapper method. |
+| `src/dawn/native/BlockInfo.h:84` | `BlockOrigin3D::BlockOrigin3D` | `BlockOrigin3D` | `src/engine/block_info.zig:157` | merge | Struct literal accepts block counts. Defaults are zero. |
+| `src/dawn/native/BlockInfo.h:90` | `BlockOrigin3D::operator==` | — | — | skip | Use `std.meta.eql`. No aggregate `==` or wrapper method. |
+| `src/dawn/native/BlockInfo.h:100` | `TexelExtent3D::TexelExtent3D` | `TexelExtent3D` | `src/engine/block_info.zig:163` | merge | Defaults are width 0, height 1, and depth or array layers 1. |
+| `src/dawn/native/BlockInfo.h:104` | `TexelExtent3D::TexelExtent3D` | `TexelExtent3D` | `src/engine/block_info.zig:163` | merge | Struct literal accepts typed texel counts. |
+| `src/dawn/native/BlockInfo.h:111` | `TexelExtent3D::TexelExtent3D` (Extent3D) | `TexelExtent3D.fromExtent3D` | `src/engine/block_info.zig:168` | port | Widens API dimensions without a unit change. |
+| `src/dawn/native/BlockInfo.h:116` | `TexelExtent3D::ToExtent3D` | `TexelExtent3D.toExtent3D` | `src/engine/block_info.zig:176` | port | Returns `NarrowingOverflow` instead of truncation. |
+| `src/dawn/native/BlockInfo.h:122` | `TexelExtent3D::operator==` | — | — | skip | Use `std.meta.eql`. No wrapper method. |
+| `src/dawn/native/BlockInfo.h:125` | `TexelExtent3D::IsEmpty` | `TexelExtent3D.isEmpty` | `src/engine/block_info.zig:184` | port | Any zero dimension makes the extent empty. |
+| `src/dawn/native/BlockInfo.h:138` | `BlockExtent3D::BlockExtent3D` | `BlockExtent3D` | `src/engine/block_info.zig:190` | merge | Defaults are width 0, height 1, and depth or array layers 1. |
+| `src/dawn/native/BlockInfo.h:142` | `BlockExtent3D::BlockExtent3D` | `BlockExtent3D` | `src/engine/block_info.zig:190` | merge | Struct literal accepts typed block counts. |
+| `src/dawn/native/BlockInfo.h:148` | `BlockExtent3D::operator==` | — | — | skip | Use `std.meta.eql`. No wrapper method. |
+| `src/dawn/native/BlockInfo.h:151` | `BlockExtent3D::IsEmpty` | `BlockExtent3D.isEmpty` | `src/engine/block_info.zig:195` | port | Any zero block dimension makes the extent empty. |
+| `src/dawn/native/BlockInfo.h:165` | `TypedTexelBlockInfo::TypedTexelBlockInfo` | `TypedTexelBlockInfo` | `src/engine/block_info.zig:203` | merge | Zero defaults represent unset metadata, not a usable block. |
+| `src/dawn/native/BlockInfo.h:169` | `TypedTexelBlockInfo::TypedTexelBlockInfo` | `TypedTexelBlockInfo` | `src/engine/block_info.zig:203` | merge | Struct literal stores `u32` bytes and distinct texel width and height. |
+| `src/dawn/native/BlockInfo.h:174` | `TypedTexelBlockInfo::TypedTexelBlockInfo` (TexelBlockInfo) | `TypedTexelBlockInfo.fromTexelBlockInfo` | `src/engine/block_info.zig:208` | port | Widens untyped geometry into texel counts. |
+| `src/dawn/native/BlockInfo.h:179` | `TypedTexelBlockInfo::ToTexelBlockInfo` | `TypedTexelBlockInfo.toTexelBlockInfo` | `src/engine/block_info.zig:216` | port | Returns `NarrowingOverflow` for geometry outside `u32`. |
+| `src/dawn/native/BlockInfo.h:184` | `TypedTexelBlockInfo::ToBytes` | `TypedTexelBlockInfo.toBytes` | `src/engine/block_info.zig:224` | port | Blocks times bytes per block. Returns `InvalidBlockInfo` or `Overflow`. |
+| `src/dawn/native/BlockInfo.h:189` | `TypedTexelBlockInfo::BytesToBlocks` | `TypedTexelBlockInfo.bytesToBlocks` | `src/engine/block_info.zig:229` | port | Exact division. Returns `InvalidBlockInfo` or `NonExactDivision`. |
+| `src/dawn/native/BlockInfo.h:195` | `TypedTexelBlockInfo::ToBlockHeight` | `TypedTexelBlockInfo.toBlockHeight` | `src/engine/block_info.zig:234` | port | Texel height divided exactly by block height. Same division errors. |
+| `src/dawn/native/BlockInfo.h:201` | `TypedTexelBlockInfo::ToBlockWidth` | `TypedTexelBlockInfo.toBlockWidth` | `src/engine/block_info.zig:239` | port | Texel width divided exactly by block width. Same division errors. |
+| `src/dawn/native/BlockInfo.h:207` | `TypedTexelBlockInfo::ToBlockDepth` | `TypedTexelBlockInfo.toBlockDepth` | `src/engine/block_info.zig:244` | port | Identity conversion. Two-dimensional blocks do not divide depth. |
+| `src/dawn/native/BlockInfo.h:214` | `TypedTexelBlockInfo::ToTexelWidth` | `TypedTexelBlockInfo.toTexelWidth` | `src/engine/block_info.zig:248` | port | Block width times texels per block. Returns `InvalidBlockInfo` or `Overflow`. |
+| `src/dawn/native/BlockInfo.h:219` | `TypedTexelBlockInfo::ToTexelHeight` | `TypedTexelBlockInfo.toTexelHeight` | `src/engine/block_info.zig:253` | port | Block height times texels per block. Same multiplication errors. |
+| `src/dawn/native/BlockInfo.h:224` | `TypedTexelBlockInfo::ToTexelDepth` | `TypedTexelBlockInfo.toTexelDepth` | `src/engine/block_info.zig:258` | port | Identity conversion, with no geometry validation or error return. |
+| `src/dawn/native/BlockInfo.h:231` | `TypedTexelBlockInfo::ToBlock` (TexelOrigin3D) | `TypedTexelBlockInfo.toBlockOrigin` | `src/engine/block_info.zig:262` | port | Converts x and y exactly. Preserves z. |
+| `src/dawn/native/BlockInfo.h:236` | `TypedTexelBlockInfo::ToBlock` (TexelExtent3D) | `TypedTexelBlockInfo.toBlockExtent` | `src/engine/block_info.zig:273` | port | Converts width and height exactly. Preserves depth or array layers. |
+| `src/dawn/native/BlockInfo.h:242` | `TypedTexelBlockInfo::ToTexel` (BlockOrigin3D) | `TypedTexelBlockInfo.toTexelOrigin` | `src/engine/block_info.zig:284` | port | Multiplies x and y with overflow checks. Preserves z. |
+| `src/dawn/native/BlockInfo.h:247` | `TypedTexelBlockInfo::ToTexel` (BlockExtent3D) | `TypedTexelBlockInfo.toTexelExtent` | `src/engine/block_info.zig:295` | port | Multiplies width and height with overflow checks. Preserves depth or array layers. |
 
-**What is declared and not yet written.** Sixty-three rows whose target file
-is not on disk. They are here so the milestone's shape is recorded and so a
-later change has the mapping to land, not because anything is ported.
+These transferred M7 obligations passed the selected BlockInfo tests in parent
+artifact 211. `NarrowError` and `ConversionError` are declared at
+`src/engine/block_info.zig:132` and `src/engine/block_info.zig:133`.
+The selected migrated consumers passed. This is not full M7 upstream conformance.
+
+**The 63 formerly planned obligations.** Each upstream obligation remains a
+separate row. Target paths cite existing declarations. Merge and skip rows state
+the actual ownership or language contract. Parent artifact 211 verifies the
+selected implementation paths. It does not turn skipped obligations into ports.
 
 | Upstream file | Rows |
 | --- | ---: |
@@ -3167,69 +3369,69 @@ later change has the mapping to land, not because anything is ported.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:38` | `BuddyMemoryAllocator::BuddyMemoryAllocator` | `BuddyMemoryAllocator.init` | `src/memory/buddy_memory_allocator.zig` | merge | Planned. The three `DAWN_ASSERT`s at `:44-46` become three named errors. The table at `:48` is `maxSystemSize / mMemoryBlockSize` slots of `{ ref_count, heap }`. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:51` | `~BuddyMemoryAllocator` | `BuddyMemoryAllocator.deinit` | `src/memory/buddy_memory_allocator.zig` | merge | Planned. `= default` at `:51`. The port frees the table, which is the one thing the destructor has to own. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:53` | `BuddyMemoryAllocator::GetMemoryIndex` | `BuddyMemoryAllocator.memoryBlockIndex` | `src/memory/buddy_memory_allocator.zig` | port | Planned. `offset / mMemoryBlockSize` at `:53`, division made explicit per `AGENTS.md` §2 because the block size divides the system size by the constructor's third invariant. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:58` | `BuddyMemoryAllocator::Allocate` | `BuddyMemoryAllocator.allocate` | `src/memory/buddy_memory_allocator.zig` | port | Planned. The zero-size rejection at `:63-65`, the pre-rounding size guard at `:67-70`, the unrounded size captured at `:72`, `NextPowerOfTwo` at `:74`, the over-large rejection at `:77-79`, the offset failure at `:83-85`, the refcount transition at `:88-95`, and the two offsets at `:98` and `:104`. The record keeps the value captured at `:72`, which is the number `AllocationInfo.requested_size_byte_count` carries. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:110` | `BuddyMemoryAllocator::Deallocate` | `BuddyMemoryAllocator.deallocate` | `src/memory/buddy_memory_allocator.zig` | port | Planned. The `DAWN_ASSERT`s at `:113` and `:117` become `error.NotSubAllocated` and `error.HeapRefcountUnderflow`. The heap leaves the parent before the block returns to the tree, at `:121` then `:125`. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:128` | `BuddyMemoryAllocator::GetMemoryBlockSize` | — | — | merge | Planned. The field `memory_block_size_byte_count`. `AGENTS.md` §2 says no function that only reads a field. |
-| `src/dawn/native/BuddyMemoryAllocator.cpp:132` | `ComputeTotalNumOfHeapsForTesting` | `BuddyMemoryAllocator.liveHeapCount` | `src/memory/buddy_memory_allocator.zig` | port | Planned. Renamed off the test-only suffix. Upstream has no production caller — the declaration at `BuddyMemoryAllocator.h:69` and this definition are the only two mentions in the tree — so the count exists for the test alone. The port keeps it because the refcount table at `BuddyMemoryAllocator.h:79-84` is the pool's own bookkeeping and M11 needs a way to read it. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:36` | `PooledResourceMemoryAllocator::PooledResourceMemoryAllocator` | `HeapPool.init` | `src/memory/heap_pool.zig` | merge | Planned. Stores the parent allocator, and records the one block size the pool serves, because upstream ignores `size` on a pool hit at `:57-61` and nothing checks the request. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:39` | `~PooledResourceMemoryAllocator` | `HeapPool.deinit` | `src/memory/heap_pool.zig` | port | Planned. `DAWN_CHECK(mPool.empty())` at `:40` is kept, with the reason: the owner must drain before teardown, and a silent drop would leak a `VkDeviceMemory`. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:43` | `PooledResourceMemoryAllocator::FreeRecycledAllocations` | `HeapPool.releaseRecycled` | `src/memory/heap_pool.zig` | port | Planned. Moves every entry to the parent at `:46`, then clears. Port of `DeviceVk.cpp:1129` and `:1238`. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:53` | `PooledResourceMemoryAllocator::AllocateResourceHeap` | `HeapPool.allocateResourceHeap` | `src/memory/heap_pool.zig` | port | Planned. Pop front on a hit at `:59-60`, delegate on a miss at `:64`. The port rejects a request whose size is not the pool's own, which is the invariant `:57-61` relies on and never states. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:70` | `PooledResourceMemoryAllocator::DeallocateResourceHeap` | `HeapPool.deallocateResourceHeap` | `src/memory/heap_pool.zig` | port | Planned. Push front at `:72`. The port caps the deque; upstream is unbounded, and a device thread that frees in a burst would otherwise retain the whole burst. |
-| `src/dawn/native/PooledResourceMemoryAllocator.cpp:75` | `PooledResourceMemoryAllocator::GetPoolSizeForTesting` | `HeapPool.recycledCount` | `src/memory/heap_pool.zig` | port | Planned. Renamed off the test-only suffix. `ResourceMemoryAllocatorVk.cpp:364-368` fans the release out over every per-type allocator through the wrapper at `:89`, and that fan-out is the path that wants the count. |
-| `src/dawn/native/RingBufferAllocator.cpp:49` | `RingBufferAllocator::RingBufferAllocator` | — | — | skip | Planned. The default constructor. `max_block_size_byte_count = 0` makes the used-size test at `:96` true on the first request and returns `kInvalidOffset` at `:97`, which is what the port's field default already does. |
-| `src/dawn/native/RingBufferAllocator.cpp:51` | `RingBufferAllocator::RingBufferAllocator` (size) | `RingAllocator.init` | `src/memory/ring_allocator.zig` | port | Planned. One field initialiser, `mMaxBlockSize(maxSize)` at `:51`; the other four carry header defaults, and the port's `init` makes them explicit rather than relying on them. |
-| `src/dawn/native/RingBufferAllocator.cpp:53` | `RingBufferAllocator::RingBufferAllocator` (copy) | — | — | skip | Planned. A Zig value copy is the same operation. Upstream needs the copy because `DynamicUploader.cpp:79` constructs a `RingBuffer` in place inside a `new`; `DynamicUploader` is M9 and has no row here. |
-| `src/dawn/native/RingBufferAllocator.cpp:55` | `~RingBufferAllocator` | `RingAllocator.deinit` | `src/memory/ring_allocator.zig` | port | Planned. `SerialQueue` (`common/SerialQueue.h:56`) inherits a `SerialStorage` that heap-allocates its entries, so the port frees the queue and `AGENTS.md` §2 gives the destructor a body upstream does not need. |
-| `src/dawn/native/RingBufferAllocator.cpp:57` | `RingBufferAllocator::operator=` | — | — | skip | Planned. Copying a self-owning queue is an upstream hazard, not a contract. |
-| `src/dawn/native/RingBufferAllocator.cpp:59` | `RingBufferAllocator::Deallocate` | `RingAllocator.deallocate` | `src/memory/ring_allocator.zig` | port | Planned. `:61-64` set `mUsedStartOffset` from each request's end offset and subtract its size; FIFO end-offset ordering is what makes that correct rather than merely monotonic. |
-| `src/dawn/native/RingBufferAllocator.cpp:70` | `RingBufferAllocator::GetSize` | — | — | merge | Planned. The field `max_block_size_byte_count`. |
-| `src/dawn/native/RingBufferAllocator.cpp:74` | `RingBufferAllocator::GetUsedSize` | — | — | merge | Planned. The field `used_size_byte_count`. |
-| `src/dawn/native/RingBufferAllocator.cpp:78` | `RingBufferAllocator::Empty` | `RingAllocator.isEmpty` | `src/memory/ring_allocator.zig` | port | Planned. The inflight request queue is empty, not `mUsedSize == 0`. The two coincide only because the used size is the sum of the live request sizes. |
-| `src/dawn/native/RingBufferAllocator.cpp:89` | `RingBufferAllocator::Allocate` | `RingAllocator.allocate` | `src/memory/ring_allocator.zig` | port | Planned. Three paths at `:119`, `:123-131` and `:132-137`, in that order. `kInvalidOffset` becomes `error.RingBufferFull`. The overflow guard at `:101-104` stays ahead of the alignment arithmetic. |
-| `src/dawn/common/MemoryBlockAllocator.h:85` | `FreeBlock::GetLastKnownSerial` | — | — | merge | Planned. A field read on the node the block hosts, folded into `BlockPool.tick`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:38` | `FreeBlock::FromHeapArray` | `linkFromBlock` | `src/memory/block_pool.zig` | port | Planned. The two unconditional checks at `:41-42` become `error.BlockTooSmallForLink` and `error.BlockMisalignedForLink`. The node is placement-written into the block's own first bytes, so `returnBlock` never allocates. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:47` | `FreeBlock::UnlinkAndAcquireHeapArray` | `unlinkBlock` | `src/memory/block_pool.zig` | port | Planned. Moves the byte slice out before the link dies, because the link's own storage is inside that slice. The comment at `:49-51` names the bug this order prevents. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:57` | `FreeBlock::FreeBlock` | `linkFromBlock` | `src/memory/block_pool.zig` | port | Planned. The `DAWN_ASSERT` at `:59` becomes a comptime-checked alignment plus a runtime assert in the same function. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:62` | `MemoryBlockAllocator::MemoryBlockAllocator` | `BlockPool.init` | `src/memory/block_pool.zig` | port | Planned. `mBlockSize = max(blockSize, sizeof(FreeBlock))` at `:63`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:65` | `~MemoryBlockAllocator` | `BlockPool.deinit` | `src/memory/block_pool.zig` | port | Planned. `TrimMemory` at `:66`, then the `DAWN_CHECK` that the pool is empty. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:69` | `MemoryBlockAllocator::GetBlockSize` | — | — | merge | Planned. The field `block_size_byte_count`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:73` | `MemoryBlockAllocator::Allocate` | `BlockPool.allocate` | `src/memory/block_pool.zig` | port | Planned. The oversized bypass at `:74-77` returns a block of exactly the requested size and never pools it; the tail pop at `:83`; the fresh allocation at `:89`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:93` | `MemoryBlockAllocator::Return` | `BlockPool.returnBlock` | `src/memory/block_pool.zig` | port | Planned. Only an exact-size block is pooled, at `:94-95`; anything else is dropped, per the comment at `:106-108`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:102` | `MemoryBlockAllocator::Return` (batch) | `BlockPool.returnBlocks` | `src/memory/block_pool.zig` | port | Planned. The same per-block filter at `:105-109`, then `clear()`. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:116` | `MemoryBlockAllocator::Tick` | `BlockPool.tick` | `src/memory/block_pool.zig` | port | Planned. Increments the serial, then evicts head-first while `last_serial + keep_alive_window <= tick_serial` and breaks on the first survivor at `:120-123`. The break is correct only because return order is append order. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:129` | `MemoryBlockAllocator::TrimMemory` | `BlockPool.trim` | `src/memory/block_pool.zig` | port | Planned. Unconditional drain. |
-| `src/dawn/common/MemoryBlockAllocator.cpp:137` | `MemoryBlockAllocator::GetRecycledBlockCountForTesting` | `BlockPool.recycledBlockCount` | `src/memory/block_pool.zig` | port | Planned. Renamed off the test-only suffix. |
-| `src/dawn/common/SlabAllocator.cpp:44` | `IndexLinkNode::IndexLinkNode` | — | — | merge | Planned. Both indices are written by `initFreeList` when a slab is built, so no constructor survives. |
-| `src/dawn/common/SlabAllocator.cpp:49` | `Slab::Slab` | — | — | skip | Planned. `= default`. The Zig `Slab` record is always initialised at `:300`. |
-| `src/dawn/common/SlabAllocator.cpp:50` | `Slab::Slab` (HeapArray, IndexLinkNode*) | — | — | merge | Planned. The same placement write, in `initSlab`. |
-| `src/dawn/common/SlabAllocator.cpp:53` | `Slab::Slab` (Slab&&) | — | — | skip | Planned. Zig has no move constructor, and no port caller moves a slab list. |
-| `src/dawn/common/SlabAllocator.cpp:57` | `SentinelSlab::SentinelSlab` | — | — | skip | Planned. An empty struct initialiser. |
-| `src/dawn/common/SlabAllocator.cpp:58` | `SentinelSlab::SentinelSlab` (move) | — | — | skip | Planned. Same reason. |
-| `src/dawn/common/SlabAllocator.cpp:60` | `~SentinelSlab` | `SlabAllocator.deinit` | `src/memory/slab_allocator.zig` | port | Planned. The `DAWN_CHECK` at `:61` that all three lists are empty. |
-| `src/dawn/common/SlabAllocator.cpp:64` | `SentinelSlab::Destroy` | `SlabAllocator.destroyAllSlabs` | `src/memory/slab_allocator.zig` | port | Planned. Returns every block to the pool at `:72`, with the `blocksInUse == 0` assertion at `:70`. |
-| `src/dawn/common/SlabAllocator.cpp:78` | `SlabAllocatorImpl::SlabAllocatorImpl` | `SlabAllocator.init` | `src/memory/slab_allocator.zig` | port | Planned. The five layout constants at `:81-87` and the four constructor invariants at `:89-93`. The unconditional `mAllocationAlignment <= alignof(std::max_align_t)` at `:92` becomes a comptime fact on the alignment parameter, which is what `SlabAllocatorTests.cpp:266` tests as a death test. |
-| `src/dawn/common/SlabAllocator.cpp:96` | `SlabAllocatorImpl::SlabAllocatorImpl` (move) | — | — | skip | Planned. It exists only so the temporary from `MakeFrontendBindGroupAllocator` (`BindGroupLayoutInternal.h:214-220`) can be moved into a member. A Zig `init` returning a value is the idiomatic form. |
-| `src/dawn/common/SlabAllocator.cpp:108` | `~SlabAllocatorImpl` | `SlabAllocator.deinit` | `src/memory/slab_allocator.zig` | port | Planned. Calls `:64` once per list. |
-| `src/dawn/common/SlabAllocator.cpp:114` | `SlabAllocatorImpl::OffsetFrom` | `SlabAllocator.objectFromNode` | `src/memory/slab_allocator.zig` | port | Planned. `node + stride * offset`, the inverse of `:122`. |
-| `src/dawn/common/SlabAllocator.cpp:122` | `SlabAllocatorImpl::NodeFromObject` | `SlabAllocator.nodeFromObject` | `src/memory/slab_allocator.zig` | port | Planned. `object + index_link_node_offset`. |
-| `src/dawn/common/SlabAllocator.cpp:127` | `SlabAllocatorImpl::ObjectFromNode` | `SlabAllocator.objectFromNode` | `src/memory/slab_allocator.zig` | port | Planned. `node - index_link_node_offset`. |
-| `src/dawn/common/SlabAllocator.cpp:132` | `SlabAllocatorImpl::IsNodeInSlab` | `SlabAllocator.nodeIsInSlab` | `src/memory/slab_allocator.zig` | port | Planned. Three clauses at `:133-136`, split into three named results because the third clause is what catches a stale index from another slab. |
-| `src/dawn/common/SlabAllocator.cpp:139` | `SlabAllocatorImpl::PushFront` | `SlabAllocator.pushFreeBlock` | `src/memory/slab_allocator.zig` | port | Planned. Free-list insert and `blocksInUse--`, with the four assertions at `:140`, `:147`, `:151` split into pairs. |
-| `src/dawn/common/SlabAllocator.cpp:155` | `SlabAllocatorImpl::PopFront` | `SlabAllocator.popFreeBlock` | `src/memory/slab_allocator.zig` | port | Planned. Free-list remove and `blocksInUse++`, with the five assertions at `:156`, `:162`, `:166`, `:168` split. |
-| `src/dawn/common/SlabAllocator.cpp:172` | `SentinelSlab::Prepend` | `SlabAllocator.prependSlab` | `src/memory/slab_allocator.zig` | port | Planned. Head insert onto a sentinel-terminated list. |
-| `src/dawn/common/SlabAllocator.cpp:181` | `Slab::Splice` | `SlabAllocator.spliceSlab` | `src/memory/slab_allocator.zig` | port | Planned. Unlink from one list, prepend to another, with the `prev != nullptr` assertion at `:182`. |
-| `src/dawn/common/SlabAllocator.cpp:191` | `SlabAllocatorImpl::DeleteEmptySlabs` | `SlabAllocator.deleteEmptySlabs` | `src/memory/slab_allocator.zig` | simplify | Planned. Walks recycled then available, never full, at `:212-213`. The `TODO(crbug.com/dawn/168425)` at `:192-194` asks for this to go away once the pool trims implicitly, which cannot happen while the private pool is never ticked. The port resolves it instead of copying it: the slab's `BlockPool` is built with a keep-alive window of zero, so `returnBlock` frees the slab at once and this function has nothing left to drain. |
-| `src/dawn/common/SlabAllocator.cpp:217` | `SlabAllocatorImpl::CountAllocatedSlabsForTesting` | `SlabAllocator.allocatedSlabCount` | `src/memory/slab_allocator.zig` | port | Planned. Renamed off the test-only suffix. `BindGroupLayoutVk.cpp:354` calls the sibling drain on the same object. |
-| `src/dawn/common/SlabAllocator.cpp:230` | `SlabAllocatorImpl::Allocate` | `SlabAllocator.allocate` | `src/memory/slab_allocator.zig` | port | Planned. Grows one slab at a time when the available list is empty, at `:231-233`; splices the head slab onto full when it fills, at `:240-244`. Constructs the object in place from the caller's arguments, as `SlabAllocator.h:211-215` does. |
-| `src/dawn/common/SlabAllocator.cpp:248` | `SlabAllocatorImpl::Deallocate` | `SlabAllocator.deallocate` | `src/memory/slab_allocator.zig` | port | Planned. Recovers the parent slab from the object at `:253`, and moves a just-freed full slab onto recycled at `:262-267`. Runs no destructor, per `SlabAllocator.h:217`. |
-| `src/dawn/common/SlabAllocator.cpp:270` | `SlabAllocatorImpl::GetNewSlab` | `SlabAllocator.initNewSlab` | `src/memory/slab_allocator.zig` | port | Planned. The recycle swap at `:274-283` and the fresh path at `:285-300`, whose `O(blocksPerSlab)` loop placement-writes each `IndexLinkNode` and terminates the chain at `:296-298`. The alignment check at `:287` stays unconditional. |
-| `src/dawn/common/SlabAllocator.h:204` | `SlabAllocator<T>::SlabAllocator` | `SlabAllocator.init` | `src/memory/slab_allocator.zig` | port | Planned. `blocks_per_slab = max(totalObjectBytes / objectSize, 1)` at `:207`. The `max` clamp is a regression fix, not a nicety: a budget below one object would otherwise produce a slab that cannot serve its own request. `SlabAllocatorTests.cpp:255` pins it. |
-| `src/dawn/common/SlabAllocator.h:212` | `SlabAllocator<T>::Allocate` | `SlabAllocator.allocate` | `src/memory/slab_allocator.zig` | port | Planned. Construction in place from `Args&&...`. The Zig signature takes the object type and the payload as comptime parameters, because `objectSize` at `.h:217-218` is a compile-time quantity. |
-| `src/dawn/common/SlabAllocator.h:217` | `SlabAllocator<T>::Deallocate` | `SlabAllocator.deallocate` | `src/memory/slab_allocator.zig` | port | Planned. Forwards to the implementation and **does not** destroy the object. The port says so in its doc comment, because the opposite is Zig's default reading. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:38` | `BuddyMemoryAllocator::BuddyMemoryAllocator` | `BuddyMemoryAllocator.init` | `src/memory/buddy_memory_allocator.zig:54` | merge | Validates powers, divisibility, and address-space slot count. Allocates the heap/refcount table and offset tree with failure cleanup. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:51` | `~BuddyMemoryAllocator` | `BuddyMemoryAllocator.deinit` | `src/memory/buddy_memory_allocator.zig:80` | merge | Frees bookkeeping only after all heap references return. `LiveAllocationsRemain` leaves the owner intact for retry. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:53` | `BuddyMemoryAllocator::GetMemoryIndex` | `BuddyMemoryAllocator.memoryBlockIndex` | `src/memory/buddy_memory_allocator.zig:88` | port | Uses explicit floor division. Rejects offsets outside the system before indexing a heap slot. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:58` | `BuddyMemoryAllocator::Allocate` | `BuddyMemoryAllocator.allocate` | `src/memory/buddy_memory_allocator.zig:97` | port | Keeps requested size, global tree offset, and heap-local offset. Acquires a heap on the first reference. Parent failure rolls back the reserved tree block. Rejects a mismatched parent heap. `BuddyAllocator.allocate` at `src/memory/buddy_allocator.zig:356` acquires all split nodes before tree mutation. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:110` | `BuddyMemoryAllocator::Deallocate` | `BuddyMemoryAllocator.deallocate` | `src/memory/buddy_memory_allocator.zig:148` | port | Validates the record before mutation. Returns the tree block before reducing the refcount. Releases the parent heap on the final reference and invalidates the record. This order keeps rejected returns retryable. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:128` | `BuddyMemoryAllocator::GetMemoryBlockSize` | `BuddyMemoryAllocator.memory_block_size_byte_count` | `src/memory/buddy_memory_allocator.zig:30` | merge | Direct field read. No getter survives. |
+| `src/dawn/native/BuddyMemoryAllocator.cpp:132` | `ComputeTotalNumOfHeapsForTesting` | `BuddyMemoryAllocator.liveHeapCount` | `src/memory/buddy_memory_allocator.zig:185` | port | Counts slots with nonzero references. Removes the test-only suffix without claiming a production caller. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:36` | `PooledResourceMemoryAllocator::PooledResourceMemoryAllocator` | `HeapPool.init` | `src/memory/heap_pool.zig:35` | merge | Borrows the parent and reserves bounded pointer storage. Records one nonzero heap size. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:39` | `~PooledResourceMemoryAllocator` | `HeapPool.deinit` | `src/memory/heap_pool.zig:50` | port | `OutstandingHeaps` and `RecycledHeapsRemain` reject teardown without mutation. Return live heaps and call `releaseRecycled` before retry. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:43` | `PooledResourceMemoryAllocator::FreeRecycledAllocations` | `HeapPool.releaseRecycled` | `src/memory/heap_pool.zig:100` | port | Transfers every recycled heap to the parent. Outstanding heaps remain valid. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:53` | `PooledResourceMemoryAllocator::AllocateResourceHeap` | `HeapPool.allocateResourceHeap` | `src/memory/heap_pool.zig:64` | port | Reuses the newest heap or delegates. `HeapSizeMismatch` rejects a wrong request size or parent result. Returns a wrong parent result immediately. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:70` | `PooledResourceMemoryAllocator::DeallocateResourceHeap` | `HeapPool.deallocateResourceHeap` | `src/memory/heap_pool.zig:84` | port | Takes each live heap once. Retains it within the fixed cap or transfers overflow to the parent without allocation. |
+| `src/dawn/native/PooledResourceMemoryAllocator.cpp:75` | `PooledResourceMemoryAllocator::GetPoolSizeForTesting` | `HeapPool.recycledCount` | `src/memory/heap_pool.zig:109` | port | Counts recycled heaps, not outstanding heaps. |
+| `src/dawn/native/RingBufferAllocator.cpp:49` | `RingBufferAllocator::RingBufferAllocator` | — | — | skip | Field defaults at `src/memory/ring_allocator.zig:15-20` provide the zero-capacity state. It cannot serve an allocation. |
+| `src/dawn/native/RingBufferAllocator.cpp:51` | `RingBufferAllocator::RingBufferAllocator` (size) | `RingAllocator.init` | `src/memory/ring_allocator.zig:43` | port | Sets capacity. Remaining state uses explicit record defaults. |
+| `src/dawn/native/RingBufferAllocator.cpp:53` | `RingBufferAllocator::RingBufferAllocator` (copy) | — | — | skip | No copy API. The queue-owning value has one owner and passes by pointer after initialization, as declared at `src/memory/ring_allocator.zig:4-5`. |
+| `src/dawn/native/RingBufferAllocator.cpp:55` | `~RingBufferAllocator` | `RingAllocator.deinit` | `src/memory/ring_allocator.zig:47` | port | Frees inflight and drain queue storage. The consumer must finish GPU use before teardown. |
+| `src/dawn/native/RingBufferAllocator.cpp:57` | `RingBufferAllocator::operator=` | — | — | skip | No assignment API for an owning queue. A shallow Zig copy does not transfer or duplicate ownership. |
+| `src/dawn/native/RingBufferAllocator.cpp:59` | `RingBufferAllocator::Deallocate` | `RingAllocator.deallocate` | `src/memory/ring_allocator.zig:145` | port | Reclaims through an observed completed serial in submission order. Subtracts each request's consumed bytes and advances its end offset. Drain allocation failure preserves accounting. |
+| `src/dawn/native/RingBufferAllocator.cpp:70` | `RingBufferAllocator::GetSize` | `RingAllocator.max_block_size_byte_count` | `src/memory/ring_allocator.zig:18` | merge | Direct capacity field read. |
+| `src/dawn/native/RingBufferAllocator.cpp:74` | `RingBufferAllocator::GetUsedSize` | `RingAllocator.used_size_byte_count` | `src/memory/ring_allocator.zig:19` | merge | Direct consumed-size field read, including padding and wrap waste. |
+| `src/dawn/native/RingBufferAllocator.cpp:78` | `RingBufferAllocator::Empty` | `RingAllocator.isEmpty` | `src/memory/ring_allocator.zig:53` | port | Tests the inflight queue, not the byte count. Zero-byte reservations can keep the queue nonempty. |
+| `src/dawn/native/RingBufferAllocator.cpp:89` | `RingBufferAllocator::Allocate` | `RingAllocator.allocate` | `src/memory/ring_allocator.zig:57` | port | Covers tail, wrap, and split-space paths with overflow-safe alignment. Enqueues before accounting commits. Rejects decreasing live serials. `UploadRing.reserve` uses the pending serial. `RingAllocator.cancelLast` (`src/memory/ring_allocator.zig:126`) restores only the newest failed reservation. |
+| `src/dawn/common/MemoryBlockAllocator.h:85` | `FreeBlock::GetLastKnownSerial` | `BlockPool.tick` | `src/memory/block_pool.zig:146` | merge | Reads the placement node's `last_tick` field during FIFO eviction. No getter survives. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:38` | `FreeBlock::FromHeapArray` | `BlockPool.linkFromBlock` | `src/memory/block_pool.zig:64` | port | Rejects undersized or misaligned link storage. Placement-writes the link inside the returned block without allocation. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:47` | `FreeBlock::UnlinkAndAcquireHeapArray` | `BlockPool.unlinkBlock` | `src/memory/block_pool.zig:87` | port | Copies the byte slice before unlinking its placement metadata. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:57` | `FreeBlock::FreeBlock` | `BlockPool.linkFromBlock` | `src/memory/block_pool.zig:64` | merge | Link initialization shares the placement write. The module checks link layout at comptime and pointer alignment at runtime. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:62` | `MemoryBlockAllocator::MemoryBlockAllocator` | `BlockPool.init` | `src/memory/block_pool.zig:38` | port | Clamps block size to link size. Validates allocation alignment and records retention limits. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:65` | `~MemoryBlockAllocator` | `BlockPool.deinit` | `src/memory/block_pool.zig:181` | port | Drains retained blocks and checks both list ends. The caller must return outstanding blocks first. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:69` | `MemoryBlockAllocator::GetBlockSize` | `BlockPool.block_size_byte_count` | `src/memory/block_pool.zig:29` | merge | Direct field read. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:73` | `MemoryBlockAllocator::Allocate` | `BlockPool.allocate` | `src/memory/block_pool.zig:50` | port | Reuses the newest fixed-size block. Oversized requests bypass recycling and allocate exactly their requested size. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:93` | `MemoryBlockAllocator::Return` | `BlockPool.returnBlock` | `src/memory/block_pool.zig:106` | port | Pools only exact-size blocks within retention limits. Zero-window, oversized, and overflow returns free immediately. Rejects a duplicate retained block. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:102` | `MemoryBlockAllocator::Return` (batch) | `BlockPool.returnBlocks` | `src/memory/block_pool.zig:130` | port | Consumes successful returns. An error leaves only unconsumed entries for caller recovery. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:116` | `MemoryBlockAllocator::Tick` | `BlockPool.tick` | `src/memory/block_pool.zig:146` | port | Advances the tick and evicts the expired FIFO prefix at the inclusive boundary. Rebases retained timestamps before rollover. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:129` | `MemoryBlockAllocator::TrimMemory` | `BlockPool.trim` | `src/memory/block_pool.zig:174` | port | Drains all retained blocks. |
+| `src/dawn/common/MemoryBlockAllocator.cpp:137` | `MemoryBlockAllocator::GetRecycledBlockCountForTesting` | `BlockPool.recycledBlockCount` | `src/memory/block_pool.zig:187` | port | Counts retained blocks without a test-only suffix. |
+| `src/dawn/common/SlabAllocator.cpp:44` | `IndexLinkNode::IndexLinkNode` | `SlabAllocator.initFreeList` | `src/memory/slab_allocator.zig:155` | merge | Writes each index and successor when a fresh slab is built. |
+| `src/dawn/common/SlabAllocator.cpp:49` | `Slab::Slab` | — | — | skip | No separate default constructor. `initNewSlab` placement-initializes every slab field at `src/memory/slab_allocator.zig:181-188`. |
+| `src/dawn/common/SlabAllocator.cpp:50` | `Slab::Slab` (HeapArray, IndexLinkNode*) | `SlabAllocator.initNewSlab` | `src/memory/slab_allocator.zig:167` | merge | Placement-initializes the slab and its free list in the acquired block. |
+| `src/dawn/common/SlabAllocator.cpp:53` | `Slab::Slab` (Slab&&) | — | — | skip | No move constructor. Intrusive slabs stay at their allocated addresses. |
+| `src/dawn/common/SlabAllocator.cpp:57` | `SentinelSlab::SentinelSlab` | — | — | skip | Null list heads at `src/memory/slab_allocator.zig:48-50` replace sentinel objects. |
+| `src/dawn/common/SlabAllocator.cpp:58` | `SentinelSlab::SentinelSlab` (move) | — | — | skip | No sentinel object or move operation survives. |
+| `src/dawn/common/SlabAllocator.cpp:60` | `~SentinelSlab` | `SlabAllocator.deinit` | `src/memory/slab_allocator.zig:310` | port | Checks that explicit slab destruction already emptied every list. `SlabsNotDestroyed` rejects an undrained allocator. Does not destroy slabs or the borrowed pool. |
+| `src/dawn/common/SlabAllocator.cpp:64` | `SentinelSlab::Destroy` | `SlabAllocator.destroyAllSlabs` | `src/memory/slab_allocator.zig:290` | port | Checks all lists for live objects before freeing any slab. `LiveAllocations` leaves all slabs intact. Successful destruction returns empty blocks to the caller-owned pool. |
+| `src/dawn/common/SlabAllocator.cpp:78` | `SlabAllocatorImpl::SlabAllocatorImpl` | `SlabAllocator.init` | `src/memory/slab_allocator.zig:72` | port | Borrows a caller-owned `BlockPool` with matching size, sufficient alignment, and zero retention window. Typed layout permits over-aligned objects instead of copying the `max_align_t` limit. |
+| `src/dawn/common/SlabAllocator.cpp:96` | `SlabAllocatorImpl::SlabAllocatorImpl` (move) | — | — | skip | No move constructor. `init` returns initial state. After allocation, the owner must not duplicate the intrusive lists. |
+| `src/dawn/common/SlabAllocator.cpp:108` | `~SlabAllocatorImpl` | `SlabAllocator.destroyAllSlabs`, `SlabAllocator.deinit` | `src/memory/slab_allocator.zig:290`, `src/memory/slab_allocator.zig:310` | simplify | Splits destruction from lifetime checks. The caller releases object resources, deallocates objects, destroys slabs, then calls `deinit`. The caller still owns the pool. |
+| `src/dawn/common/SlabAllocator.cpp:114` | `SlabAllocatorImpl::OffsetFrom` | `SlabAllocator.offsetFrom` | `src/memory/slab_allocator.zig:127` | port | Adds or subtracts a signed number of block strides from a node pointer. This is not `objectFromNode`. |
+| `src/dawn/common/SlabAllocator.cpp:122` | `SlabAllocatorImpl::NodeFromObject` | `SlabAllocator.nodeFromObject` | `src/memory/slab_allocator.zig:135` | port | Adds the node offset within an object block. |
+| `src/dawn/common/SlabAllocator.cpp:127` | `SlabAllocatorImpl::ObjectFromNode` | `SlabAllocator.objectFromNode` | `src/memory/slab_allocator.zig:139` | port | Subtracts the node offset within an object block. |
+| `src/dawn/common/SlabAllocator.cpp:132` | `SlabAllocatorImpl::IsNodeInSlab` | `SlabAllocator.nodeIsInSlab` | `src/memory/slab_allocator.zig:143` | port | Checks range, stride, and node identity in order. Range and stride checks precede metadata reads. |
+| `src/dawn/common/SlabAllocator.cpp:139` | `SlabAllocatorImpl::PushFront` | `SlabAllocator.pushFreeBlock` | `src/memory/slab_allocator.zig:212` | port | Inserts the free node and reduces the live count. |
+| `src/dawn/common/SlabAllocator.cpp:155` | `SlabAllocatorImpl::PopFront` | `SlabAllocator.popFreeBlock` | `src/memory/slab_allocator.zig:201` | port | Removes the free node, marks it allocated, and increases the live count. |
+| `src/dawn/common/SlabAllocator.cpp:172` | `SentinelSlab::Prepend` | `SlabAllocator.prependSlab` | `src/memory/slab_allocator.zig:100` | port | Prepends to a nullable intrusive list and records its state. |
+| `src/dawn/common/SlabAllocator.cpp:181` | `Slab::Splice` | `SlabAllocator.spliceSlab` | `src/memory/slab_allocator.zig:109` | port | Unlinks a slab before a caller prepends it to another list. |
+| `src/dawn/common/SlabAllocator.cpp:191` | `SlabAllocatorImpl::DeleteEmptySlabs` | `SlabAllocator.deleteEmptySlabs` | `src/memory/slab_allocator.zig:278` | port | Walks RECYCLED and AVAILABLE, releasing only empty slabs. Zero-window pool returns free those blocks immediately. This drain is not a no-op. |
+| `src/dawn/common/SlabAllocator.cpp:217` | `SlabAllocatorImpl::CountAllocatedSlabsForTesting` | `SlabAllocator.allocatedSlabCount` | `src/memory/slab_allocator.zig:306` | port | Counts current slabs, including partially occupied slabs. |
+| `src/dawn/common/SlabAllocator.cpp:230` | `SlabAllocatorImpl::Allocate` | `SlabAllocator.allocate` | `src/memory/slab_allocator.zig:224` | port | Acquires or recycles a slab when AVAILABLE is empty. Moves a filled slab to FULL. Returns uninitialized object storage. |
+| `src/dawn/common/SlabAllocator.cpp:248` | `SlabAllocatorImpl::Deallocate` | `SlabAllocator.deallocate` | `src/memory/slab_allocator.zig:253` | port | Validates membership before metadata reads and rejects invalid or freed nodes. Moves a just-freed FULL slab to RECYCLED. Runs no object destructor. |
+| `src/dawn/common/SlabAllocator.cpp:270` | `SlabAllocatorImpl::GetNewSlab` | `SlabAllocator.initNewSlab` | `src/memory/slab_allocator.zig:167` | port | Reuses the RECYCLED list first. Otherwise acquires one aligned block and placement-writes slab and index metadata. |
+| `src/dawn/common/SlabAllocator.h:204` | `SlabAllocator<T>::SlabAllocator` | `SlabAllocator.poolOptions`, `SlabAllocator.init` | `src/memory/slab_allocator.zig:57`, `src/memory/slab_allocator.zig:72` | merge | Computes typed layout and clamps the object budget to at least one object. The caller initializes and owns the matching pool. Rejects reserved-index overflow. |
+| `src/dawn/common/SlabAllocator.h:212` | `SlabAllocator<T>::Allocate` | `SlabAllocator.allocate` | `src/memory/slab_allocator.zig:224` | merge | Storage allocation shares the implementation row. Object construction merges into the caller's in-place `object.* = value` initialization, not a variadic constructor API. |
+| `src/dawn/common/SlabAllocator.h:217` | `SlabAllocator<T>::Deallocate` | `SlabAllocator.deallocate` | `src/memory/slab_allocator.zig:253` | merge | Shares the implementation row. The caller releases object resources before returning storage. |
 
 `docs/30-port-design.md` §7.1 sketches a `Slab` that keeps an
 `items: std.ArrayList(*T)` and an `arena` it never allocates from. The rows
@@ -3263,10 +3465,12 @@ no counterpart to point at. `zig_path` is the definition site.
 | `vma.vmaImportVulkanFunctions` | `src/memory/vma.zig:361` | `vk_mem_alloc.h:1752-1754`. |
 | `vma.vmaImportVulkanFunctionsFromVolk` | `src/memory/vma.zig:367` | `vk_mem_alloc.h:1756-1758`. Not used: dusk resolves its own procs, so the port fills `VmaVulkanFunctions` directly and has no volk dependency. |
 | `alignment.isPowerOfTwo` | `src/memory/align.zig:25` | `common/Math.h:53`. Kept local because `Math.h` is M7 and `docs/30-port-design.md` §7.1 already routes `Slab` through the same three operations; when M7 lands, this row and that section's copy merge in the same commit. |
-| `alignment.nextPowerOfTwo` | `src/memory/align.zig:51` | `common/Math.h:85`, for the same two reasons. |
+| `alignment.nextPowerOfTwo` | `src/memory/align.zig:52` | `common/Math.h:85`, for the same two reasons. |
 
-**What the test asserts.** `test/memory.zig` is the M6 shard. The buddy tree
-and the size tracker are pure, so it runs with no device at all.
+**Selected test behavior, 2026-10-07.** `test/memory.zig` is the M6 shard.
+Its pure allocator checks need no device. Parent artifact 211 passed the shard
+in Debug and actual ReleaseSafe, including allocation-failure ownership paths.
+The acceptance requirements below are not a full milestone completion claim.
 
 1. The acceptance at `docs/40-plan.md:295-300`: 100,000 allocate-and-free
    cycles with sizes drawn from a fixed-seed SplitMix64 in the range 64 B to
@@ -3308,24 +3512,35 @@ and the size tracker are pure, so it runs with no device at all.
    calls no VMA entry point, because every one of them needs a `VkDevice` and
    none has a definition anywhere in the closure.
 
+**Selected-path evidence, 2026-10-07.** Parent artifact 211 passed the memory
+and format shards, including positive cases and allocation-failure ownership paths.
+It reports 69/69 steps and 250 root tests in both Debug and actual ReleaseSafe.
+Cross evidence covers 250 CPU tests on each of three targets.
+This verifies selected M6/M7 paths, not their full upstream census budgets.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
+
+The actual ring consumer is `UploadRing` (`src/engine/buffer.zig:1693`).
+`Buffer.uploadThroughRing` (`src/engine/buffer.zig:1568`) reserves against the
+actual pending recording serial. Its error path cancels only the newest
+reservation. `UploadRing.reclaim` (`src/engine/buffer.zig:1789`) accepts an
+observed completed serial. It does not invent completion.
+
 #### M7 — formats, features, limits and toggles
 
-53 upstream rows and 42 new Zig symbols, 95 rows in all. The budget in §1 is
-174. The difference is §1's module list naming nine upstream files this
-milestone does not claim; the last table names each one and the milestone that
-does. The upstream count is below the census of 77 because three families of
-definitions are deliberately merged: the twelve `Format.cpp` predicates become
-ten field reads, the four `TogglesSet` accessors become three, and two of the
-four `Subresource.cpp` rows stay with M11.
+The historical table records 53 upstream rows and 42 design rows.
+The source budget in §1 remains 174. Grouped mapping rows are not a function census.
+The format rows below now cite landed declarations. Capability accessors use fields.
+The ten other predicates retain methods. Deferred modules remain in the final table.
 
-§1's goal is that a compat check is a field read. Every table below is
-comptime data: a `comptime` array the compiler builds once, with the upstream
-X-macro ladder, the `HasFeature` gate and the runtime `DAWN_CHECK` replaced by
-`comptime assert`. That is the whole seam. Upstream builds the format table
-twice per device, once at construction and once again on `EnableFeature`
-(`Device.cpp:358`, `:2483`), because the table is mutable per-device state.
-Comptime removes the rebuild: `EnableFeature` selects a different
-instantiation, and the M8 rows that call it must not port the rebuild.
+Static row metadata is comptime data. Feature membership is runtime state.
+`FeaturesSet` stores 67 representable names in two `u64` words
+(`src/engine/features.zig:99`, `:106`, `:134-135`).
+`buildFormatTable(enabled, out)` writes the caller's 109-entry `FormatTable`
+without allocation (`src/engine/format.zig:207`, `src/engine/format.zig:265`).
+There is no comptime-only `EnabledFeatures` contract.
+Upstream rebuilds the table at `Device.cpp:358` and `:2483`.
+The runtime builder permits that operation. The selected migrated consumers
+passed parent artifact 211. No full M8 integration contract is inferred here.
 
 | Upstream file | Rows |
 | --- | ---: |
@@ -3370,32 +3585,32 @@ over 53 table rows.
 | `src/dawn/native/Limits.cpp:144-155` | `LIMITS_EACH_GROUP` | `groups` | `src/engine/limits.zig:440` | port | Eleven groups in declaration order. The order is load-bearing: a tiering walk goes group by group, and the census test reads this list. |
 | `src/dawn/native/Limits.cpp:172-181` | `StaticAssertSame`, `ReduceSameValue` | `groupTierCount` | `src/engine/limits.zig:523` | port | Upstream reduces the tier counts of a group to one value and `static_assert`s the reduction. The port reads the first row's count and asserts every other row of the group matches it, which is the same claim with a name a failure can quote. The parameter is `comptime`, so the eleven checks are comptime and cost nothing at run time. |
 | `src/dawn/native/Limits.cpp:185-191` | `dawn::native::GetDefaultLimits` | `defaultLimits`, `defaultValue` | `src/engine/limits.zig:557`, `:539` | port | The single ternary at `:188` is the compat-column selection. The port keeps all three `FeatureLevel` members, so `undefined_` is a named arm that takes the core column rather than a two-arm switch that hides it. `defaultValue` answers one field; `defaultLimits` writes all 36 into a `CombinedLimits` with one `inline for`, so every write is `@intCast` and a row that outgrew a field width is a trap. |
-| `src/dawn/native/Format.h:61-72` | `dawn::native::FormatCapability` | `FormatCapability` | `src/engine/format.zig:75` | simplify | Nine explicit-bit bool fields in a `packed struct(u16)`. Upstream wraps the same bits in eight one-line accessors (`Format.h:159-178`); in Zig a compat check is a field read, which is §1's goal stated as a type. |
-| `src/dawn/native/Format.h:85-92` | `dawn::native::SampleTypeBit` | `SampleTypeBit` | `src/engine/format.zig:66` | port | Five values, `uint8_t`. `Format.cpp:75-90` asserts each bit equals `1 << (sampleTypeValue - 2)`, so the port asserts the same five at comptime. |
-| `src/dawn/native/Format.h:97-133` | `TexelBlockInfo`, `TextureComponentType`, `TextureSubsampling`, `AspectInfo`, `UnsupportedReason` | same names | `src/engine/format.zig:38` | port | `UnsupportedReason` becomes `union(enum) { supported, requires_feature: features.Feature, compatibility_mode }`. The C++ `std::variant` cannot tell an uninitialised `monostate` from a real one, which is why upstream keeps a side bitset (`Format.cpp:203-205`); a Zig union with an explicit `supported` tag can, so the side bitset has no row. |
-| `src/dawn/native/Format.h:147-232` | `dawn::native::Format` | `Format` | `src/engine/format.zig:120` | port | Twelve data fields and seventeen methods. `aspectInfo[3]` is a public array here because the data lives in the module that reads it, so the `friend` at `:231` has no reason to exist. |
-| `src/dawn/native/Format.h:234-243` | `dawn::native::FormatSet` | — | — | skip | An `ityp::bitset` over a `Format` that no longer exists: `computeFormatIndex` returns `?Format`, so the set has no caller and both `operator[]` overloads are dead upstream surface (`Format.cpp:158-164` has no in-tree caller). `AGENTS.md` §2 forbids an unused parameter. |
-| `src/dawn/native/Format.h:248` | `dawn::native::ComputeFormatIndex` | `computeFormatIndex` | `src/engine/format.zig:280` | simplify | Returns `?Format`, so the three in-table `DAWN_CHECK`s at `Format.cpp:214`, `:237` and `:414` disappear and the out-of-table `~0u` becomes `null`. `Device.cpp:1006` turns the null into `"Unknown texture format %s."`. |
-| `src/dawn/native/Format.h:250` | `dawn::native::BuildFormatTable` | `buildFormatTable` | `src/engine/format.zig:300` | simplify | `comptime fn buildFormatTable(comptime enabled: EnabledFeatures)`. The `Device.h` include at `Format.cpp:38` exists only for `DeviceBase::HasFeature`, and that is the one seam the cut removes. |
-| `src/dawn/native/Format.h:252-255` | `dawn::native::AbslFormatConvert` | `UnsupportedReason.format` | `src/engine/format.zig:250` | simplify | The three-arm `MatchVariant` diagnostic becomes a `std.fmt` method, which drops the `monostate` arm whose only purpose was `DAWN_UNREACHABLE` at `:906`. |
-| `src/dawn/native/Format.cpp:48-92` | `SampleTypeToSampleTypeBit` | `sampleTypeBit` | `src/engine/format.zig:60` | port | A bit remap, with the five positional `static_assert`s at `:75-90` carried over and the two numeric ones at `:62` and `:67` kept as the `binding_not_used = 0` and `undefined_ = 1` spellings. |
-| `src/dawn/native/Format.cpp:94-138` | `Format::supported` and eleven predicates | `isSupported`, `isColor`, `hasDepth`, `hasStencil`, `hasDepthOrStencil`, `hasAlphaChannel`, `isSnorm`, `isMultiPlanar`, `copyCompatibleWith`, `viewCompatibleWith` | `src/engine/format.zig:150` | simplify | `IsSupported` is the `.supported` tag test. `IsSnorm` hardcodes three format names upstream; the port asks the aspect table instead, which is the same three formats by a different route and one fewer list to keep in step. |
-| `src/dawn/native/Format.cpp:140-150` | `Format::GetAspectInfo`, both overloads | `aspectInfo` | `src/engine/format.zig:186` | port | One function taking the aspect mask, with the three `DAWN_CHECK`s at `:145-148` as `comptime assert` pairs. |
-| `src/dawn/native/Format.cpp:152-154` | `Format::GetIndex` | `index` | `src/engine/format.zig:196` | simplify | The field, not a function: the index is the row the format was written to. |
-| `src/dawn/native/Format.cpp:172-199` | `ComputeFormatIndex` | `computeFormatIndex` | `src/engine/format.zig:280` | simplify | The `kEnumPrefixMask` / `kDawnEnumPrefix` remap (`dawn_platform.h:135-136`). The `static_assert` at `:178-179` that puts `Undefined` outside the table becomes the null return. |
-| `src/dawn/native/Format.cpp:202-403` | `ComputeFormatCapabilities` | `initialCapsAddedBy`, `addCaps` | `src/engine/format.zig:212` | port | 16 `InitialCapsAddedBy` rules and 9 `AddCaps` rules, 25 features, 24 `HasFeature` call sites. Order is load-bearing: `AddCaps` skips an unsupported format (`Format.cpp:240-242`), so a rule reordered before the rule that supports its formats silently does nothing. The port keeps the order and the row says so. |
-| `src/dawn/native/Format.cpp:405-899` | `BuildFormatTable` | `buildFormatTable` | `src/engine/format.zig:300` | port | 109 entries across seven shapes: 44 colour, 3 depth, 1 stencil, 10 ETC2/EAC, 14 BC, 28 ASTC, 9 multi-aspect. The three compressed wrappers at `:712`, `:722` and `:733` differ by exactly one boolean line each, so they collapse into one helper taking two flags, with the reason named in the row. The `at most once` check at `:418` and the `at least once` check at `:887` are the census proof and become one `comptime assert`. |
-| `src/dawn/native/Format.cpp:901-913` | `AbslFormatConvert` | `UnsupportedReason.format` | `src/engine/format.zig:250` | simplify | Declared at `Format.h:252-255`; the row above carries the declaration. |
-| `src/dawn/native/Subresource.h:39-52` | `dawn::native::Aspect` | `Aspect` | `src/engine/format.zig:26` | port | Eight flags on an explicit `enum(u7)`. D3D12 uses the values directly, so the order is an ABI contract (`Subresource.h:37-40`): `none` 0, `color` 1, `depth` 2, `stencil` 4, `plane_0` 8, `plane_1` 16, `plane_2` 32, `combined_depth_stencil` 64. |
-| `src/dawn/native/Subresource.cpp:106-122` | `dawn::native::GetAspectIndex` | `aspectIndex` | `src/engine/format.zig:96` | port | `color`, `depth`, `plane_0`, `combined_depth_stencil` at 0; `plane_1`, `stencil` at 1; `plane_2` at 2. `DAWN_UNREACHABLE` on the rest becomes an error on a declared set. |
-| `src/dawn/native/Subresource.cpp:124-131` | `dawn::native::GetAspectCount` | `aspectCount` | `src/engine/format.zig:104` | port | `stencil` alone reports 2, not 1, so that stencil data stays at index 1 (`Subresource.cpp:126`). It is a deliberate lie and `Format.cpp:671` asserts it independently; a port that "cleans this up" breaks `GetAspectInfo(stencil)` for `Stencil8` and both depth-stencil formats. |
-| `src/dawn/native/Features.h:42` | `dawn::native::kFeatureNameAndInfoList` | `infos` | `src/engine/features.zig:124` | port | 91 rows, positional by `Feature`. The C++ table is half generated (`Features_autogen.inl`, absent from the checkout) and its `static_assert(FeatureInfoIsDefined(...))` is what stops the two halves drifting; the port has no generator, so the pair is one hand-written table and the assert becomes `infos[@intFromEnum(f)].name.len > 0` over an `inline for`. |
-| `src/dawn/native/Features.h:49` | `dawn::native::FeaturesBitSet` | `FeaturesSet` | `src/engine/features.zig:134` | port | `ityp::bitset<Feature, 91>` becomes `[14]u64`, because a `bitset` over an enum with no holes has no Zig counterpart that is cheaper to read. |
+| `src/dawn/native/Format.h:61-72` | `dawn::native::FormatCapability` | `FormatCapability` | `src/engine/format.zig:78` | simplify | Eight capability booleans in `packed struct(u16)`, with explicit padding. Accessor predicates become field reads. |
+| `src/dawn/native/Format.h:85-92` | `dawn::native::SampleTypeBit` | `SampleTypeBit` | `src/engine/format.zig:57` | port | Five sample bits and `none`. Positional assertions remain in the comptime block at `:800-804`. |
+| `src/dawn/native/Format.h:97-133` | `TexelBlockInfo`, `TextureComponentType`, `TextureSubsampling`, `AspectInfo`, `UnsupportedReason` | `TexelBlockInfo`, `TextureComponentType`, `TextureSubsampling`, `AspectInfo`, `UnsupportedReason` | `src/engine/format.zig:45`, `src/engine/format.zig:46`, `src/engine/format.zig:47`, `src/engine/format.zig:120`, `src/engine/format.zig:101` | port | The reason union distinguishes supported, required feature, compatibility mode, and excluded feature. |
+| `src/dawn/native/Format.h:147-232` | `dawn::native::Format` | `Format` | `src/engine/format.zig:127` | port | Canonical format identity, capability fields, and three aspect slots. Metadata remains available for unsupported formats. |
+| `src/dawn/native/Format.h:234-243` | `dawn::native::FormatSet` | — | — | skip | No standalone format-membership bitset is implemented. `FormatTable` owns indexed metadata, not set membership. |
+| `src/dawn/native/Format.h:248` | `dawn::native::ComputeFormatIndex` | `computeFormatIndex`, `computeCanonicalFormatIndex` | `src/engine/format.zig:209`, `src/engine/format.zig:212` | simplify | Return `?usize`, not `?Format`. Undefined or out-of-domain identities return null. |
+| `src/dawn/native/Format.h:250` | `dawn::native::BuildFormatTable` | `buildFormatTable` | `src/engine/format.zig:265` | simplify | Runtime `FeaturesSet` input and caller-owned `*FormatTable` output. No allocation or device capture. |
+| `src/dawn/native/Format.h:252-255` | `dawn::native::AbslFormatConvert` | `UnsupportedReason.format` | `src/engine/format.zig:107` | simplify | Writes four reason variants through `*std.Io.Writer`. Returns `std.Io.Writer.Error`. |
+| `src/dawn/native/Format.cpp:48-92` | `SampleTypeToSampleTypeBit` | `sampleTypeBit` | `src/engine/format.zig:66` | port | `binding_not_used` gives no bits. `undefined_` returns `UndefinedSampleType`. |
+| `src/dawn/native/Format.cpp:94-138` | `Format::supported` and eleven predicates | `Format.isSupported`, `.isColor`, `.hasDepth`, `.hasStencil`, `.hasDepthOrStencil`, `.hasAlphaChannel`, `.isSnorm`, `.isMultiPlanar`, `.copyCompatibleWith`, `.viewCompatibleWith` | `src/engine/format.zig:144`, `src/engine/format.zig:147`, `src/engine/format.zig:150`, `src/engine/format.zig:153`, `src/engine/format.zig:156`, `src/engine/format.zig:159`, `src/engine/format.zig:162`, `src/engine/format.zig:168`, `src/engine/format.zig:171`, `src/engine/format.zig:174` | simplify | Compression predicates use `is_compressed`, `is_bc`, and `is_astc` fields at `:132-134`. Snorm retains the three-name switch. |
+| `src/dawn/native/Format.cpp:140-150` | `Format::GetAspectInfo`, both overloads | `Format.getAspectInfo`, `.getAspectInfoForAspect` | `src/engine/format.zig:182`, `src/engine/format.zig:195` | port | `selectAspects` at `:181` converts API selection. Errors are `InvalidAspect`, `MultipleAspects`, and `AspectNotPresent` at `:28`. |
+| `src/dawn/native/Format.cpp:152-154` | `Format::GetIndex` | `Format.index` | `src/engine/format.zig:129` | merge | Direct field read. The builder records the canonical table index. |
+| `src/dawn/native/Format.cpp:172-199` | `ComputeFormatIndex` | `computeCanonicalFormatIndex` | `src/engine/format.zig:212` | simplify | Maps physical tags 1–101 to slots 0–100 and prefixed Dawn tags to slots 101–108. Invalid identities return null. |
+| `src/dawn/native/Format.cpp:202-403` | `ComputeFormatCapabilities` | `computeFormatCapabilities`, `initialCapsAddedBy`, `addCaps` | `src/engine/format.zig:823`, `src/engine/format.zig:797`, `src/engine/format.zig:814` | port | Ordered runtime gates preserve support separately from capability bits. Excluded features never borrow another feature's tag. |
+| `src/dawn/native/Format.cpp:405-899` | `BuildFormatTable` | `buildFormatTable` | `src/engine/format.zig:265` | port | 109 canonical entries: 44 color, 3 depth, 1 stencil, 10 ETC2/EAC, 14 BC, 28 ASTC, and 9 multi-aspect. Static rows and runtime feature gates share one builder. |
+| `src/dawn/native/Format.cpp:901-913` | `AbslFormatConvert` | `UnsupportedReason.format` | `src/engine/format.zig:107` | merge | Shares the declaration row. The excluded-feature reason is an explicit port distinction. |
+| `src/dawn/native/Subresource.h:39-52` | `dawn::native::Aspect` | `Aspect` | `src/engine/format.zig:14` | port | Seven bit positions in `enum(u7)`, with `none` and a nonexhaustive tag. |
+| `src/dawn/native/Subresource.cpp:106-122` | `dawn::native::GetAspectIndex` | `aspectIndex` | `src/engine/format.zig:29` | port | Color, depth, plane 0, and combined depth-stencil map to 0. Stencil and plane 1 map to 1. Plane 2 maps to 2. Invalid selections return named errors. |
+| `src/dawn/native/Subresource.cpp:124-131` | `dawn::native::GetAspectCount` | `aspectCount` | `src/engine/format.zig:41` | port | Stencil alone reports 2 to retain its slot at index 1. Other masks use popcount. |
+| `src/dawn/native/Features.h:42` | `dawn::native::kFeatureNameAndInfoList` | — | — | skip | No 91-row info table exists. Generated API names define the 67-name representable domain. |
+| `src/dawn/native/Features.h:49` | `dawn::native::FeaturesBitSet` | `FeaturesSet` | `src/engine/features.zig:134` | port | Runtime `[2]u64` membership over 67 representable names. The upstream 91-name domain is not claimed. |
 | `src/dawn/native/Features.cpp:505-508` | `dawn::native::FeaturesSet::EnableFeature(Feature)` | `FeaturesSet.enable` | `src/engine/features.zig:141` | port | The `feature != InvalidEnum` assert becomes a `comptime` claim: the parameter is an enum, so there is no invalid member to pass. |
 | `src/dawn/native/Features.cpp:510-512` | `dawn::native::FeaturesSet::EnableFeature(wgpu::FeatureName)` | `fromApiName` | `src/engine/features.zig:112` | simplify | The `Feature` enum and `api.enums.FeatureName` carry the same tags, so the conversion is `@enumFromInt` under a comptime one-to-one assert over both enumerations, not a switch. |
 | `src/dawn/native/Features.cpp:514-517` | `dawn::native::FeaturesSet::IsEnabled(Feature)` | `FeaturesSet.isEnabled` | `src/engine/features.zig:150` | port |  |
-| `src/dawn/native/Features.cpp:519-522` | `dawn::native::FeaturesSet::IsEnabled(wgpu::FeatureName)` | `FeaturesSet.isEnabledByName` | `src/engine/features.zig:222` | port | Total by design: an unknown name is false and does not trap, unlike the enum overload. The asymmetry is deliberate upstream and the port keeps it. |
-| `src/dawn/native/Features.cpp:524-547` | `dawn::native::FeaturesSet::ToSupportedFeatures` | `FeaturesSet.toSupportedFeatures` | `src/engine/features.zig:164` | port | Upstream allocates a `HeapArray`; `AGENTS.md` §3 makes the allocator a parameter, so the port writes into a caller-owned `[91]api.enums.FeatureName`. The `index == count` assertion at `:545` pairs the write with the popcount and survives. |
+| `src/dawn/native/Features.cpp:519-522` | `dawn::native::FeaturesSet::IsEnabled(wgpu::FeatureName)` | `fromApiName`, `FeaturesSet.isEnabled` | `src/engine/features.zig:112`, `:150` | merge | Converts a typed, representable API name before membership. No string-by-name or unknown-name overload exists. |
+| `src/dawn/native/Features.cpp:524-547` | `dawn::native::FeaturesSet::ToSupportedFeatures` | `FeaturesSet.toSupportedFeatures` | `src/engine/features.zig:164` | port | Writes into caller-owned `[67]api.FeatureName` storage and returns the filled slice. No allocation. |
 | `src/dawn/native/Toggles.h:44-239` | `dawn::native::Toggle` | `Toggle` | `src/engine/toggles.zig:26` | port | 183 members on an explicit `enum(u16)`. Positional: a row's index is its enum value, which `Toggles.cpp:1210-1213` and `:1154-1155` both assert upstream. |
 | `src/dawn/native/Toggles.h:241-259` | `dawn::native::TogglesBitSet`, `dawn::native::TogglesSet` | `TogglesSet` | `src/engine/toggles.zig:1933` | port | `[23]u64`, since 183 bits need three words and 23 u64 words are a whole number of cache lines. The four serialization members `DAWN_SERIALIZABLE` adds are cache-key state M14 owns, so they have no row here. `iterator` (`:1977`) is what `begin` and `end` fold into. |
 | `src/dawn/native/Toggles.h:265-315` | `dawn::native::TogglesState` | `TogglesState` | `src/engine/toggles.zig:2008` | port | Four members, the three sets and the stage, the stage member named `stage_value` because `stage` is the accessor (`:2132`). `TogglesState::begin` and `end` (`Toggles.h:252`, `:255`) are inline and fold into the set's own iteration, so they have no row of their own. |
@@ -3404,11 +3619,11 @@ over 53 table rows.
 | `src/dawn/native/Toggles.cpp:1068-1107` | `ForceSet`, `SetForTesting`, `IsSet`, `IsEnabled`, `GetStage` | `TogglesState.forceSet`, `.setForTesting`, `.isSet`, `.isEnabled`, `.stage` | `src/engine/toggles.zig:2090`, `:2108`, `:2116`, `:2124`, `:2131` | port | `ForceSet` emits a warning when it flips a set value (`Toggles.cpp:1073-1075`); the port returns a `bool` that says so and lets the caller log, because `AGENTS.md` §2 gives the parent the mutable state and a helper no side effects. |
 | `src/dawn/native/Toggles.cpp:1108-1149` | `GetEnabledToggleNames`, `GetDisabledToggleNames`, `GetEnabledToggles`, `StreamIn` | `TogglesState.getEnabledToggleNames`, `.getDisabledToggleNames` | `src/engine/toggles.zig:2139`, `:2160` | port | Both take a caller-owned `*[toggle_count][]const u8` and return the filled prefix, because `AGENTS.md` §3 makes the allocator a parameter and Dawn allocates a `std::vector`. `GetEnabledToggles` has no port counterpart: its three callers in the tree are cache-key state, which is M14. `StreamIn` writes only the enabled bits into that key (`Toggles.cpp:1146-1148`), so it lands there too. |
 | `src/dawn/native/Toggles.cpp:1150-1216` | `ToggleEnumToName`, `TogglesInfo` and its five methods | `infos`, `toggleName`, `toggleInfo`, `toggleFromName` | `src/engine/toggles.zig:300`, `:1902`, `:1925`, `:1915` | simplify | `TogglesInfo` owns a lazily built `const char*` to `Toggle` map. `AGENTS.md` §3 forbids hidden allocation and the table is comptime, so the port answers a name with a linear scan over 183 `[]const u8` compares and drops the map, the boolean guard and the destructor. `toggleFromName` is the inverse the map gave for free. The positional assert at `:1210-1213` stays as the comptime check that `infos[i]` is row `i`. |
-| `src/dawn/native/vulkan/TextureVk.cpp:567-600` | `dawn::native::VulkanImageFormat` | `vkFormat` | `src/engine/vulkan_format.zig:57` | port | The switch has no `else`, so an API format with no arm is a compile error rather than `VK_FORMAT_UNDEFINED`. The two toggle arms (`:574-583`, `:588-595`) take the toggle-off branch because the port's toggle set is not a parameter of a pure function, and the two comments say so. The `OpaqueYCbCrAndroid` arm at `:597-600` has no port counterpart: `src/api/enums.zig` dropped the multiplanar formats, so no tag reaches it. |
-| `src/dawn/native/vulkan/UtilsVulkan.cpp:170-183` | `dawn::native::VulkanAttachmentLoadOp` | `attachmentLoadOp` | `src/engine/vulkan_format.zig:194` | port | `undefined_` is `unreachable` and not `DONT_CARE`, because the front end resolves it before the back end sees it (`CommandEncoder.cpp:643-653`). |
-| `src/dawn/native/vulkan/UtilsVulkan.cpp:185-198` | `dawn::native::VulkanAttachmentStoreOp` | `attachmentStoreOp` | `src/engine/vulkan_format.zig:208` | port | Dawn keeps `STORE_OP_STORE_NONE_QCOM` behind a TODO (`:186-187`); the port has no such extension and returns the core `DONT_CARE`. |
-| `src/dawn/native/vulkan/TextureVk.cpp:839-847` | `dawn::native::VulkanSampleCount` | `vkSampleCount`, `k_supported_sample_count` | `src/engine/vulkan_format.zig:220`, `:34` | port | The upstream switch answers anything but 1 and 4 with a check. The port makes the pair a table and the failure a declared `SampleCountError`, so a count the table does not carry is a value a caller has to handle rather than a value the function invents. |
-| `src/dawn/native/vulkan/TextureVk.cpp:822-837` | `dawn::native::VulkanImageLayoutForDepthStencilAttachment` | `vkImageLayoutForDepthStencilAttachment`, `DepthStencilLayout` | `src/engine/vulkan_format.zig:243`, `:41` | port | Dawn reaches the cases through `MergeDepthStencilUsage` and a device-dependent layout. The three booleans are one struct because `AGENTS.md` §2 makes two parameters of the same type one struct, and `read_only` is not independent of the other two. |
+| `src/dawn/native/vulkan/TextureVk.cpp:567-600` | `dawn::native::VulkanImageFormat` | `vkFormat` | `src/engine/vulkan_format.zig:59` | port | The switch has no `else`, so an API format with no arm is a compile error rather than `VK_FORMAT_UNDEFINED`. The two toggle arms (`:574-583`, `:588-595`) take the toggle-off branch because the port's toggle set is not a parameter of a pure function, and the two comments say so. The `OpaqueYCbCrAndroid` arm at `:597-600` has no port counterpart: `src/api/enums.zig` dropped the multiplanar formats, so no tag reaches it. |
+| `src/dawn/native/vulkan/UtilsVulkan.cpp:170-183` | `dawn::native::VulkanAttachmentLoadOp` | `attachmentLoadOp` | `src/engine/vulkan_format.zig:197` | port | `undefined_` is `unreachable` and not `DONT_CARE`, because the front end resolves it before the back end sees it (`CommandEncoder.cpp:643-653`). |
+| `src/dawn/native/vulkan/UtilsVulkan.cpp:185-198` | `dawn::native::VulkanAttachmentStoreOp` | `attachmentStoreOp` | `src/engine/vulkan_format.zig:211` | port | Dawn keeps `STORE_OP_STORE_NONE_QCOM` behind a TODO (`:186-187`); the port has no such extension and returns the core `DONT_CARE`. |
+| `src/dawn/native/vulkan/TextureVk.cpp:839-847` | `dawn::native::VulkanSampleCount` | `vkSampleCount`, `k_supported_sample_count` | `src/engine/vulkan_format.zig:223`, `src/engine/vulkan_format.zig:36` | port | The upstream switch answers anything but 1 and 4 with a check. The port makes the pair a table and the failure a declared `SampleCountError`, so a count the table does not carry is a value a caller has to handle rather than a value the function invents. |
+| `src/dawn/native/vulkan/TextureVk.cpp:822-837` | `dawn::native::VulkanImageLayoutForDepthStencilAttachment` | `vkImageLayoutForDepthStencilAttachment`, `DepthStencilLayout` | `src/engine/vulkan_format.zig:244`, `src/engine/vulkan_format.zig:42` | port | Dawn reaches the cases through `MergeDepthStencilUsage` and a device-dependent layout. The three booleans are one struct because `AGENTS.md` §2 makes two parameters of the same type one struct, and `read_only` is not independent of the other two. |
 
 **The new Zig symbols.** No upstream row for any of them, because upstream has
 no counterpart to point at. `zig_path` is the definition site, `path:line`, so a
@@ -3430,26 +3645,26 @@ row names the place a reviewer opens rather than the file to search.
 | `LimitCheckError` | `src/engine/limits.zig:478` | The two ways `checkLimit` refuses. `AGENTS.md` §3 wants one error per failure mode so a refusal names which rule it broke. |
 | `fieldOf` | `src/engine/limits.zig:511` | The row for a field. Absent rather than optional: every `Field` member has exactly one row, and the table asserts it. |
 | `mebibyte`, `gibibyte` | `src/engine/limits.zig:25` | `Limits.cpp:57-58`. The values stay named because the tier columns read as byte counts. |
-| `Aspect.bit_count` | `src/engine/format.zig:34` | Seven, from `Subresource.h:53-56` `EnumBitmaskSize<Aspect>`. |
-| `max_planes_per_format` | `src/engine/format.zig:88` | Three, from `Subresource.h:116`. Sizes `Format.aspect_info` and is asserted against `aspectIndex`. |
-| `SampleType` | `src/engine/format.zig:44` | The five API sample types, `binding_not_used = 0` and `undefined_ = 1` included, because `Format.cpp:62` and `:67` assert those two values. |
-| `SampleTypeSet` | `src/engine/format.zig:52` | `packed struct(u8)` of the five bits. |
-| `FormatCapability.none` | `src/engine/format.zig:88` | The zero value, which is a real answer: `RG11B10Ufloat` is supported with no capability until `RG11B10UfloatRenderable` is on. |
-| `format_count` | `src/engine/format.zig:100` | 109. |
-| `webgpu_format_count` | `src/engine/format.zig:104` | 101, the WebGPU half. |
-| `dawn_format_count` | `src/engine/format.zig:108` | 8, the Dawn-tagged half, which indexes above the WebGPU half. |
-| `dawn_format_base` | `src/engine/format.zig:112` | The `api.enums.TextureFormat` tag of the first Dawn format. The 8 are `api` enum members; `computeFormatIndex` adds this base to reach a table row. |
-| `enum_prefix_mask`, `dawn_enum_prefix` | `src/engine/format.zig:116` | `dawn_platform.h:135-136`. |
-| `texture_bytes_per_row_alignment` | `src/engine/format.zig:92` | From `common/Constants.h`. The divisor in the block-size invariant at `Format.cpp:423-424`. |
-| `EnabledFeatures` | `src/engine/format.zig:316` | The comptime feature set `buildFormatTable` takes. One `bool` per `Feature` that a format rule names, keyed by the feature, so a rule that names a new feature fails to compile until the row exists. |
-| `shapeCounts` | `src/engine/format.zig:340` | The seven shape counts, asserted one group at a time so a miscounted group names itself. |
-| `view_format_pairs` | `src/engine/format.zig:352` | The 23 sRGB reinterpretations, listed. The post-pass at `Format.cpp:889-897` derives `base_view_format` from the table; the port lists the pairs so the derived value is checkable against a name. |
+| `Aspect.bit_count` | `src/engine/format.zig:25` | Seven bit positions, from `Subresource.h:53-56`. |
+| `max_planes_per_format` | `src/engine/format.zig:11` | Three aspect slots. |
+| `SampleType` | `src/engine/format.zig:48` | Alias to the API enum, including `binding_not_used` and `undefined_`. |
+| `SampleTypeSet` | `src/engine/format.zig:49` | Five sample bits in `packed struct(u8)`. |
+| `FormatCapability.none` | `src/engine/format.zig:89` | Zero capability bits do not imply an unsupported format. |
+| `format_count` | `src/engine/format.zig:5` | 109 canonical entries, excluding undefined. |
+| `webgpu_format_count` | `src/engine/format.zig:6` | 101 physical API format entries, excluding undefined. |
+| `dawn_format_count` | `src/engine/format.zig:7` | Eight canonical Dawn entries, absent from the generated API enum. |
+| `dawn_format_base` | `src/engine/format.zig:8` | Canonical prefix `0x00050000`. It is not a retained API member. |
+| `enum_prefix_mask`, `dawn_enum_prefix` | `src/engine/format.zig:9`, `src/engine/format.zig:10` | `dawn_platform.h:135-136`. |
+| `texture_bytes_per_row_alignment` | `src/engine/format.zig:12` | 256 bytes. The builder checks block-size divisibility. |
+| Former `EnabledFeatures` sketch | — | Merged into runtime `FeaturesSet` at `src/engine/features.zig:134`. No separate declaration remains. |
+| `shapeCounts` | `src/engine/format.zig:469` | Counts seven shapes from the supplied canonical table. |
+| `view_format_pairs` | `src/engine/format.zig:763` | Lists 23 sRGB reinterpretation pairs for the builder's post-pass. |
 | `feature_count` | `src/engine/features.zig:99` | 67. |
-| `stable_feature_count` | `src/engine/features.zig:116` | 65. |
-| `experimental_feature_count` | `src/engine/features.zig:120` | 26. The two plus the third is the census. |
+| Former `stable_feature_count` sketch | — | No declaration or stable-feature census is implemented. |
+| Former `experimental_feature_count` sketch | — | No declaration or experimental-feature census is implemented. |
 | `feature_word_count` | `src/engine/features.zig:106` | 2 `u64` words for 67 bits. |
 | `implicitly_enabled` | `src/engine/features.zig:125` | The four closure edges at `WGPUHelpers.cpp:455-463`, as data. The fifth upstream edge has no port counterpart and the header at `:119`-`:124` says why. Applying them is `DeviceBase::ApplyFeatures`, which is M8. |
-| `feature_name` | `src/engine/features.zig:262` | The JavaScript camelCase wire name. It is not the Zig identifier, so it is a data field and never derived from the member name. |
+| Former `feature_name` field sketch | — | No info-table field exists. Generated API enum names carry the representable names. |
 | `toggle_count` | `src/engine/toggles.zig:221` | 183. |
 | `instance_toggle_count` | `src/engine/toggles.zig:223` | 4. |
 | `adapter_toggle_count` | `src/engine/toggles.zig:225` | 11. |
@@ -3459,20 +3674,32 @@ row names the place a reviewer opens rather than the file to search.
 | `ToggleInfo`, `infos` | `src/engine/toggles.zig:213`, `:300` | `DawnNative.h:56-61`. The wire string is the `name` field and is never derived from the enum member: ten toggles spell it differently (`VulkanPolyfillFloatAbs` is `spirv_polyfill_float_abs`). |
 | `toggleFromName` | `src/engine/toggles.zig:1915` | The inverse of `toggleName`. Upstream got it from the lazily built map; the port pays a linear scan to keep the table allocation-free. |
 
-**The rows above that name a symbol the tree does not carry.**
-`src/engine/format.zig` is the agreed landing site for the format rows, and
-the `zig_path` column records the line each of those rows is to take when the
-file lands. No line in it has been read, so those citations are a plan and not
-a reference; `test/formats.zig` therefore asserts the two tables that do
-exist, `src/api/enums.zig` and `src/engine/vulkan_format.zig`. Five further
-rows name symbols `src/engine/features.zig`, which is on disk, does not
-carry: the 91-row name-and-info table and the by-name membership test, the
-stable and experimental feature counts, and the wire-name field. The port
-carries the wire name on `api.enums.FeatureName` instead, converts it with
-`fromApiName`, and answers membership from the enum. `projectV1` and
-`projectCompatibility` were two rows in this column and are not:
-`defaultLimits` (`src/engine/limits.zig:557`) writes both structs from one
-`inline for`, so there is one projection and it has no name.
+**The 32 formerly absent format mappings.** The 18 upstream mappings with
+format declaration targets and 14 design rows now cite actual declarations or
+explicit merge decisions. `FormatSet` remains a separate, explicit skip.
+**Selected-path evidence, 2026-10-07.** The canonical format implementation,
+typed BlockInfo wrappers, and migrated consumers passed parent artifact 211.
+Successful behavior and fail-N ownership paths passed in Debug and actual ReleaseSafe.
+The earlier unverified disclosure is historical. This is not full M7 upstream
+conformance or complete source-row accounting. The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
+
+**Canonical identity and generated API identity differ.** Dawn's JSON lists eight
+raw Dawn values 0–7 at `src/dawn/dawn.json:4501-4508`.
+`dawn_platform.h:135-136` supplies prefix `0x00050000` and mask `0xffff0000`.
+`Format.cpp:172-198` maps prefixed identities after the 101 physical API entries.
+These references use Dawn `32f77c02294310054a660c393feded4bcb3f203c` at
+`~/.cache/dusk-research/research/dawn`.
+The current generator deduplicates raw values without this prefix
+(`tools/gen_api.zig:1616-1644`). The eight omitted names are not aliases restored
+to `api.TextureFormat`. `FormatName` at `src/engine/format.zig:493` carries their
+canonical identities. `fromApiFormat` (`src/engine/format.zig:220`) widens retained API identity.
+`toApiFormat` (`src/engine/format.zig:223`) returns `UnrepresentableFormat` for prefixed identities.
+
+Excluded feature gates have their own `UnavailableFeature` names at `:95`.
+They include planar format gates and `unorm16_texture_formats`.
+Pixel-local-storage gates are absent from `FeaturesSet` and add no capability
+(`src/engine/format.zig:759`). No unrelated retained feature substitutes for them.
+The 67-name membership domain does not claim all 91 upstream feature names.
 
 **The five claims the census tests read.** `test/limits.zig` asserts
 `row_count == 36` and, for every `.maximum` row, `compat <= tiers[0]`. That
@@ -3502,8 +3729,8 @@ both rows are 256 in every column.
 | `common/Constants.h`, `common/Math.{h,cpp}`, `common/Algebra.h`, `common/Numeric.h` | M7, in the file each rule needs | 52 census rows, and §1's module list is right that they are M7. Each is a pile of small helpers that no M7 row calls directly; they land inside the module whose rule needs them, and the table row for that rule names the helper. A separate `src/engine/math.zig` would be a file whose every member has one caller. |
 | `EnumClassBitmasks.h`, `EnumMaskIterator.h` | — | `std.enums` covers the bitmask operators and the iteration. `AGENTS.md` §6 deletes the shim rather than porting it. |
 | `dawn_platform.{h,cpp}` | — | Two constants, `kEnumPrefixMask` and `kDawnEnumPrefix` (`dawn_platform.h:135-136`), which are format rows. The rest is the `DAWN_*` macro layer the Zig build does not have. |
-| `kDawnEnumPrefix` as an ABI | M11 | The eight Dawn-tagged formats reuse tags 0-7 in upstream, and `src/api/enums.zig:938` dropped them for that reason. `computeFormatIndex` keeps the prefix arithmetic so the eight can be restored without touching the table. |
-| The `Device.cpp:2483` rebuild on `EnableFeature` | M8, as a non-goal | Upstream rebuilds the format table when a feature turns on. A comptime table has nothing to rebuild; M8 selects an instantiation instead. Porting the rebuild would be porting a workaround for mutability the port does not have. |
+| `kDawnEnumPrefix` as an ABI | Canonical format identity, selected path verified | `FormatName` retains eight prefixed Dawn entries. Parent artifact 211 passed the selected canonical-format tests. The generated API enum still omits these entries. Conversion to API identity returns `UnrepresentableFormat`. No alias restoration is claimed. |
+| The `Device.cpp:2483` rebuild on `EnableFeature` | M8 consumer integration | `buildFormatTable` accepts runtime membership and writes caller-owned storage. Device integration remains in flight, not a comptime specialization contract. |
 | `dawns::WarningLog` from `ForceSet` | M8 | A log sink is M8's, since M8 is the first thing with a logger. `forceSet` returns whether it flipped a set value. |
 
 **A citation the plan gets wrong.** §1's M8 acceptance at `:363` and the
@@ -3590,26 +3817,26 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:162` | `DeviceLostEvent::DeviceLostEvent` | — | — | skip | The lost event is a `TrackedEvent` over the callback. M4 owns the event queue; M8 records the reason and the message. |
 | `src/dawn/native/Device.cpp:169` | `DeviceLostEvent::~DeviceLostEvent` | — | — | skip | With the event above. |
 | `src/dawn/native/Device.cpp:174` | `DeviceLostEvent::Create` | — | — | skip | With the event above. |
-| `src/dawn/native/Device.cpp:181` | `DeviceLostEvent::SetLost` | `Device.handleDeviceLost` | `src/engine/device.zig` | port | The port has no event, so the reason and the message go on the device. The rule is the same: the first reason wins. |
+| `src/dawn/native/Device.cpp:181` | `DeviceLostEvent::SetLost` | `Device.handleDeviceLost` | `src/engine/device.zig:255` | port | The port has no event, so the reason and the message go on the device. The rule is the same: the first reason wins. |
 | `src/dawn/native/Device.cpp:193` | `DeviceLostEvent::Complete` | — | — | skip | Calls the callback and completes the future. M4. |
 | `src/dawn/native/Device.cpp:229` | `ValidateLayoutAndGetComputePipelineDescriptorWithDefaults` | — | — | skip | Pipeline descriptor defaulting. M14. |
 | `src/dawn/native/Device.cpp:252` | `ValidateLayoutAndGetRenderPipelineDescriptorWithDefaults` | — | — | skip | Pipeline descriptor defaulting. M14. |
-| `src/dawn/native/Device.cpp:275` | `DeviceBase::DeviceBase` | `Device.init` | `src/engine/device.zig` | port | Resolves the features, reifies the limits, copies the host-mapped limits, enforces the limit invariants and builds the cache key. M8 keeps the resolution and drops the caches, the blob cache and the queue. |
-| `src/dawn/native/Device.cpp:395` | `DeviceBase::~DeviceBase` | `Device.deinit` | `src/engine/device.zig` | port | Frees the arena and tells the instance the device is gone. |
-| `src/dawn/native/Device.cpp:401` | `DeviceBase::Initialize` | — | — | merge | Upstream splits construction in two only so the back end can build the queue in between (`DeviceNull.cpp:197-200`). The port has no queue, so `init` is one call. |
-| `src/dawn/native/Device.cpp:454` | `DeviceBase::WillDropLastExternalRef` | `Device.destroy` | `src/engine/device.zig` | port | The port has no reference count; the caller calls `destroy`, and the body is the same three steps. |
-| `src/dawn/native/Device.cpp:500` | `DeviceBase::DestroyObjects` | — | — | merge | Empties the per-type object lists. M3's arena does it, and `Device.deinit` calls the arena. |
-| `src/dawn/native/Device.cpp:550` | `DeviceBase::Destroy` | `Device.destroy` | `src/engine/device.zig` | port | `SetDisconnectingIfAlive`, then `Disconnect`, then the backend hook. M9 adds the queue wait at `:942`. |
-| `src/dawn/native/Device.cpp:615` | `DeviceBase::APIDestroy` | — | — | merge | The C entry point above; `destroy` is the one function. |
-| `src/dawn/native/Device.cpp:619` | `DeviceBase::HandleDeviceLost` | `Device.handleDeviceLost` | `src/engine/device.zig` | port | The row at `:181` is the event's half of the same rule. |
-| `src/dawn/native/Device.cpp:625` | `DeviceBase::HandleError` | `Device.handleError` | `src/engine/device.zig` | port | M3 built the scope stack and the sink; the device forwards to them. |
+| `src/dawn/native/Device.cpp:275` | `DeviceBase::DeviceBase` | `Device.init` | `src/engine/device.zig:139` | merge | Resolves features, reifies bounded defaults and accepted required limits, builds the format table, and attaches native state. Dawn's blob-cache and full constructor policy is not ported. |
+| `src/dawn/native/Device.cpp:395` | `DeviceBase::~DeviceBase` | `Device.deinit` | `src/engine/device.zig:227` | merge | Explicit cleanup calls `destroy`. Dusk frees native context and arena host storage after safe retirement. It does not port C++ destructor dispatch. |
+| `src/dawn/native/Device.cpp:401` | `DeviceBase::Initialize` | `Device.init` | `src/engine/device.zig:139` | merge | Reifies effective limits and attaches a stable native context with a real queue. Dawn's platform, callback, toggle, and empty-layout initialization is not a complete port. |
+| `src/dawn/native/Device.cpp:454` | `DeviceBase::WillDropLastExternalRef` | `Device.destroy` | `src/engine/device.zig:235` | merge | Dusk uses explicit teardown, not Dawn's last-external-reference trigger. Active operations refuse teardown. |
+| `src/dawn/native/Device.cpp:500` | `DeviceBase::DestroyObjects` | `native_resources.destroyAll` | `src/engine/native_resources.zig:676` | merge | Walks the core object list after native cache retirement. Dusk's typed teardown order differs from Dawn's per-type lists. Host arena release follows payload cleanup. |
+| `src/dawn/native/Device.cpp:550` | `DeviceBase::Destroy` | `Device.destroy` | `src/engine/device.zig:235` | merge | Stops admission and retires children before parents. Nonterminal completion failure preserves owners for retry. Terminal loss permits cleanup, not valid work. |
+| `src/dawn/native/Device.cpp:615` | `DeviceBase::APIDestroy` | `Device.destroy` | `src/engine/device.zig:235` | merge | Explicit destruction entry. Dusk returns typed refusal and cleanup errors rather than consuming them through the C API. |
+| `src/dawn/native/Device.cpp:619` | `DeviceBase::HandleDeviceLost` | `Device.handleDeviceLost` | `src/engine/device.zig:318` | merge | Records the first loss and stops normal admission. Native operation paths record terminal loss separately for lifetime-only cleanup. This is not the future device-lost callback registry. |
+| `src/dawn/native/Device.cpp:625` | `DeviceBase::HandleError` | `Device.handleError` | `src/engine/device.zig:359` | port | M3 built the scope stack and the sink; the device forwards to them. |
 | `src/dawn/native/Device.cpp:685` | `DeviceBase::HandleErrorGeneratingAsyncTask` | — | — | skip | The error path for a task that could not be created. M4 owns async tasks. |
 | `src/dawn/native/Device.cpp:714` | `DeviceBase::ConsumeError` (`UnrecoverableError`) | — | — | merge | Both `ConsumeError` overloads reach M3's sink through `Device.errorSink`. |
 | `src/dawn/native/Device.cpp:720` | `DeviceBase::ConsumeError` (`ValidationError`) | — | — | merge | The overload above. |
 | `src/dawn/native/Device.cpp:726` | `DeviceBase::APISetLoggingCallback` | — | — | skip | M4 owns the callback queue, and M7 lists a log sink as M8's only because M7 would otherwise read one that does not exist. |
 | `src/dawn/native/Device.cpp:733` | `DeviceBase::GetErrorScopeStack` | — | — | merge | The stack is a field of M3's `core.Device`, reached through `Device.coreDevice`. |
-| `src/dawn/native/Device.cpp:750` | `DeviceBase::APIPushErrorScope` | `Device.pushErrorScope` | `src/engine/device.zig` | port | Pushes onto M3's stack. |
-| `src/dawn/native/Device.cpp:758` | `DeviceBase::APIPopErrorScope` | `Device.popErrorScope` | `src/engine/device.zig` | port | Pops from M3's stack and hands the scope to the caller; the event and the future at `:758-802` are M4. |
+| `src/dawn/native/Device.cpp:750` | `DeviceBase::APIPushErrorScope` | `Device.pushErrorScope` | `src/engine/device.zig:344` | port | Pushes onto M3's stack. |
+| `src/dawn/native/Device.cpp:758` | `DeviceBase::APIPopErrorScope` | `Device.popErrorScope` | `src/engine/device.zig:354` | port | Pops from M3's stack and hands the scope to the caller; the event and the future at `:758-802` are M4. |
 | `src/dawn/native/Device.cpp:768` | `PopErrorScopeEvent::PopErrorScopeEvent` (callback form) | — | — | skip | The event wrapper. M4. |
 | `src/dawn/native/Device.cpp:774` | `PopErrorScopeEvent::PopErrorScopeEvent` (with scope) | — | — | skip | The event wrapper. M4. |
 | `src/dawn/native/Device.cpp:786` | `PopErrorScopeEvent::~PopErrorScopeEvent` | — | — | skip | The event wrapper. M4. |
@@ -3621,15 +3848,15 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:885` | `DeviceBase::IsNotErrorObject` | — | — | merge | M3 resolves error objects like any other and the front end never creates one. |
 | `src/dawn/native/Device.cpp:893` | `DeviceBase::ValidateIsAlive` | — | — | merge | M3's `resolve` returns `error.StaleHandle` for a destroyed object. |
 | `src/dawn/native/Device.cpp:898` | `DeviceBase::APIForceLoss` | — | — | merge | The test hook; `handleDeviceLost` is the one entry point. |
-| `src/dawn/native/Device.cpp:909` | `DeviceBase::GetState` | `Device.getState` | `src/engine/device.zig` | port | Five upstream states (`Device.h:366-372`) become four: `BeingCreated` has no counterpart because the port builds a device in one call. |
-| `src/dawn/native/Device.cpp:914` | `DeviceBase::IsLost` | `Device.isLost` | `src/engine/device.zig` | port | Upstream answers from the atomic state; the port answers from the recorded reason, because a device can be lost while still alive. |
-| `src/dawn/native/Device.cpp:921` | `DeviceBase::SetDisconnectingIfAlive` | `Device.setDisconnectingIfAlive` | `src/engine/device.zig` | port | The compare-and-exchange becomes a guard: M8 has no device mutex, and M9 takes it. |
-| `src/dawn/native/Device.cpp:926` | `DeviceBase::Disconnect` | `Device.disconnect` | `src/engine/device.zig` | port | The transition. The queue wait and the tick at `:942-948` land at M9. |
+| `src/dawn/native/Device.cpp:909` | `DeviceBase::GetState` | `Device.getState` | `src/engine/device.zig:243` | port | Five upstream states (`Device.h:366-372`) become four: `BeingCreated` has no counterpart because the port builds a device in one call. |
+| `src/dawn/native/Device.cpp:914` | `DeviceBase::IsLost` | `Device.isLost` | `src/engine/device.zig:250` | port | Upstream answers from the atomic state; the port answers from the recorded reason, because a device can be lost while still alive. |
+| `src/dawn/native/Device.cpp:921` | `DeviceBase::SetDisconnectingIfAlive` | `Device.setDisconnectingIfAlive` | `src/engine/device.zig:227` | port | The compare-and-exchange becomes a guard: M8 has no device mutex, and M9 takes it. |
+| `src/dawn/native/Device.cpp:926` | `DeviceBase::Disconnect` | `Device.disconnect` | `src/engine/device.zig:233` | port | The transition. The queue wait and the tick at `:942-948` land at M9. |
 | `src/dawn/native/Device.cpp:953` | `DeviceBase::GetObjectTrackingList` | — | — | merge | M3's arena has one list; `core.Device.resolve` is the only reader. |
 | `src/dawn/native/Device.cpp:957` | `DeviceBase::GetObjectTrackingList` (const) | — | — | merge | The const overload of the row above. |
-| `src/dawn/native/Device.cpp:961` | `DeviceBase::GetInstance` | `Device.getInstance` | `src/engine/device.zig` | port | Through the adapter, as upstream does. |
-| `src/dawn/native/Device.cpp:965` | `DeviceBase::GetAdapter` | `Device.getAdapter` | `src/engine/device.zig` | port | A field read in the port; `Device.adapter` is public because M11, M12 and M14 need it. |
-| `src/dawn/native/Device.cpp:969` | `DeviceBase::GetPhysicalDevice` | `Device.getPhysicalDevice` | `src/engine/device.zig` | port | Two hops through the adapter. |
+| `src/dawn/native/Device.cpp:961` | `DeviceBase::GetInstance` | `Device.getInstance` | `src/engine/device.zig:266` | port | Through the adapter, as upstream does. |
+| `src/dawn/native/Device.cpp:965` | `DeviceBase::GetAdapter` | `Device.getAdapter` | `src/engine/device.zig:271` | port | A field read in the port; `Device.adapter` is public because M11, M12 and M14 need it. |
+| `src/dawn/native/Device.cpp:969` | `DeviceBase::GetPhysicalDevice` | `Device.getPhysicalDevice` | `src/engine/device.zig:276` | port | Two hops through the adapter. |
 | `src/dawn/native/Device.cpp:973` | `DeviceBase::GetPlatform` | — | — | skip | The platform connection is the instance's and lands with the surfaces at M20. |
 | `src/dawn/native/Device.cpp:977` | `DeviceBase::GetInternalPipelineStore` | — | — | skip | The internal pipeline store. M14. |
 | `src/dawn/native/Device.cpp:982` | `DeviceBase::GetOrCreateResourceTableDefaultsResource` | — | — | skip | The default resource-table buffer. M12. |
@@ -3639,7 +3866,7 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:1015` | `DeviceBase::GetValidInternalFormat` | — | — | skip | Reads M7's format table. M7. |
 | `src/dawn/native/Device.cpp:1021` | `DeviceBase::GetValidInternalFormat` (by index) | — | — | skip | The overload above. M7. |
 | `src/dawn/native/Device.cpp:1026` | `DeviceBase::GetCompatibleViewFormats` | — | — | skip | Reads M7's format table. M11. |
-| `src/dawn/native/Device.cpp:1039` | `DeviceBase::GetOrCreateBindGroupLayout` | — | — | skip | The layout cache. M12. |
+| `src/dawn/native/Device.cpp:1039` | `DeviceBase::GetOrCreateBindGroupLayout` | `createBindGroupLayout` | `src/engine/native_resources.zig:324` | simplify | Packs logical bindings, compares full semantics and compatibility token, and returns one owned alias from the device weak index. Dusk interns the wrapper and internal layout together, unlike Dawn's separate wrapper at `:1056-1057`. |
 | `src/dawn/native/Device.cpp:1061` | `DeviceBase::CreateEmptyBindGroupLayout` | — | — | skip | M12. |
 | `src/dawn/native/Device.cpp:1067` | `DeviceBase::CreateEmptyPipelineLayout` | — | — | skip | M12. |
 | `src/dawn/native/Device.cpp:1074` | `DeviceBase::GetEmptyBindGroupLayout` | — | — | skip | M12. |
@@ -3650,12 +3877,12 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:1099` | `DeviceBase::AddOrGetCachedComputePipeline` | — | — | skip | The pipeline cache. M14. |
 | `src/dawn/native/Device.cpp:1105` | `DeviceBase::AddOrGetCachedRenderPipeline` | — | — | skip | The pipeline cache. M14. |
 | `src/dawn/native/Device.cpp:1112` | `DeviceBase::GetOrCreatePlaceholderTextureViewForExternalTexture` | — | — | skip | M11. |
-| `src/dawn/native/Device.cpp:1140` | `DeviceBase::GetOrCreatePipelineLayout` | — | — | skip | The layout cache. M12. |
-| `src/dawn/native/Device.cpp:1156` | `DeviceBase::GetOrCreateSampler` | — | — | skip | The sampler cache. M11. |
-| `src/dawn/native/Device.cpp:1171` | `DeviceBase::GetOrCreateAttachmentState` (blueprint) | — | — | skip | The attachment-state cache. M14. |
-| `src/dawn/native/Device.cpp:1177` | `DeviceBase::GetOrCreateAttachmentState` (render bundle) | — | — | skip | The overload above. M14. |
-| `src/dawn/native/Device.cpp:1183` | `DeviceBase::GetOrCreateAttachmentState` (render pipeline) | — | — | skip | The overload above. M14. |
-| `src/dawn/native/Device.cpp:1190` | `DeviceBase::GetOrCreateAttachmentState` (render pass) | — | — | skip | The overload above. M14. |
+| `src/dawn/native/Device.cpp:1140` | `DeviceBase::GetOrCreatePipelineLayout` | `createPipelineLayout` | `src/engine/native_resources.zig:434` | simplify | Weak canonical identity includes ordered group owners, empty groups, immediate size, and compatibility domain. Dependencies use internal leases. |
+| `src/dawn/native/Device.cpp:1156` | `DeviceBase::GetOrCreateSampler` | `Device.createSampler` | `src/engine/device.zig:861` | simplify | Validates semantic identity and actual backend support, acquires an alias on a hit, and rolls back native ownership if insertion fails. |
+| `src/dawn/native/Device.cpp:1171` | `DeviceBase::GetOrCreateAttachmentState` (blueprint) | `create` | `src/engine/native_attachment_store.zig:13` | simplify | Validates the complete canonical tuple and returns an owned alias from the device weak attachment index. |
+| `src/dawn/native/Device.cpp:1177` | `DeviceBase::GetOrCreateAttachmentState` (render bundle) | `Device.createRenderBundleEncoder` | `src/engine/device.zig:958` | merge | Builds metadata with `AttachmentState.fromRenderBundle` at `src/command/attachment_state.zig:142`, then interns through `native_attachment_store.create`. |
+| `src/dawn/native/Device.cpp:1183` | `DeviceBase::GetOrCreateAttachmentState` (render pipeline) | `Device.createRenderPipeline` | `src/engine/device.zig:775` | merge | Builds supported pipeline attachment metadata and interns it before native pipeline creation. Pixel-local storage and resolve expansion remain unsupported by replay. |
+| `src/dawn/native/Device.cpp:1190` | `DeviceBase::GetOrCreateAttachmentState` (render pass) | `Device.beginRenderPass` | `src/engine/device.zig:897` | merge | Derives metadata from actual registered views, then interns through `native_attachment_store.create`. |
 | `src/dawn/native/Device.cpp:1196` | `DeviceBase::GetOrCreatePipelineCache` | — | — | skip | The pipeline cache. M14. |
 | `src/dawn/native/Device.cpp:1202` | `DeviceBase::APICreateBindGroup` | — | — | skip | M12. |
 | `src/dawn/native/Device.cpp:1211` | `DeviceBase::APICreateBindGroupLayout` | — | — | skip | M12. |
@@ -3692,14 +3919,14 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:1700` | `DeviceBase::APIImportSharedFence` | — | — | skip | M21. |
 | `src/dawn/native/Device.cpp:1709` | `DeviceBase::ImportSharedFence` | — | — | skip | M21. |
 | `src/dawn/native/Device.cpp:1718` | `DeviceBase::ImportSharedFenceImpl` | — | — | skip | The back-end hook above. M21. |
-| `src/dawn/native/Device.cpp:1723` | `DeviceBase::ApplyFeatures` | `applyFeatures` | `src/engine/device.zig` | port | The required features, then the implicit closure `WGPUHelpers.cpp:454-460` publishes as `features.implicitly_enabled`, then the core feature at `:1755-1759`. The closure is a fixed point and is bounded by the edge count; the `allow_unsafe_apis` gate at `:191-198` lands with M7's toggle table, which M8 does not read. |
-| `src/dawn/native/Device.cpp:1764` | `DeviceBase::HasFeature` | `Device.hasFeature` | `src/engine/device.zig` | port | Reads M7's set through the generated name mapping. |
+| `src/dawn/native/Device.cpp:1723` | `DeviceBase::ApplyFeatures` | `applyFeatures` | `src/engine/device.zig:403` | port | The required features, then the implicit closure `WGPUHelpers.cpp:454-460` publishes as `features.implicitly_enabled`, then the core feature at `:1755-1759`. The closure is a fixed point and is bounded by the edge count; the `allow_unsafe_apis` gate at `:191-198` lands with M7's toggle table, which M8 does not read. |
+| `src/dawn/native/Device.cpp:1764` | `DeviceBase::HasFeature` | `Device.hasFeature` | `src/engine/device.zig:306` | port | Reads M7's set through the generated name mapping. |
 | `src/dawn/native/Device.cpp:1768` | `DeviceBase::SetWGSLExtensionAllowList` | — | — | skip | The WGSL front end. `AGENTS.md` §3.2 forbids one, so there is no allow list to set. |
 | `src/dawn/native/Device.cpp:1820` | `DeviceBase::GetWGSLAllowedFeatures` | — | — | skip | Reads `tint::wgsl::AllowedFeatures`. There is no Tint in the port. |
 | `src/dawn/native/Device.cpp:1824` | `DeviceBase::AreTexelBuffersEnabled` | — | — | skip | A `Format` predicate. M11. |
 | `src/dawn/native/Device.cpp:1829` | `DeviceBase::IsValidationEnabled` | — | — | skip | `!IsToggleEnabled(Toggle::DisableValidation)`. M7 owns the toggle table; M8 has no toggle state to read. |
 | `src/dawn/native/Device.cpp:1836` | `DeviceBase::IsRobustnessEnabled` | — | — | skip | The same, over `Toggle::DisableRobustness`. M7. |
-| `src/dawn/native/Device.cpp:1840` | `DeviceBase::IsCompatibilityMode` | `Device.isCompatibilityMode` | `src/engine/device.zig` | port | `!HasFeature(CoreFeaturesAndLimits)`. `docs/10-architecture.md` "Compatibility mode" fixes this as the single rule that drives limit selection. |
+| `src/dawn/native/Device.cpp:1840` | `DeviceBase::IsCompatibilityMode` | `Device.isCompatibilityMode` | `src/engine/device.zig:326` | port | `!HasFeature(CoreFeaturesAndLimits)`. `docs/10-architecture.md` "Compatibility mode" fixes this as the single rule that drives limit selection. |
 | `src/dawn/native/Device.cpp:1844` | `DeviceBase::IsImmediateErrorHandlingEnabled` | — | — | skip | A toggle read, and a member the port has no use for. M7. |
 | `src/dawn/native/Device.cpp:1848` | `DeviceBase::GetLazyClearCountForTesting` | — | — | skip | The lazy-clear counter. M17. |
 | `src/dawn/native/Device.cpp:1852` | `DeviceBase::IncrementLazyClearCountForTesting` | — | — | skip | M17. |
@@ -3708,37 +3935,37 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:1890` | `DeviceBase::EmitLog` | — | — | skip | Forwards to the two-argument form. M4. |
 | `src/dawn/native/Device.cpp:1894` | `DeviceBase::EmitLog` (with type) | — | — | skip | Calls the logging callback. M4. |
 | `src/dawn/native/Device.cpp:1898` | `DeviceBase::APIGetAHardwareBufferProperties` | — | — | skip | Android. M21. |
-| `src/dawn/native/Device.cpp:1920` | `DeviceBase::APIGetLimits` | `Device.getLimits` | `src/engine/device.zig` | port | Upstream fills the caller's struct through `FillLimits`; the port returns the resolved `CombinedLimits`, which is the same value with no chain to walk. |
+| `src/dawn/native/Device.cpp:1920` | `DeviceBase::APIGetLimits` | `Device.getLimits` | `src/engine/device.zig:300` | port | Upstream fills the caller's struct through `FillLimits`; the port returns the resolved `CombinedLimits`, which is the same value with no chain to walk. |
 | `src/dawn/native/Device.cpp:1927` | `DeviceBase::APIHasFeature` | — | — | merge | `Device.hasFeature` is the one function. |
 | `src/dawn/native/Device.cpp:1931` | `DeviceBase::APIGetFeatures` (`WGPU`) | — | — | skip | The C ABI overload. The C ABI is its own milestone. |
-| `src/dawn/native/Device.cpp:1935` | `DeviceBase::APIGetFeatures` | `Device.getFeatures` | `src/engine/device.zig` | port | Fills a caller-provided array and returns `out[0..count]`, ascending by tag, so two runs agree. |
+| `src/dawn/native/Device.cpp:1935` | `DeviceBase::APIGetFeatures` | `Device.getFeatures` | `src/engine/device.zig:311` | port | Fills a caller-provided array and returns `out[0..count]`, ascending by tag, so two runs agree. |
 | `src/dawn/native/Device.cpp:1939` | `DeviceBase::APIGetAdapterInfo` | — | — | skip | The adapter owns its info (`Adapter.cpp:120-158`); a device can answer by forwarding, and no M8 caller reads it. |
 | `src/dawn/native/Device.cpp:1943` | `DeviceBase::APIGetLostFuture` | — | — | skip | The lost future. M4 owns futures. |
 | `src/dawn/native/Device.cpp:1954` | `DeviceBase::APIInjectError` | — | — | merge | M3's `core.Device.injector` is the same field. |
 | `src/dawn/native/Device.cpp:1978` | `DeviceBase::APIValidateTextureDescriptor` | — | — | skip | M11. |
-| `src/dawn/native/Device.cpp:1994` | `DeviceBase::GetQueue` | — | — | skip | M9. |
-| `src/dawn/native/Device.cpp:2001` | `DeviceBase::CreateBindGroup` | — | — | skip | M12. |
-| `src/dawn/native/Device.cpp:2016` | `DeviceBase::CreateBindGroupLayout` | — | — | skip | M12. |
-| `src/dawn/native/Device.cpp:2033` | `DeviceBase::CreateBuffer` | — | — | skip | M10. |
-| `src/dawn/native/Device.cpp:2054` | `DeviceBase::CreateComputePipeline` | — | — | skip | M14. |
+| `src/dawn/native/Device.cpp:1994` | `DeviceBase::GetQueue` | `Device.getQueue` | `src/engine/device.zig:417` | merge | Returns `OperationError!QueueLease`, not Dawn's queue reference. The scoped lease retains an operation pin and queue gate until `deinit(io)`. It captures no Io. |
+| `src/dawn/native/Device.cpp:2001` | `DeviceBase::CreateBindGroup` | `Device.createBindGroup` | `src/engine/device.zig:535` | merge | Synchronous typed creation validates effective limits and dependencies, then uses `native_resources.createBindGroup` at `src/engine/native_resources.zig:385`. Not full WebGPU binding parity. |
+| `src/dawn/native/Device.cpp:2016` | `DeviceBase::CreateBindGroupLayout` | `Device.createBindGroupLayout` | `src/engine/device.zig:485` | merge | Uses `native_resources.createBindGroupLayout` at `src/engine/native_resources.zig:193` and existing layout factories. Rejects resource kinds without typed native owners. |
+| `src/dawn/native/Device.cpp:2033` | `DeviceBase::CreateBuffer` | `Device.createBuffer` | `src/engine/device.zig:441` | merge | Uses `native_resources.createBuffer` at `src/engine/native_resources.zig:81` and `Buffer.create` at `src/engine/buffer.zig:546`. Dusk owns allocation and staging policy. |
+| `src/dawn/native/Device.cpp:2054` | `DeviceBase::CreateComputePipeline` | `Device.createComputePipeline` | `src/engine/device.zig:557` | merge | Synchronous typed path calls `pipeline.createComputePipeline` at `src/pipeline/pipeline.zig:789`. Effective limits and maintenance4 govern LocalSizeId. This does not implement async creation or driver caching. |
 | `src/dawn/native/Device.cpp:2089` | `DeviceBase::CreateCommandEncoder` | — | — | skip | M15. |
 | `src/dawn/native/Device.cpp:2107` | `DeviceBase::GetOrCreatePipelineCacheImpl` | — | — | skip | The pipeline cache. M14. |
 | `src/dawn/native/Device.cpp:2111` | `DeviceBase::CreateUninitializedComputePipeline` | — | — | skip | M14. |
 | `src/dawn/native/Device.cpp:2128` | `DeviceBase::InitializeComputePipelineAsyncImpl` | — | — | skip | M14. |
 | `src/dawn/native/Device.cpp:2134` | `DeviceBase::InitializeRenderPipelineAsyncImpl` | — | — | skip | M14. |
-| `src/dawn/native/Device.cpp:2138` | `DeviceBase::CreatePipelineLayout` | — | — | skip | M12. |
+| `src/dawn/native/Device.cpp:2138` | `DeviceBase::CreatePipelineLayout` | `Device.createPipelineLayout` | `src/engine/device.zig:514` | merge | Uses `native_resources.createPipelineLayout` at `src/engine/native_resources.zig:277`. The typed owner retains ordered group layouts. |
 | `src/dawn/native/Device.cpp:2161` | `DeviceBase::CreateExternalTextureImpl` | — | — | skip | The back-end hook. M11. |
 | `src/dawn/native/Device.cpp:2172` | `DeviceBase::CreateQuerySet` | — | — | skip | M19. |
 | `src/dawn/native/Device.cpp:2180` | `DeviceBase::CreateRenderBundleEncoder` | — | — | skip | M14. |
 | `src/dawn/native/Device.cpp:2194` | `DeviceBase::CreateRenderBundle` | — | — | skip | M14. |
-| `src/dawn/native/Device.cpp:2205` | `DeviceBase::CreateRenderPipeline` | — | — | skip | M14. |
+| `src/dawn/native/Device.cpp:2205` | `DeviceBase::CreateRenderPipeline` | `Device.createRenderPipeline` | `src/engine/device.zig:598` | merge | Calls `pipeline.createRenderPipeline` at `src/pipeline/pipeline.zig:681`. The native context supplies a compatible traditional render pass. That context adapter is Dusk glue, not another Dawn function. |
 | `src/dawn/native/Device.cpp:2243` | `DeviceBase::CreateUninitializedRenderPipeline` | — | — | skip | M14. |
 | `src/dawn/native/Device.cpp:2265` | `DeviceBase::CreateResourceTable` | — | — | skip | M12. |
 | `src/dawn/native/Device.cpp:2286` | `DeviceBase::CreateSampler` | — | — | skip | M11. |
-| `src/dawn/native/Device.cpp:2303` | `DeviceBase::CreateShaderModule` | — | — | skip | M13. |
+| `src/dawn/native/Device.cpp:2303` | `DeviceBase::CreateShaderModule` | `Device.createShaderModule`, `createShaderModule` | `src/engine/device.zig:596`, `src/engine/native_resources.zig:238` | split | Dawn's cache lookup is at `:2361-2367`. Dusk compares unchanged owned SPIR-V words and returns an owned alias. Failed modules do not enter the weak index. Validation and reflection remain SPIR-V-only, not Dawn's Tint path. |
 | `src/dawn/native/Device.cpp:2370` | `DeviceBase::CreateSwapChain` | — | — | skip | M20. The host is headless (`AGENTS.md` §5), so no M8 test reaches it. |
-| `src/dawn/native/Device.cpp:2377` | `DeviceBase::CreateTexture` | — | — | skip | M11. |
-| `src/dawn/native/Device.cpp:2401` | `DeviceBase::CreateTextureView` | — | — | skip | M11. |
+| `src/dawn/native/Device.cpp:2377` | `DeviceBase::CreateTexture` | `Device.createTexture` | `src/engine/device.zig:644` | merge | Calls `Texture.create` at `src/engine/texture.zig:738`, then initializes its native payload. Physical image-format-property validation is Dusk glue. |
+| `src/dawn/native/Device.cpp:2401` | `DeviceBase::CreateTextureView` | `Device.createTextureView` | `src/engine/device.zig:690` | merge | Calls `Texture.createView` at `src/engine/texture.zig:1121`, then initializes the native view. The typed view retains its parent texture. |
 | `src/dawn/native/Device.cpp:2430` | `DeviceBase::CreateTexelBufferView` | — | — | skip | M11. |
 | `src/dawn/native/Device.cpp:2447` | `DeviceBase::CreateTexelBufferViewImpl` | — | — | skip | The back-end hook above. M11. |
 | `src/dawn/native/Device.cpp:2455` | `DeviceBase::GetDynamicUploader` | — | — | skip | M10. |
@@ -3749,14 +3976,14 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:2477` | `DeviceBase::GetEnabledFeatures` | — | — | merge | `Device.getFeatures` is the reader; the set itself is `Device.enabled_features`. |
 | `src/dawn/native/Device.cpp:2481` | `DeviceBase::ForceEnableFeatureForTesting` | — | — | skip | The test hook. M7 owns the feature set's mutators. |
 | `src/dawn/native/Device.cpp:2486` | `DeviceBase::FlushCallbackTaskQueue` | — | — | skip | M4. |
-| `src/dawn/native/Device.cpp:2506` | `DeviceBase::GetLimits` | `Device.getLimits` | `src/engine/device.zig` | port | The accessor for the resolved `CombinedLimits`. |
+| `src/dawn/native/Device.cpp:2506` | `DeviceBase::GetLimits` | `Device.getLimits` | `src/engine/device.zig:850` | port | Returns resolved effective `CombinedLimits`, not uncapped hardware maxima. |
 | `src/dawn/native/Device.cpp:2510` | `DeviceBase::GetAsyncTaskManager` | — | — | skip | M4. |
 | `src/dawn/native/Device.cpp:2514` | `DeviceBase::GetCallbackTaskManager` | — | — | skip | M4. |
 | `src/dawn/native/Device.cpp:2518` | `DeviceBase::GetWorkerTaskPool` | — | — | skip | M4. |
 | `src/dawn/native/Device.cpp:2522` | `DeviceBase::GetNextPipelineCompatibilityToken` | — | — | skip | M12. |
 | `src/dawn/native/Device.cpp:2526` | `DeviceBase::GetCacheKey` | — | — | skip | Built from the adapter, the features and the toggles. M14 owns the cache key; the toggle half lands with M7. |
-| `src/dawn/native/Device.cpp:2530` | `DeviceBase::GetLabel` | `Device.getLabel` | `src/engine/device.zig` | port | A borrowed string; the arena owns it when the caller allocated it there. |
-| `src/dawn/native/Device.cpp:2534` | `DeviceBase::APISetLabel` | `Device.setLabel` | `src/engine/device.zig` | port | The label is a field, as upstream, because M3's arena does not own it. |
+| `src/dawn/native/Device.cpp:2530` | `DeviceBase::GetLabel` | `Device.getLabel` | `src/engine/device.zig:337` | port | A borrowed string; the arena owns it when the caller allocated it there. |
+| `src/dawn/native/Device.cpp:2534` | `DeviceBase::APISetLabel` | `Device.setLabel` | `src/engine/device.zig:332` | port | The label is a field, as upstream, because M3's arena does not own it. |
 | `src/dawn/native/Device.cpp:2539` | `DeviceBase::SetLabelImpl` | — | — | merge | An empty body on a defaulted virtual; `setLabel` is the one function. |
 | `src/dawn/native/Device.cpp:2541` | `DeviceBase::ReduceMemoryUsageImpl` | — | — | skip | The back-end hook. M6. |
 | `src/dawn/native/Device.cpp:2545` | `DeviceBase::PerformIdleTasksImpl` | — | — | skip | The back-end hook. M4. |
@@ -3770,7 +3997,7 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Device.cpp:2580` | `DeviceBase::ShouldDuplicateParametersForDrawIndirect` | — | — | skip | The indirect-draw workaround. M18. |
 | `src/dawn/native/Device.cpp:2585` | `DeviceBase::BackendWillValidateMultiDraw` | — | — | skip | M18. |
 | `src/dawn/native/Device.cpp:2589` | `DeviceBase::ShouldApplyIndexBufferOffsetToFirstIndex` | — | — | skip | M18. |
-| `src/dawn/native/Device.cpp:2593` | `DeviceBase::CanTextureLoadResolveTargetInTheSameRenderpass` | `Device.canLoadAndResolveInSameRenderPass` | `src/engine/device.zig` | port | A defaulted virtual with a default body of `false`; the null back end answers `true` (`DeviceNull.cpp:606-608`). |
+| `src/dawn/native/Device.cpp:2593` | `DeviceBase::CanTextureLoadResolveTargetInTheSameRenderpass` | `Device.canLoadAndResolveInSameRenderPass` | `src/engine/device.zig:393` | port | A defaulted virtual with a default body of `false`; the null back end answers `true` (`DeviceNull.cpp:606-608`). |
 | `src/dawn/native/Device.cpp:2597` | `DeviceBase::CanResolveSubRect` | — | — | skip | M17. |
 | `src/dawn/native/Device.cpp:2601` | `DeviceBase::CanAddStorageUsageToBufferWithoutSideEffects` | — | — | skip | M10. |
 | `src/dawn/native/Device.cpp:2607` | `DeviceBase::NeedsStaticSamplerForExternalTexture` | — | — | skip | M11. |
@@ -3807,23 +4034,23 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Instance.cpp:212` | `APIHasInstanceFeature` | `Instance.hasFeature` | `src/engine/instance.zig` | port | Reads the enabled instance-feature set, which `Instance.init` fills from the descriptor. |
 | `src/dawn/native/Instance.cpp:217` | `APIGetInstanceFeatures` | — | — | skip | Writes into a `WGPUSupportedInstanceFeatures` and frees its members. C ABI. |
 | `src/dawn/native/Instance.cpp:221` | `APISupportedInstanceFeaturesFreeMembers` | — | — | skip | C ABI. |
-| `src/dawn/native/Instance.cpp:225` | `APICreateInstance` | `Instance.init` | `src/engine/instance.zig` | port | The C entry point above; `init` is the one function, and it allocates nothing. |
-| `src/dawn/native/Instance.cpp:242` | `InstanceBase::Create` | — | — | merge | Validates the descriptor and refcounts. The port has no reference count; `init` is the one function. |
-| `src/dawn/native/Instance.cpp:265` | `InstanceBase::InstanceBase` | `Instance.init` | `src/engine/instance.zig` | port | Holds the toggles, the event manager and the deprecation-warning list. M8 keeps the backend type and the instance-feature set. |
+| `src/dawn/native/Instance.cpp:225` | `APICreateInstance` | `Instance.init` | `src/engine/instance.zig:136` | merge | The typed entry initializes frontend state without allocation. Native discovery later allocates the stable context. This is not Dawn's C entry contract. |
+| `src/dawn/native/Instance.cpp:242` | `InstanceBase::Create` | `Instance.init` | `src/engine/instance.zig:136` | merge | Frontend creation is one typed call. Native attachment occurs in `Instance.discoverNative` at `src/engine/instance.zig:217`. No complete platform, toggle, or event initialization is claimed. |
+| `src/dawn/native/Instance.cpp:265` | `InstanceBase::InstanceBase` | `Instance.init` | `src/engine/instance.zig:136` | merge | Stores backend selection and instance features. Dawn's event, toggle, and warning machinery is not reproduced. |
 | `src/dawn/native/Instance.cpp:272` | `InstanceBase::DeleteThis` | — | — | skip | Refcounted self-deletion. The caller owns the instance in the port. |
 | `src/dawn/native/Instance.cpp:296` | `InstanceBase::DisconnectDawnPlatform` | — | — | skip | Closes the platform connection. M20 owns surfaces. |
-| `src/dawn/native/Instance.cpp:301` | `InstanceBase::Initialize` | — | — | merge | Parses the instance descriptor and installs the platform. `init` is the one function; the platform half lands at M20. |
+| `src/dawn/native/Instance.cpp:301` | `InstanceBase::Initialize` | `Instance.init` | `src/engine/instance.zig:136` | merge | Dusk separates frontend initialization from native discovery. The stable native context is ownership glue, not a complete port of Dawn initialization. |
 | `src/dawn/native/Instance.cpp:358` | `InstanceBase::APIRequestAdapter` | — | — | merge | Enumerates and takes `adapters[0]`. The enumeration is `enumerateAdapters`; the request callback is M4. |
 | `src/dawn/native/Instance.cpp:366` | `RequestAdapterEvent::RequestAdapterEvent` | — | — | skip | The callback wrapper. M4. |
 | `src/dawn/native/Instance.cpp:375` | `RequestAdapterEvent::~RequestAdapterEvent` | — | — | skip | The callback wrapper. M4. |
 | `src/dawn/native/Instance.cpp:377` | `RequestAdapterEvent::Complete` | — | — | skip | The callback wrapper. M4. |
-| `src/dawn/native/Instance.cpp:405` | `InstanceBase::CreateAdapter` | `Adapter.init` | `src/engine/adapter.zig` | port | One adapter per physical device, at the requested level. `enumerateAdapters` calls it in a loop bounded by the device count. |
+| `src/dawn/native/Instance.cpp:405` | `InstanceBase::CreateAdapter` | `Adapter.init` | `src/engine/adapter.zig:83` | merge | Constructs an adapter at a supported level from stable physical storage. Dawn's adapter-toggle policy is not reproduced. |
 | `src/dawn/native/Instance.cpp:421` | `InstanceBase::GetTogglesState` | — | — | skip | Reads the instance toggles. M7 owns the toggle table. |
 | `src/dawn/native/Instance.cpp:425` | `InstanceBase::GetToggleInfo` | — | — | skip | M7. |
 | `src/dawn/native/Instance.cpp:429` | `InstanceBase::ToggleNameToEnum` | — | — | skip | M7. |
-| `src/dawn/native/Instance.cpp:433` | `InstanceBase::EnumerateAdapters` | `Instance.enumerateAdapters` | `src/engine/instance.zig` | port | Discover, build one adapter per device, then sort. Rejects a WebXR request at `:444`; the port's `RequestAdapterOptions` has no WebXR member to reject. |
-| `src/dawn/native/Instance.cpp:468` | `InstanceBase::GetBackendConnection` | `connect` | `src/engine/instance.zig` | port | One `switch` over `BackendType` with the memoised `mBackendsTried`. The port has one back end, so the memo is a `switch` arm and the answer is a union. A name this build does not have is `error.BackendNotCompiledIn` rather than a silent null. |
-| `src/dawn/native/Instance.cpp:539` | `InstanceBase::EnumeratePhysicalDevices` | `Instance.enumeratePhysicalDevices` | `src/engine/instance.zig` | port | Iterates the back-end bitset in ascending `BackendType` order (`:568`) and appends every device. M8 bounds the list at `max_physical_device_count` and reports exhaustion, because the port allocates a list where Dawn allocates a vector. |
+| `src/dawn/native/Instance.cpp:433` | `InstanceBase::EnumerateAdapters` | `Instance.enumerateAdapters` | `src/engine/instance.zig:161` | merge | Discovers physical rows, builds adapters, and sorts them. The counted list retains stable physical records and its instance. This is not full Dawn multi-backend selection policy. |
+| `src/dawn/native/Instance.cpp:468` | `InstanceBase::GetBackendConnection` | `Instance.discoverNative` | `src/engine/instance.zig:217` | merge | Dusk lazily attaches a selected Vulkan backend through a stable owner. It does not reproduce Dawn's `BackendConnection` abstraction or enabled-backend cache. |
+| `src/dawn/native/Instance.cpp:539` | `InstanceBase::EnumeratePhysicalDevices` | `Instance.enumeratePhysicalDevices` | `src/engine/instance.zig:194` | merge | Selects Vulkan or the null test backend. It owns counted stable rows, filters the requested level, and bounds physical-device count. Dawn's enabled-backend iteration is not a complete port. |
 | `src/dawn/native/Instance.cpp:581` | `InstanceBase::EmitLog` | — | — | skip | M4 owns the log sink. |
 | `src/dawn/native/Instance.cpp:589` | `InstanceBase::IsBackendValidationEnabled` | — | — | skip | A toggle read. M7. |
 | `src/dawn/native/Instance.cpp:593` | `InstanceBase::SetBackendValidationLevel` | — | — | skip | M7. |
@@ -3859,28 +4086,28 @@ The rows from `:1312` on are in the second half of this table.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Adapter.cpp:54` | `AdapterBase::AdapterBase` | `Adapter.init` | `src/engine/adapter.zig` | port | The two `DAWN_CHECK`s at `:64-65` become the error the port reports, so an unsupported level is `error.FeatureLevelUnsupported` and not an abort. The cached features and limits at `:68-71` are kept. |
+| `src/dawn/native/Adapter.cpp:54` | `AdapterBase::AdapterBase` | `Adapter.init` | `src/engine/adapter.zig:83` | merge | Caches physical features and limits at a supported level. Typed errors replace aborts. Dusk omits Dawn adapter toggles. |
 | `src/dawn/native/Adapter.cpp:76` | `AdapterBase::SetUseTieredLimits` | — | — | skip | Turns on `ApplyLimitTiers`, a `Limits.cpp` row. M7 owns the tiering and this milestone's table does not name a file for it. |
-| `src/dawn/native/Adapter.cpp:81` | `AdapterBase::GetPhysicalDevice` | `Adapter.getPhysicalDevice` | `src/engine/adapter.zig` | port | A field read: the pointer into the instance's slice never moves. |
+| `src/dawn/native/Adapter.cpp:81` | `AdapterBase::GetPhysicalDevice` | `Adapter.getPhysicalDevice` | `src/engine/adapter.zig:113` | port | Returns the borrowed stable physical record. A live device prevents its parent list from releasing that storage. |
 | `src/dawn/native/Adapter.cpp:85` | `AdapterBase::GetPhysicalDevice` (const) | — | — | merge | The const overload of the row above. |
-| `src/dawn/native/Adapter.cpp:89` | `AdapterBase::GetInstance` | `Adapter.getInstance` | `src/engine/adapter.zig` | port | A field read. Upstream returns a `Ref` and the port returns the pointer it holds. |
-| `src/dawn/native/Adapter.cpp:93` | `AdapterBase::APIGetInstance` | — | — | skip | Adds a reference. C ABI, and the port has no reference count. |
+| `src/dawn/native/Adapter.cpp:89` | `AdapterBase::GetInstance` | `Adapter.getInstance` | `src/engine/adapter.zig:109` | merge | Returns a borrowed instance pointer, not Dawn's returned `Ref`. Counted list/device parents preserve its owner. |
+| `src/dawn/native/Adapter.cpp:93` | `AdapterBase::APIGetInstance` | — | — | skip | Dawn's external-reference accessor is not implemented. Dusk counts list/device parents separately. |
 | `src/dawn/native/Adapter.cpp:100` | `AdapterBase::UpdateLimits` | — | — | merge | The copy of the physical device's limits happens in `Adapter.init`; the tier call above is the only other statement and it lands with M7. |
-| `src/dawn/native/Adapter.cpp:109` | `AdapterBase::GetLimits` | `Adapter.getLimits` | `src/engine/adapter.zig` | port | The accessor. |
-| `src/dawn/native/Adapter.cpp:113` | `AdapterBase::APIGetLimits` | — | — | merge | `getLimits` is the one function; `FillLimits` writes the caller's chain, which the port has no chain to fill. |
-| `src/dawn/native/Adapter.cpp:120` | `AdapterBase::APIGetInfo` | `Adapter.getInfo` | `src/engine/adapter.zig` | port | Copies the physical device's identity into `api.AdapterInfo` (`src/api/descriptors.zig:58-69`) and lets the back end fill what it can. |
+| `src/dawn/native/Adapter.cpp:109` | `AdapterBase::GetLimits` | `Adapter.getLimits` | `src/engine/adapter.zig:129` | port | Returns cached offered limits. |
+| `src/dawn/native/Adapter.cpp:113` | `AdapterBase::APIGetLimits` | `Adapter.getLimits` | `src/engine/adapter.zig:129` | merge | Returns a typed value rather than filling Dawn's output chain. |
+| `src/dawn/native/Adapter.cpp:120` | `AdapterBase::APIGetInfo` | `Adapter.getInfo` | `src/engine/adapter.zig:135` | merge | Returns cached physical identity. Native vendor and architecture names remain empty. Dawn's output-chain policy is not reproduced. |
 | `src/dawn/native/Adapter.cpp:161` | `AdapterBase::ValidateGetInfo` | — | — | skip | Unpacks and validates the caller's `AdapterInfo` chain. The port has no chain, so there is nothing to validate. The heap and D3D blocks land with the chain-walking API. |
 | `src/dawn/native/Adapter.cpp:186` | `APIAdapterInfoFreeMembers` | — | — | skip | C ABI. |
 | `src/dawn/native/Adapter.cpp:193` | `APIAdapterPropertiesMemoryHeapsFreeMembers` | — | — | skip | C ABI. |
 | `src/dawn/native/Adapter.cpp:198` | `APIDawnDrmFormatCapabilitiesFreeMembers` | — | — | skip | C ABI. |
 | `src/dawn/native/Adapter.cpp:202` | `APIAdapterPropertiesSubgroupMatrixConfigsFreeMembers` | — | — | skip | C ABI. |
-| `src/dawn/native/Adapter.cpp:207` | `AdapterBase::APIHasFeature` | `Adapter.hasFeature` | `src/engine/adapter.zig` | port | Reads the cached set. |
+| `src/dawn/native/Adapter.cpp:207` | `AdapterBase::APIHasFeature` | `Adapter.hasFeature` | `src/engine/adapter.zig:160` | port | Reads the cached supported set. |
 | `src/dawn/native/Adapter.cpp:211` | `AdapterBase::APIGetFeatures` (`WGPU`) | — | — | skip | The C ABI overload. |
-| `src/dawn/native/Adapter.cpp:215` | `AdapterBase::APIGetFeatures` | `Adapter.getFeatures` | `src/engine/adapter.zig` | port | Fills a caller-provided array and returns `out[0..count]`, ascending by tag. |
+| `src/dawn/native/Adapter.cpp:215` | `AdapterBase::APIGetFeatures` | `Adapter.getFeatures` | `src/engine/adapter.zig:152` | port | Fills typed caller storage in ascending feature-tag order. |
 | `src/dawn/native/Adapter.cpp:219` | `APISupportedFeaturesFreeMembers` | — | — | skip | C ABI. |
-| `src/dawn/native/Adapter.cpp:224` | `AdapterBase::APICreateDevice` | `Adapter.createDevice` | `src/engine/adapter.zig` | port | The C entry point; `createDevice` is the one function. |
-| `src/dawn/native/Adapter.cpp:238` | `AdapterBase::CreateDeviceInternal` | `Adapter.createDevice` | `src/engine/adapter.zig` | port | The required-feature check, the required-limit check, the consumption latch and the call into the physical device. The device toggles at `:250-269` land with M7's toggle table; the power-of-two allocator check at `:296-303` lands with M6's allocator control, which this revision gates behind a feature. |
-| `src/dawn/native/Adapter.cpp:325` | `AdapterBase::CreateDevice` | — | — | merge | Creates the lost event and turns a failure into a `FailedCreation` loss. The port has no event, so `createDevice` is the one function and a failure is an error. |
+| `src/dawn/native/Adapter.cpp:224` | `AdapterBase::APICreateDevice` | `Adapter.createDevice` | `src/engine/adapter.zig:170` | merge | Typed synchronous errors replace Dawn's API error consumption. |
+| `src/dawn/native/Adapter.cpp:238` | `AdapterBase::CreateDeviceInternal` | `Adapter.createDevice` | `src/engine/adapter.zig:170` | merge | Checks required features and limits, then calls `Device.init` at `src/engine/device.zig:129`. Adapter consumption occurs only after success. Native creation accepts only its implemented feature subset. |
+| `src/dawn/native/Adapter.cpp:325` | `AdapterBase::CreateDevice` | `Adapter.createDevice` | `src/engine/adapter.zig:170` | merge | Dusk returns synchronous typed errors. It does not port Dawn's failed-creation device-lost event. |
 | `src/dawn/native/Adapter.cpp:347` | `AdapterBase::APIRequestDevice` | — | — | skip | The request callback. M4. |
 | `src/dawn/native/Adapter.cpp:358` | `RequestDeviceEvent::RequestDeviceEvent` | — | — | skip | The callback wrapper. M4. |
 | `src/dawn/native/Adapter.cpp:368` | `RequestDeviceEvent::RequestDeviceEvent` (failure) | — | — | skip | The callback wrapper. M4. |
@@ -3890,8 +4117,8 @@ The rows from `:1312` on are in the second half of this table.
 | `src/dawn/native/Adapter.cpp:419` | `AdapterBase::ValidateGetFormatCapabilities` | — | — | skip | With the row above. M7. |
 | `src/dawn/native/Adapter.cpp:436` | `AdapterBase::GetTogglesState` | — | — | skip | Reads the adapter toggles. M7. |
 | `src/dawn/native/Adapter.cpp:440` | `AdapterBase::GetTogglesUsed` | — | — | skip | M7. |
-| `src/dawn/native/Adapter.cpp:444` | `AdapterBase::GetFeatureLevel` | `Adapter.getFeatureLevel` | `src/engine/adapter.zig` | port | The accessor. The level is a field, fixed at construction, as upstream. |
-| `src/dawn/native/Adapter.cpp:448` | `AdapterBase::GetName` | `Adapter.getName` | `src/engine/adapter.zig` | port | Through the physical device, as upstream. |
+| `src/dawn/native/Adapter.cpp:444` | `AdapterBase::GetFeatureLevel` | `Adapter.getFeatureLevel` | `src/engine/adapter.zig:118` | port | Returns the level fixed at construction. |
+| `src/dawn/native/Adapter.cpp:448` | `AdapterBase::GetName` | `Adapter.getName` | `src/engine/adapter.zig:123` | port | Borrows the stable physical record's name. |
 | `src/dawn/native/Adapter.cpp:452` | `SortAdapters` | `sortAdapters` | `src/engine/instance.zig` | port | The `(adapter type rank, backend type rank)` key with a stable sort. The ranks are data in `SortOrder`, so adding a back end at M9 is one line in one `switch`. |
 
 ### `src/dawn/native/PhysicalDevice.cpp` — 28 rows
@@ -3899,29 +4126,29 @@ The rows from `:1312` on are in the second half of this table.
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/PhysicalDevice.cpp:43` | `FeatureValidationResult::FeatureValidationResult` | — | — | merge | The success default. The port's `FeatureValidationResult` has the same two fields with the same defaults (`PhysicalDevice.h:59-67`). |
-| `src/dawn/native/PhysicalDevice.cpp:44` | `FeatureValidationResult::FeatureValidationResult` (message) | `PhysicalDevice.validateFeatureSupported` | `src/engine/physical_device.zig` | port | The failure form. The port returns it by value and the caller turns it into an error. |
+| `src/dawn/native/PhysicalDevice.cpp:44` | `FeatureValidationResult::FeatureValidationResult` (message) | `PhysicalDevice.validateFeatureSupported` | `src/engine/physical_device.zig:141` | port | The failure form. The port returns it by value and the caller turns it into an error. |
 | `src/dawn/native/PhysicalDevice.cpp:47` | `PhysicalDeviceBase::PhysicalDeviceBase` | — | — | merge | A struct field. The back end fills the whole record in one literal. |
-| `src/dawn/native/PhysicalDevice.cpp:51` | `PhysicalDeviceBase::Initialize` | `Instance.enumeratePhysicalDevices` | `src/engine/instance.zig` | port | The ordering contract: `InitializeImpl`, the vendor and architecture names, the core-feature gate, five unconditional features, the back end's set, the defaults for the best level. The port keeps the order and drops the steps whose rows are below or M7's. |
-| `src/dawn/native/PhysicalDevice.cpp:77` | `PhysicalDeviceBase::CreateDevice` | `Adapter.createDevice` | `src/engine/adapter.zig` | port | The pure virtual the back end answers. The port's `connect` switch names the back end and `Adapter.createDevice` calls the one device constructor. |
+| `src/dawn/native/PhysicalDevice.cpp:51` | `PhysicalDeviceBase::Initialize` | `native_capabilities.fromNative` | `src/engine/native_capabilities.zig:164` | merge | Projects raw queries into frontend identity, limits, levels, and the implemented feature subset. Native vendor/architecture names stay empty. Full Dawn normalization and feature policy is not claimed. |
+| `src/dawn/native/PhysicalDevice.cpp:77` | `PhysicalDeviceBase::CreateDevice` | `Adapter.createDevice` | `src/engine/adapter.zig:170` | merge | Frontend dispatch reaches `Device.init` and the selected native constructor. Dusk does not preserve Dawn's base-class dispatch shape. |
 | `src/dawn/native/PhysicalDevice.cpp:85` | `PhysicalDeviceBase::InitializeVendorArchitectureImpl` | — | — | skip | Calls `gpu_info::GetVendorName` and `GetArchitectureName`, which are generated from `src/dawn/gpu_info.json`. §1's file list does not name that JSON, and the null back end reports vendor zero, for which the generator returns an empty string (`generator/templates/dawn/common/GPUInfo.cpp:155,162`). The two names are fields the back end fills. |
-| `src/dawn/native/PhysicalDevice.cpp:90` | `PhysicalDeviceBase::GetVendorId` | `PhysicalDevice.getVendorId` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:94` | `PhysicalDeviceBase::GetDeviceId` | `PhysicalDevice.getDeviceId` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:98` | `PhysicalDeviceBase::GetVendorName` | `PhysicalDevice.getVendorName` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:102` | `PhysicalDeviceBase::GetArchitectureName` | `PhysicalDevice.getArchitectureName` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:106` | `PhysicalDeviceBase::GetName` | `PhysicalDevice.getName` | `src/engine/physical_device.zig` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:90` | `PhysicalDeviceBase::GetVendorId` | `PhysicalDevice.getVendorId` | `src/engine/physical_device.zig:84` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:94` | `PhysicalDeviceBase::GetDeviceId` | `PhysicalDevice.getDeviceId` | `src/engine/physical_device.zig:88` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:98` | `PhysicalDeviceBase::GetVendorName` | `PhysicalDevice.getVendorName` | `src/engine/physical_device.zig:92` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:102` | `PhysicalDeviceBase::GetArchitectureName` | `PhysicalDevice.getArchitectureName` | `src/engine/physical_device.zig:96` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:106` | `PhysicalDeviceBase::GetName` | `PhysicalDevice.getName` | `src/engine/physical_device.zig:100` | port | A field read. |
 | `src/dawn/native/PhysicalDevice.cpp:110` | `PhysicalDeviceBase::GetDriverVersion` | — | — | skip | `gpu_info::DriverVersion`, whose rows are below. The null back end has no driver, so M8 carries no version field; the field lands at M9 with the Vulkan physical device. |
 | `src/dawn/native/PhysicalDevice.cpp:114` | `PhysicalDeviceBase::GetDriverDescription` | — | — | skip | With the row above. The null back end sets no description (`DeviceNull.cpp:59-63`), so `api.AdapterInfo.description` is the empty string. |
-| `src/dawn/native/PhysicalDevice.cpp:118` | `PhysicalDeviceBase::GetAdapterType` | `PhysicalDevice.getAdapterType` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:122` | `PhysicalDeviceBase::GetBackendType` | `PhysicalDevice.getBackendType` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:126` | `PhysicalDeviceBase::GetSubgroupMinSize` | `PhysicalDevice.getSubgroupMinSize` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:130` | `PhysicalDeviceBase::GetSubgroupMaxSize` | `PhysicalDevice.getSubgroupMaxSize` | `src/engine/physical_device.zig` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:118` | `PhysicalDeviceBase::GetAdapterType` | `PhysicalDevice.getAdapterType` | `src/engine/physical_device.zig:104` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:122` | `PhysicalDeviceBase::GetBackendType` | `PhysicalDevice.getBackendType` | `src/engine/physical_device.zig:80` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:126` | `PhysicalDeviceBase::GetSubgroupMinSize` | `PhysicalDevice.getSubgroupMinSize` | `src/engine/physical_device.zig:108` | port | A field read. |
+| `src/dawn/native/PhysicalDevice.cpp:130` | `PhysicalDeviceBase::GetSubgroupMaxSize` | `PhysicalDevice.getSubgroupMaxSize` | `src/engine/physical_device.zig:112` | port | A field read. |
 | `src/dawn/native/PhysicalDevice.cpp:134` | `PhysicalDeviceBase::IsFeatureSupportedWithToggles` | — | — | merge | `validateFeatureSupported(...).supported` is the same answer; M8 has no toggle argument to pass. |
 | `src/dawn/native/PhysicalDevice.cpp:139` | `PhysicalDeviceBase::GetDefaultLimitsForSupportedFeatureLevel` | — | — | merge | M7's `limits.defaultLimits`, called by `null_backend.createPhysicalDevice` with the best level the device serves. |
 | `src/dawn/native/PhysicalDevice.cpp:146` | `PhysicalDeviceBase::GetSupportedFeatures` | — | — | merge | M8 has no toggles, so the filtered set is the supported set; `Adapter.init` reads `PhysicalDevice.supported_features` directly. |
-| `src/dawn/native/PhysicalDevice.cpp:158` | `PhysicalDeviceBase::SupportsAllRequiredFeatures` | `PhysicalDevice.supportsAllRequiredFeatures` | `src/engine/physical_device.zig` | port | Names the first required feature that is not supported, which is what `Adapter.createDevice` reports. |
-| `src/dawn/native/PhysicalDevice.cpp:169` | `PhysicalDeviceBase::GetLimits` | `PhysicalDevice.getLimits` | `src/engine/physical_device.zig` | port | A field read. |
-| `src/dawn/native/PhysicalDevice.cpp:173` | `PhysicalDeviceBase::EnableFeature` | `PhysicalDevice.enableFeature` | `src/engine/physical_device.zig` | port | Adds to M7's set. |
-| `src/dawn/native/PhysicalDevice.cpp:177` | `PhysicalDeviceBase::ValidateFeatureSupportedWithToggles` | `PhysicalDevice.validateFeatureSupported` | `src/engine/physical_device.zig` | port | The name check, the membership check, the `allow_unsafe_apis` gate and the back-end hook. M8 keeps the first two and the back-end hook collapses into them, because the null back end's hook (`:136-140`) returns success for every feature. The gate lands with M7's toggle table. |
+| `src/dawn/native/PhysicalDevice.cpp:158` | `PhysicalDeviceBase::SupportsAllRequiredFeatures` | `PhysicalDevice.supportsAllRequiredFeatures` | `src/engine/physical_device.zig:162` | merge | Membership checks precede adapter creation. Native `Device.create` at `src/engine/vulkan_device.zig:870` separately rejects unsupported required features. Dawn's toggle validation is not reproduced. |
+| `src/dawn/native/PhysicalDevice.cpp:169` | `PhysicalDeviceBase::GetLimits` | `PhysicalDevice.getLimits` | `src/engine/physical_device.zig:123` | port | Returns cached offered limits. |
+| `src/dawn/native/PhysicalDevice.cpp:173` | `PhysicalDeviceBase::EnableFeature` | `PhysicalDevice.enableFeature` | `src/engine/physical_device.zig:130` | port | Adds one supported feature to the cached set. |
+| `src/dawn/native/PhysicalDevice.cpp:177` | `PhysicalDeviceBase::ValidateFeatureSupportedWithToggles` | `PhysicalDevice.validateFeatureSupported` | `src/engine/physical_device.zig:141` | port | The name check, the membership check, the `allow_unsafe_apis` gate and the back-end hook. M8 keeps the first two and the back-end hook collapses into them, because the null back end's hook (`:136-140`) returns success for every feature. The gate lands with M7's toggle table. |
 | `src/dawn/native/PhysicalDevice.cpp:204` | `PhysicalDeviceBase::SetSupportedFeaturesForTesting` | — | — | skip | The test hook. M7 owns the mutators of the set. |
 | `src/dawn/native/PhysicalDevice.cpp:212` | `PhysicalDeviceBase::ResetInternalDeviceForTesting` | — | — | skip | The test hook. M14 owns the internal pipeline device. |
 | `src/dawn/native/PhysicalDevice.cpp:216` | `PhysicalDeviceBase::ResetInternalDeviceForTestingImpl` | — | — | skip | The back-end half of the row above. M14. |
@@ -4033,33 +4260,50 @@ list at `PhysicalDeviceVk.h:50`-`:60` is why `PhysicalDevice` copies its four
 tables once instead of re-querying, and the comment at `QueueVk.h:80`-`:83` is
 why the port has one queue and one fence per submission.
 
-**Where the rows go.** 17 `port`, 42 `merge`, 3 `simplify`, 200 `skip`. That
-ratio is the shape of the milestone, not a shortfall, and two groups cause it.
-`DeviceVk.cpp` is a hub of 22 `APICreate*` wrappers, each belonging to the
-milestone that owns the object it creates. `native/Queue.cpp` is the
-back-end-neutral front end, which `src/engine/queue.zig:10`-`:14` disclaims in
-its own header; three of its 42 rows merge into symbols M9 does port and the
-other thirty-nine name a milestone that already owns the work.
+**Historical disposition.** The original M9 table classified 17 `port`, 42 `merge`, 3 `simplify`, and 200 `skip` rows.
+Those figures predate the phase-2 row reconciliation below.
+Native resource hooks now map to the implemented factories.
+Async, driver-cache, surface, and external-memory rows retain their future status.
 
-**What M9 claims to have built.** `src/engine/vulkan_device.zig` (1,481 lines),
-`src/engine/queue.zig` (752 lines), and `test/vulkan_device.zig` (338 lines).
+**Current native phase-2 integration.** The published typed facade reaches the real Vulkan device and queue.
+BG139 ran an out-of-tree consumer in Debug and actual ReleaseSafe.
+Each mode passed 4/4 build steps. The combined command exited 0 in 90.49 seconds.
+It observed compute output `113`, LocalSizeId `4×2×1` with count `8` and mask `255`, and preserved `A5` padding.
+Graphics readback returned RGBA8 red/red/blue/blue with row pitch `256`.
+The consumer created a 12-layer cube-array view after it checked queried and enabled `imageCubeArray`.
+Device, list, and instance cleanup completed.
+It used no manual device/queue/backend assembly, fake runtime, GPU fallback, or skipped GPU case.
+Both modes set empty `VK_INSTANCE_LAYERS` and `VK_LOADER_LAYERS_DISABLE=~all~`.
+See the [BG139 proof record](50-verification.md#published-native-consumer-execution-verified-2026-10-08) for the observed results.
+This supports the current production subset, not full public WebGPU or 205-method procedure-table parity.
 
-**Two open concerns, both about reachability rather than about Vulkan.**
+**Dusk ownership glue, not upstream function rows.**
+`NativeInstanceContext.init` (`src/engine/native_instance_context.zig:11`) initializes backend and handle-count storage at its final heap address.
+`NativeDeviceContext.create` (`src/engine/native_device_context.zig:57`) owns native device, queue, mutexes, pipeline store, and render/framebuffer caches.
+Its `compatibleRenderPass` (`:168`) extracts the cached `RenderPassInfo.render_pass`.
+Its texture initializers (`:213`, `:269`) adapt high-level validation to the existing native factories.
+These aggregates do not correspond to invented Dawn creation functions.
 
-1. `src/engine/root.zig` re-exports the M8 front end and nothing more. Its last
-   import is `null_backend_mod` (`src/engine/root.zig:22`) and the comment at
-   `:38` still reads "the Vulkan one arrives at M9". `test/vulkan_device.zig`
-   therefore reaches the library through `../src/engine/vulkan_device.zig`
-   (`:30`) and `../src/engine/queue.zig` (`:31`), not through `@import("dusk")`,
-   which every other shard in `test/` uses. The re-export is a one-line addition
-   to a file this milestone does not own, so it is reported and not made.
-2. `test/vulkan_device.zig` calls `device.vkDevice()` (`:107`, `:179`, `:243`)
-   and `device.deviceProcs()` (`:126`, `:180`, `:244`). `vulkan_device.Device`
-   defines neither. The field is `vk_device` (`src/engine/vulkan_device.zig:765`)
-   and the accessors are `dispatchTable` (`:650`), `physicalProperties` (`:661`),
-   `memoryProperties` (`:666`), `handles` (`:673`) and `fetchQueue` (`:683`), so
-   those six calls do not compile today. The fix belongs to the device record,
-   which is not this anchor's file either.
+`Device.unmapBuffer`, `submit`, `wait`, and `release` are Dusk facade glue
+(`src/engine/device.zig:730,754,788,809`).
+`native_resources.createPipelineWrapper` (`src/engine/native_resources.zig:630`) adopts the owned pipeline reference and retains typed dependencies.
+`NativeDeviceContext.waitSerial`, `wait`, `retireCaches`, and `deinit`
+(`src/engine/native_device_context.zig:310,349,409,447`) implement Dusk completion and teardown orchestration.
+Queue access uses the counted scoped `QueueLease`, not a bare returned pointer.
+Operations borrow explicit `Io`. Neither the lease nor the native context captures it.
+Instance, adapter-list, and physical-list teardown retain their counted-parent contracts.
+Current device destruction frees native context and core arena storage after safe retirement.
+The retained host-shell and shared-`GuardRc` proposals remain Phase 4 work.
+
+**Capability boundary.** `native_capabilities.fromNative` advertises only the implemented Core and depth-clip feature subset.
+Its corrected Core predicate gates every queried baseline hardware flag named in `docs/02-dawn-design.md` §4.16.2.
+Native `Device.create` enables those queried flags.
+Optional compression feature bits remain unadvertised. This does not establish full Dawn Core parity.
+`offeredLimits` caps bind groups at `4`, bindings per group at `1000`, and immediate data at `256` bytes.
+It also respects queried descriptor, per-stage, fragment-output, image, buffer, and alignment limits.
+`limits.reify` (`src/engine/limits.zig:575`) bounds defaults by physical capabilities and preserves accepted required values.
+Maximum limits are upper bounds. Alignment limits are lower bounds.
+The budget formulas differ from Dawn's baseline-first reservation policy.
 
 ### `src/dawn/native/Queue.cpp` — 42 rows
 
@@ -4082,7 +4326,7 @@ other thirty-nine name a milestone that already owns the work.
 | `:154` | `QueueBase::MakeError` | — | — | skip | Builds the `ErrorQueue` from `:112`; same reason. |
 | `:158` | `QueueBase::GetType` | — | — | skip | `ObjectType::Queue`. M2's generated object census carries the tag, and M9 declares no object header. |
 | `:164` | `QueueBase::FormatLabel` | — | — | skip | `absl::FormatSink` output for an error message. `AGENTS.md` §3.1 refuses a validation layer and the port has no log sink, so there is nothing to format. |
-| `:172` | `QueueBase::APISubmit` | `Queue.submit` | `src/engine/queue.zig:302` | merge | The API wrapper at `:173` calls `SubmitInternal`, whose back-end half is `QueueVk::SubmitPendingCommandsImpl` (`:298`). M9 ports the submit path once. The error-consuming wrapper and the command-buffer destroy loop at `:176`-`:178` are M15's, which owns command buffers. |
+| `:172` | `QueueBase::APISubmit` | `Queue.submit` | `src/engine/queue.zig:434` | merge | The API wrapper at `:173` calls `SubmitInternal`, whose back-end half is `QueueVk::SubmitPendingCommandsImpl` (`:298`). M9 ports the submit path once. The error-consuming wrapper and the command-buffer destroy loop at `:176`-`:178` are M15's, which owns command buffers. |
 | `:184` | `QueueBase::APIOnSubmittedWorkDone` | — | — | skip | The `WorkDoneEvent` future over the callback-mode surface. M2 generates that surface and M4's event manager answers it; the Vulkan half is `Queue.wait` (`src/engine/queue.zig:321`). |
 | `:193` | `WorkDoneEvent` (serial ctor) | — | — | skip | Same reason. |
 | `:202` | `WorkDoneEvent` (early-status ctor) | — | — | skip | Same reason. |
@@ -4091,7 +4335,7 @@ other thirty-nine name a milestone that already owns the work.
 | `:255` | `QueueBase::TrackTask` | — | — | skip | The force-flush branch at `:257`-`:259` calls `ForceEventualFlushOfCommands`, which `QueueVk` answers and this milestone skips; the task map itself is M4's `SerialQueue`. |
 | `:273` | `QueueBase::TrackTaskAfterEventualFlush` | — | — | skip | Same reason. |
 | `:278` | `QueueBase::TrackPendingTask` | — | — | skip | Same reason. |
-| `:282` | `QueueBase::Tick` | `Queue.complete` | `src/engine/queue.zig:586` | merge | Dawn drains the tracked callbacks to `finishedSerial` at `:292`-`:295` and fires them outside the lock at `:299`-`:302`, for the reentrance reason in the comment at `:283`-`:287`. The port drains one `SerialQueue` and moves the completed serial, which is `Queue.complete` over M4's `Timeline.updateCompletedTo` (`src/platform/serial.zig:248`). |
+| `:282` | `QueueBase::Tick` | `Queue.complete` | `src/engine/queue.zig:781` | merge | Dawn drains the tracked callbacks to `finishedSerial` at `:292`-`:295` and fires them outside the lock at `:299`-`:302`, for the reentrance reason in the comment at `:283`-`:287`. The port drains one `SerialQueue` and moves the completed serial, which is `Queue.complete` over M4's `Timeline.updateCompletedTo` (`src/platform/serial.zig:248`). |
 | `:305` | `QueueBase::HandleDeviceLoss` | — | — | skip | Device-loss task cancellation. The port has one failure path and no device-lost event; M8 owns the loss event. |
 | `:315` | `QueueBase::APIWriteBuffer` | — | — | skip | `WriteBuffer` over `BufferBase::UploadData`; the upload path is M10. |
 | `:327` | `QueueBase::WriteBuffer` | — | — | skip | The validation wrapper at `:330`-`:334`, including the scoped use-buffer at `:333`. M10's. |
@@ -4106,7 +4350,7 @@ other thirty-nine name a milestone that already owns the work.
 | `:479` | `QueueBase::ValidateSubmit` | — | — | skip | Per-buffer usage validation over a `BufferSet` that the submit holds open at `:602`-`:606`. M10 owns buffer usage state, and M9 has no buffer. |
 | `:551` | `QueueBase::ValidateOnSubmittedWorkDone` | — | — | skip | M2's future surface. |
 | `:556` | `QueueBase::ValidateWriteTexture` | — | — | skip | M11's. |
-| `:593` | `QueueBase::SubmitInternal` | `Queue.submit` | `src/engine/queue.zig:302` | merge | The alive check at `:597`, the validation call at `:610` and the `Tick` at `:620` are the front end's; the submit itself is `QueueVk::SubmitPendingCommandsImpl` (`:298`), which `Queue.submit` ports. `DAWN_CHECK(!IsError())` at `:612` has no port because no M9 call site holds a half-built queue. |
+| `:593` | `QueueBase::SubmitInternal` | `Queue.submit` | `src/engine/queue.zig:434` | merge | The alive check at `:597`, the validation call at `:610` and the `Tick` at `:620` are the front end's; the submit itself is `QueueVk::SubmitPendingCommandsImpl` (`:298`), which `Queue.submit` ports. `DAWN_CHECK(!IsError())` at `:612` has no port because no M9 call site holds a half-built queue. |
 
 ### `src/dawn/native/Queue.h` — 1 row
 
@@ -4123,21 +4367,21 @@ other thirty-nine name a milestone that already owns the work.
 | `:123` | `SafeLessThan` (integral) | — | — | skip | A `std::cmp_less` wrapper whose only callers are the limit negotiation at `:750`, which is M7's. |
 | `:128` | `SafeLessThan` (float) | — | — | skip | Same reason. |
 | `:133` | `SafeGreaterThan` | — | — | skip | Same reason. |
-| `:139` | `PhysicalDevice::PhysicalDevice` | `PhysicalDevice.gather` | `src/engine/vulkan_device.zig:533` | merge | The ctor at `:142`-`:145` stores three borrowed pointers and starts no query; the port's record is filled in one call, which reads the four tables once. The header's field list at `PhysicalDeviceVk.h:50`-`:60` is why the record carries copies and no borrowed instance pointer. |
-| `:149` | `GetDeviceInfo` | `PhysicalDevice` fields | `src/engine/vulkan_device.zig:504` | merge | The four tables, copied. `Device.physical` (`src/engine/vulkan_device.zig:774`) is the reader a caller has after the adapter list is freed. |
-| `:153` | `GetVkPhysicalDevice` | `PhysicalDevice.handle` | `src/engine/vulkan_device.zig:506` | merge | The handle field itself. |
-| `:157` | `GetVulkanInstance` | `Adapter.instance` | `src/engine/vulkan_device.zig:1138` | merge | Dawn holds a `Ref<VulkanInstance>` so a live adapter keeps its driver alive (`BackendVk.h:66`-`:70`). The port's `Backend` owns its instances outright, so the pointer lives on the adapter. |
+| `:139` | `PhysicalDevice::PhysicalDevice` | `PhysicalDevice.gather` | `src/engine/vulkan_device.zig:543` | merge | Dusk combines raw record construction and queries. Dawn's constructor stores borrowed pointers without querying. Frontend policy remains separate. |
+| `:149` | `GetDeviceInfo` | `PhysicalDevice` fields | `src/engine/vulkan_device.zig:510` | merge | Owns copied properties, features, memory, and queue facts. The high-level device retains parent storage rather than permitting adapter-list teardown while it is live. |
+| `:153` | `GetVkPhysicalDevice` | `PhysicalDevice.handle` | `src/engine/vulkan_device.zig:512` | merge | Stores the queried native handle directly. |
+| `:157` | `GetVulkanInstance` | `Adapter.instance` | `src/engine/vulkan_device.zig:1096` | merge | Low native records borrow the backend-owned instance. High instance/list/device counts preserve that backend owner. This is not Dawn's `Ref<VulkanInstance>`. |
 | `:161` | `IsDepthStencilFormatSupported` | — | — | skip | Reads `VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT` per format. M11's format-capability row. |
 | `:171` | `IsTextureCompressionASTCSliced3DSupported` | — | — | skip | Asks for 3-D image format properties. M11's. |
-| `:180` | `InitializeImpl` | `PhysicalDevice.gather` | `src/engine/vulkan_device.zig:533` | merge | The body at `:181` is `GatherDeviceInfo`, which is the four query passes the port runs. `:183`-`:184` decode the driver version, which is the `AdapterInfo` row above, and the rest of the body is the toggle and limit work that is M7's. |
-| `:285` | `InitializeSupportedFeaturesImpl` | — | — | skip | The 60-entry feature table. M7's `FeaturesSet`. |
-| `:736` | `InitializeSupportedLimitsImpl` | — | — | skip | M7's `CombinedLimits`. |
-| `:750` | `InitializeSupportedLimitsInternal` | — | — | skip | M7's, and it is what the three `SafeLessThan` and `SafeGreaterThan` rows above exist for. |
+| `:180` | `InitializeImpl` | `PhysicalDevice.gather`, `native_capabilities.fromNative` | `src/engine/vulkan_device.zig:543`, `src/engine/native_capabilities.zig:164` | merge | Separates raw queries from frontend admission. Core gates robust access, compression, four dynamic-indexing flags, fragment atomics, full draw indices, independent blend, depth-bias clamp, cube arrays, and sample-rate shading. Native creation enables the queried flags. No full Core parity is claimed. |
+| `:285` | `InitializeSupportedFeaturesImpl` | `native_capabilities.fromNative` | `src/engine/native_capabilities.zig:164` | merge | Advertises only `core_features_and_limits` and queried `depth_clip_control`. Compression eligibility does not advertise optional compression feature bits. Dawn's full feature table is not ported. |
+| `:736` | `InitializeSupportedLimitsImpl` | `native_capabilities.fromNative` | `src/engine/native_capabilities.zig:164` | merge | Admits levels only when their defaults fit offered limits. Core also requires the corrected hardware baseline. |
+| `:750` | `InitializeSupportedLimitsInternal` | `native_capabilities.offeredLimits` | `src/engine/native_capabilities.zig:10` | merge | Caps per-stage and whole-layout descriptor budgets, `maxPerStageResources`, fragment outputs, and Dusk capacities. The proportional budget differs from Dawn's baseline-first sharing at `:834-863`. Max-buffer facts follow `:940-945`. |
 | `:992` | `SupportsExternalImages` | — | — | skip | Two service capability checks. M21's external-memory and external-semaphore services. |
-| `:999` | `SupportsFeatureLevel` | `PhysicalDevice.supportsRequiredVersion` | `src/engine/vulkan_device.zig:594` | simplify | Dawn answers from the `mSupportsCoreFeatureLevel` flag the compatibility pass sets and reports why through `mCoreError` at `:1002`-`:1007`. M9's filter is the acceptance's: the first device whose `properties.apiVersion` reaches the floor, which the port copied once at `gather` (`VulkanInfo.cpp:247` is the assertion this replaces). |
+| `:999` | `SupportsFeatureLevel` | `PhysicalDevice.supportsFeatureLevel` | `src/engine/physical_device.zig:140` | merge | Reads the frontend level predicate from `native_capabilities.fromNative`, not only a Vulkan API-version floor. Dawn's diagnostic policy differs. |
 | `:1014` | `SetupBackendAdapterToggles` | — | — | skip | Forces and defaults adapter toggles. M7's `TogglesSet`. |
 | `:1050` | `SetupBackendDeviceToggles` | — | — | skip | Same reason. |
-| `:1426` | `CreateDeviceImpl` | `Device.create` | `src/engine/vulkan_device.zig:898` | merge | The body at `:1431` is a one-line forward to `Device::Create`, which the `Device.create` rows carry. |
+| `:1426` | `CreateDeviceImpl` | `Device.create` | `src/engine/vulkan_device.zig:870` | merge | Native dispatch reaches the typed Vulkan constructor. See `docs/02-dawn-design.md` §4.16.3. |
 | `:1434` | `ValidateFeatureSupportedWithTogglesImpl` | — | — | skip | Per-feature validation gated on toggles. M7's row. |
 | `:1498` | `IsAndroid` | — | — | skip | An Android platform predicate, and this repository has no Android target. |
 | `:1507` | `IsAndroidQualcomm` | — | — | skip | Same reason. |
@@ -4149,13 +4393,13 @@ other thirty-nine name a milestone that already owns the work.
 | `:1533` | `IsPixel10` | — | — | skip | A Pixel model predicate. Same reason. |
 | `:1538` | `IsIntelMesa` | — | — | skip | A Mesa version workaround for Intel. The port has no Mesa-specific rule and no caller. |
 | `:1545` | `IsAmdMesa` | — | — | skip | Same reason. |
-| `:1552` | `IsSwiftshader` | `PhysicalDevice.isFallback` | `src/engine/vulkan_device.zig:604` | merge | Dawn reaches this through the `IsFallbackAdapter` lambda at `BackendVk.cpp:581`-`:588`, which calls `gpu_info::IsGoogleSwiftshader(vendorId, deviceId)`. The port compares the two ids from `src/dawn/gpu_info.json:169`-`:175` directly, which is the same predicate without the lambda. |
+| `:1552` | `IsSwiftshader` | `PhysicalDevice.isFallback` | `src/engine/vulkan_device.zig:609` | merge | Dawn reaches this through the `IsFallbackAdapter` lambda at `BackendVk.cpp:581`-`:588`, which calls `gpu_info::IsGoogleSwiftshader(vendorId, deviceId)`. The port compares the two ids from `src/dawn/gpu_info.json:169`-`:175` directly, which is the same predicate without the lambda. |
 | `:1556` | `IsWindows` | — | — | skip | A Windows platform predicate, and this repository has no Windows target. |
 | `:1564` | `IsWindowsAMD` | — | — | skip | Same reason. |
 | `:1568` | `MayBeArmProprietary` | — | — | skip | A proprietary-driver fallback. Nothing in the port reads it. |
 | `:1577` | `MayBeQualcommProprietary` | — | — | skip | Same reason. |
 | `:1586` | `MayBeImaginationProprietary` | — | — | skip | Same reason. |
-| `:1595` | `FindDefaultComputeSubgroupSize` | — | — | skip | Subgroup-size choice. M7's subgroup row, and `Device.create` requests no feature at all. |
+| `:1595` | `FindDefaultComputeSubgroupSize` | — | — | skip | Subgroup-size choice remains outside the implemented required-feature subset. Native feature enablement does not implement this policy. |
 | `:1621` | `CheckSemaphoreSupport` | — | — | skip | External-semaphore support per handle type. M21's. |
 | `:1645` | `GetDefaultComputeSubgroupSize` | — | — | skip | M7's. |
 | `:1649` | `GetSurfaceCapabilities` | — | — | skip | Surface capability enumeration. M20's, and the host is headless. |
@@ -4163,54 +4407,54 @@ other thirty-nine name a milestone that already owns the work.
 | `:1766` | `PopulateBackendProperties` | — | — | skip | Fills vendor, architecture, device type and description into `AdapterInfo`, which M8's `Adapter.getInfo` (`src/engine/adapter.zig:121`) already answers. |
 | `:1814` | `PopulateBackendFormatCapabilities` | — | — | skip | Fills `DawnFormatCapabilities` per format. M11's. |
 | `:1837` | `EnumerateSubgroupMatrixConfigs` | — | — | skip | The subgroup-matrix config table. M7's. |
-| `:1887` | `SetCoreNotSupported` | — | — | skip | Clears `mSupportsCoreFeatureLevel` and stores the reason. The row that reads it is `SupportsFeatureLevel` (`:999`), which this milestone simplifies away. |
+| `:1887` | `SetCoreNotSupported` | `native_capabilities.fromNative` | `src/engine/native_capabilities.zig:164` | merge | Stores a false Core predicate when guards fail. Dusk does not retain Dawn's explanatory `mCoreError`. |
 
 ### `src/dawn/native/vulkan/DeviceVk.cpp` — 69 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/vulkan/DeviceVk.cpp:84` | `NoopDrawFunction::Fun` | — | — | skip | The `Toggle::VulkanSkipDraw` Chromium testing path, installed at `:142`-`:145`. The port records real draws from M15 and never replaces a proc after the device tier is loaded. |
-| `:90` | `Device::Create` | `Device.create` | `src/engine/vulkan_device.zig:898` | port | `new Device` at `:94`-`:95` then `Initialize` at `:96`. The port builds the record by value and returns it, so the allocation and the `Ref` move are the two lines at `:94`-`:95` that have no row. |
-| `:100` | `Device::Device` | `Device` | `src/engine/vulkan_device.zig:859` | merge | The init list at `:104` takes a debug prefix from `GetNextDeviceDebugPrefix()`, which is the `UtilsVulkan.cpp:343` row this milestone skips. What is left is a record with ten fields, and the port's is one. |
-| `:107` | `Device::Initialize` | `Device.create` | `src/engine/vulkan_device.zig:898` | merge | Three things happen here that M9 keeps: `CreateDevice` at `:132`, `LoadDeviceProcs` at `:135`, and the deleter at `:137`. Dawn's comment at `:124`-`:127` states the ordering rule, and the port keeps it as three `errdefer`s that release the handle count and destroy the device before anything else can fail. |
-| `:208` | `~Device` | `Device.deinit` | `src/engine/vulkan_device.zig:1044` | merge | One call to `Destroy(DestroyReason::CppDestructor)`, which is the `DestroyImpl` row below. |
-| `:212` | `CreateBindGroupImpl` | — | — | skip | M12. |
-| `:216` | `CreateBindGroupLayoutImpl` | — | — | skip | M12. |
-| `:220` | `CreateBufferImpl` | — | — | skip | M10. |
+| `:90` | `Device::Create` | `Device.create` | `src/engine/vulkan_device.zig:870` | merge | Creates a typed native record. High `Device.init` and its stable context add Dusk ownership glue, not another Dawn factory port. |
+| `:100` | `Device::Device` | `Device` | `src/engine/vulkan_device.zig:802` | merge | The init list at `:104` takes a debug prefix from `GetNextDeviceDebugPrefix()`, which is the `UtilsVulkan.cpp:343` row this milestone skips. What is left is a record with ten fields, and the port's is one. |
+| `:107` | `Device::Initialize` | `Device.create`, `Device.init` | `src/engine/vulkan_device.zig:870`, `src/engine/device.zig:139` | merge | Native creation loads device procs. High creation attaches a real queue, mutex, and caches through a stable context. Dawn's full allocator, deleter, and toggle initialization differs. |
+| `:208` | `~Device` | `Device.deinit` | `src/engine/vulkan_device.zig:1002` | merge | Explicit native record cleanup follows high-level child retirement. No C++ destructor dispatch is ported. |
+| `:212` | `CreateBindGroupImpl` | `BindGroup.create` | `src/engine/bind_group.zig:100` | merge | Existing descriptor-set factory implements the native subset. Typed ownership above it is Dusk glue. |
+| `:216` | `CreateBindGroupLayoutImpl` | `createDescriptorSetLayout` | `src/pipeline/layout_vk.zig:190` | merge | Uses existing native layout creation after typed validation. Not every Dawn descriptor kind is supported. |
+| `:220` | `CreateBufferImpl` | `Buffer.create` | `src/engine/buffer.zig:546` | merge | Existing native buffer factory implements creation. Dusk allocator and staging policy differs. |
 | `:224` | `CreateCommandBuffer` | — | — | skip | M15 records and M18 encodes. |
-| `:229` | `CreateUninitializedComputePipelineImpl` | — | — | skip | M14. |
-| `:233` | `CreatePipelineLayoutImpl` | — | — | skip | M12. |
+| `:229` | `CreateUninitializedComputePipelineImpl` | `pipeline.createComputePipeline` | `src/pipeline/pipeline.zig:789` | merge | Dusk combines wrapper and synchronous native initialization. No async or driver-cache behavior is claimed. |
+| `:233` | `CreatePipelineLayoutImpl` | `LayoutInput.create` | `src/pipeline/pipeline.zig:295` | merge | Existing ordered native-layout factory supplies the handle. Typed retained dependencies are Dusk glue. |
 | `:237` | `CreateQuerySetImpl` | — | — | skip | M19. |
-| `:240` | `CreateUninitializedRenderPipelineImpl` | — | — | skip | M14. |
+| `:240` | `CreateUninitializedRenderPipelineImpl` | `pipeline.createRenderPipeline` | `src/pipeline/pipeline.zig:681` | merge | Combines wrapper and synchronous native initialization using a compatible traditional render pass. |
 | `:244` | `CreateResourceTableImpl` | — | — | skip | M12. |
 | `:248` | `CreateSamplerImpl` | — | — | skip | M11. |
-| `:251` | `CreateShaderModuleImpl` | — | — | skip | M13. The parameter is a `std::vector<tint::wgsl::Extension>`, and there is no Tint in the port (`AGENTS.md` §1). |
+| `:251` | `CreateShaderModuleImpl` | `createShaderModule` | `src/pipeline/shader_module.zig:198` | merge | Validates and reflects caller SPIR-V, then creates the native module. Dawn's Tint input and regenerated SPIR-V path is not ported. |
 | `:256` | `CreateSwapChainImpl` | — | — | skip | M20, and the host is headless. |
-| `:261` | `CreateTextureImpl` | — | — | skip | M11. |
-| `:265` | `CreateTextureViewImpl` | — | — | skip | M11. The `mNextTextureViewId++` at `:268` is a per-device id counter M11 owns. |
+| `:261` | `CreateTextureImpl` | `Texture.initializeNative` | `src/engine/texture.zig:285` | merge | Existing image factory follows high-level descriptor and physical-format validation. Dusk context orchestration is not an extra upstream port. |
+| `:265` | `CreateTextureViewImpl` | `TextureView.initializeNative` | `src/engine/texture.zig:1276` | merge | Creates the native view. Typed parent ownership differs from Dawn's wrapper and ID policy. |
 | `:270` | `CreateTexelBufferViewImpl` | — | — | skip | M11. |
 | `:275` | `GetOrCreatePipelineCacheImpl` | — | — | skip | M14. The `pipelineCacheUUID` the cache key streams at `:282` is a field of the properties `PhysicalDevice.gather` copied, so the value is available; the cache that consumes it is not. |
 | `:296` | `InitializeComputePipelineAsyncImpl` | — | — | skip | M14, over M2's future surface. |
 | `:299` | `InitializeRenderPipelineAsyncImpl` | — | — | skip | M14, over M2's future surface. |
 | `:303` | `ImportSharedTextureMemoryImpl` | — | — | skip | M21's. |
 | `:334` | `ImportSharedFenceImpl` | — | — | skip | M21's. |
-| `:366` | `TickImpl` | `Queue.complete` | `src/engine/queue.zig:586` | merge | Dawn drains pending descriptor sets to the completed serial at `:371`-`:376`, ticks the allocator at `:378`, submits at `:380`, then reads the debug layer at `:381`. M9 keeps only the submit and the timeline move: the allocator is M6, the descriptor sets are M12, and the layer read is the `CheckDebugLayerAndGenerateErrors` row below. |
-| `:386` | `GetVkInstance` | `Device.instance` | `src/engine/vulkan_device.zig:867` | merge | Dawn walks two back-end pointers to reach it. The port stores the borrowed `*VulkanInstance` on the device, which is also the lifetime rule the field comment states. |
-| `:389` | `GetDeviceInfo` | `Device.physicalProperties` | `src/engine/vulkan_device.zig:1089` | merge | The copied tables. |
-| `:393` | `GetGlobalInfo` | `VulkanInstance.loader_api_version` | `src/engine/vulkan_device.zig:283` | merge | The one field M9 reads from the global info, and it is the one the loader gate at `BackendVk.cpp:404` wrote. |
-| `:397` | `GetVkDevice` | `Device.vk_device` | `src/engine/vulkan_device.zig:861` | merge | The field. `test/vulkan_device.zig` calls it `device.vkDevice()`, which the port does not define; see the concerns above. |
-| `:401` | `GetGraphicsQueueFamily` | `Device.queue_family_index` | `src/engine/vulkan_device.zig:872` | merge | The field the queue-family scan at `:737`-`:755` filled. |
+| `:366` | `TickImpl` | `Queue.complete` | `src/engine/queue.zig:781` | merge | Dawn drains pending descriptor sets to the completed serial at `:371`-`:376`, ticks the allocator at `:378`, submits at `:380`, then reads the debug layer at `:381`. M9 keeps only the submit and the timeline move: the allocator is M6, the descriptor sets are M12, and the layer read is the `CheckDebugLayerAndGenerateErrors` row below. |
+| `:386` | `GetVkInstance` | `Device.instance` | `src/engine/vulkan_device.zig:824` | merge | Dawn walks two back-end pointers to reach it. The port stores the borrowed `*VulkanInstance` on the device, which is also the lifetime rule the field comment states. |
+| `:389` | `GetDeviceInfo` | `Device.physicalProperties` | `src/engine/vulkan_device.zig:972` | merge | The copied tables. |
+| `:393` | `GetGlobalInfo` | `VulkanInstance.loader_api_version` | `src/engine/vulkan_device.zig:286` | merge | The one field M9 reads from the global info, and it is the one the loader gate at `BackendVk.cpp:404` wrote. |
+| `:397` | `GetVkDevice` | `Device.vk_device` | `src/engine/vulkan_device.zig:804` | merge | The field. `test/vulkan_device.zig` calls it `device.vkDevice()`, which the port does not define; see the concerns above. |
+| `:401` | `GetGraphicsQueueFamily` | `Device.queue_family_index` | `src/engine/vulkan_device.zig:817` | merge | The field the queue-family scan at `:737`-`:755` filled. |
 | `:405` | `GetResourceTableLayout` | — | — | skip | The `ChromiumExperimentalSamplingResourceTable` descriptor layout. M12's. |
 | `:410` | `GetFramebufferFetchHelper` | — | — | skip | M11's framebuffer-fetch helper, behind `Feature::FramebufferFetch`. |
-| `:414` | `GetFencedDeleter` | `HandleSet.acquire`, `HandleSet.release` | `src/engine/vulkan_device.zig:133`, `:141` | merge | Dawn's deleter defers a destroy to a completed serial; the port destroys in teardown order and counts. `AGENTS.md` §5 is what decides it: a leak-detecting allocator reports bytes, and a per-type count is what turns those bytes into a name. The `FencedDeleter.cpp` rows carry the rest of the argument. |
+| `:414` | `GetFencedDeleter` | `HandleSet.acquire`, `HandleSet.release` | `src/engine/vulkan_device.zig:136`, `src/engine/vulkan_device.zig:144` | merge | Dawn's deleter defers a destroy to a completed serial; the port destroys in teardown order and counts. `AGENTS.md` §5 is what decides it: a leak-detecting allocator reports bytes, and a per-type count is what turns those bytes into a name. The `FencedDeleter.cpp` rows carry the rest of the argument. |
 | `:418` | `GetFramebufferCache` | — | — | skip | M18's. |
 | `:422` | `GetRenderPassCache` | — | — | skip | M18's. |
 | `:426` | `GetResourceMemoryAllocator` | — | — | skip | M6's allocator. |
 | `:430` | `GetExternalSemaphoreService` | — | — | skip | M21's. |
 | `:434` | `EnqueueDeferredDeallocation` | — | — | skip | Tags a descriptor-set allocator with the pending serial. M12's. |
 | `:439` | `CacheStaticSampler` | — | — | skip | The static-sampler cache for external YCbCr textures. M11's and M21's. |
-| `:443` | `CreateDevice` | `Device.create` | `src/engine/vulkan_device.zig:898` | port | The part M9 ports is three things: the universal-family scan at `:737`-`:755`, the single-queue request at `:757`-`:770`, and `vkCreateDevice` at `:786`. The `kUniversalFlags` constant at `:740` and the comment at `:739` are carried verbatim, which is why `Device.create` hardcodes graphics and compute and does not test transfer. The 300 lines of feature and extension negotiation above them are M7's, and the port sets `.pEnabledFeatures = null` (`src/engine/vulkan_device.zig:605`) rather than half-porting them. |
-| `:792` | `GetMutableFunctions` | `Device.dispatchTable` | `src/engine/vulkan_device.zig:1078` | merge | Dawn hands out a mutable `VulkanFunctions*` so `Initialize` can overwrite it from the physical device's instance at `:122`. The port resolves every tier once and assembles the three into a value, so there is nothing to make mutable. |
+| `:443` | `CreateDevice` | `Device.create` | `src/engine/vulkan_device.zig:870` | merge | Selects one graphics+compute queue and calls `vkCreateDevice`. Enables queried baseline flags, explicit required depth clamp, and supported maintenance4. This is not Dawn's full extension/toggle negotiation. Core hardware guards and optional public feature bits remain separate. |
+| `:792` | `GetMutableFunctions` | `Device.dispatchTable` | `src/engine/vulkan_device.zig:961` | merge | Dawn hands out a mutable `VulkanFunctions*` so `Initialize` can overwrite it from the physical device's instance at `:122`. The port resolves every tier once and assembles the three into a value, so there is nothing to make mutable. |
 | `:796` | `CopyFromStagingToBuffer` | — | — | skip | The staging upload. M10's. |
 | `:830` | `CopyFromStagingToTextureImpl` | — | — | skip | M11's. |
 | `:871` | `ImportExternalImage` | — | — | skip | M21's external-memory service. |
@@ -4223,7 +4467,7 @@ other thirty-nine name a milestone that already owns the work.
 | `:1027` | `CheckDebugLayerAndGenerateErrors` | — | — | skip | Same reason; the caller is `TickImpl` (`:381`). |
 | `:1037` | `AppendDebugLayerMessages` | — | — | skip | Same reason, and M8's table already marks `Device.h:467` `AppendDebugLayerMessages` a skip for it. |
 | `:1052` | `CheckDebugMessagesAfterDestruction` | — | — | skip | Same reason. The comment at `:1150`-`:1152` records why it exists, and the answer is the same: no messenger, no read. |
-| `:1072` | `DestroyImpl` | `Device.deinit` | `src/engine/vulkan_device.zig:1044` | port | Dawn's ordering comment at `:1143`-`:1145` is the rule the port keeps: the device is destroyed last, after every child. At M9 the children are the queue's contexts and fences (`Queue.deinit`, `src/engine/queue.zig:232`) and the deleter's pending queue, which is empty; the rest of the body is M6, M12, M14 and M18's. The `mDeleter == nullptr` early return at `:1093`-`:1097` is the `errdefer` chain in `Device.create` (`src/engine/vulkan_device.zig:617`-`:619`). |
+| `:1072` | `DestroyImpl` | `Device.destroy`, `Device.deinit` | `src/engine/device.zig:235`, `src/engine/vulkan_device.zig:1002` | merge | High teardown retires caches, payloads, queue, then native device. Nonterminal wait failure preserves owners. Terminal device loss permits lifetime-only cleanup. Dusk counts and retry policy differ from Dawn's deleter. |
 | `:1156` | `GetAHardwareBufferPropertiesImpl` | — | — | skip | M21's, and the whole body is inside `#if DAWN_PLATFORM_IS(ANDROID)`. |
 | `:1206` | `GetOptimalBytesPerRowAlignment` | — | — | skip | A `limits` field the buffer-to-texture upload uses. M10's and M11's. |
 | `:1210` | `GetOptimalBufferToTextureCopyOffsetAlignment` | — | — | skip | M11's. |
@@ -4255,58 +4499,58 @@ other thirty-nine name a milestone that already owns the work.
 | `:240` | `LogCallbackData` | — | — | skip | The log sink. `AGENTS.md` §3.1 refuses depending on the layer, and there is no other log sink in the port. |
 | `:256` | `OnDebugUtilsCallback` | — | — | skip | No messenger. The device-routing loop at `:277`-`:289` is the whole reason the function exists. |
 | `:305` | `OnInstanceCreationDebugUtilsCallback` | — | — | skip | No messenger, so the instance-creation chain at `:512`-`:513` has nothing to attach. |
-| `:317` | `~VulkanInstance` | `VulkanInstance.deinit` | `src/engine/vulkan_device.zig:413` | port | Dawn destroys the messenger then the instance, and its comment at `:325` is the one the port quotes: `VkPhysicalDevice` handles die with the instance, so there is nothing to destroy and nothing to count. The port creates no messenger, so the instance is the whole teardown, and it is destroyed before the global procs and the library, which is the reverse of Dawn's field order and the order `mFunctions` requires. |
-| `:332` | `GetFunctions` | `VulkanInstance.global`, `VulkanInstance.procs` | `src/engine/vulkan_device.zig:275`, `:248` | merge | The three proc tiers hang off the instance, and the port names them as three fields because each is freed at a different point in the teardown. |
-| `:336` | `GetVkInstance` | `VulkanInstance.vk_instance` | `src/engine/vulkan_device.zig:277` | merge | The field. |
-| `:340` | `GetGlobalInfo` | `VulkanInstance.loader_api_version` | `src/engine/vulkan_device.zig:283` | merge | The one global field M9 reads. |
-| `:344` | `GetVkPhysicalDevices` | `VulkanInstance.enumeratePhysicalDevices` | `src/engine/vulkan_device.zig:435` | merge | Dawn returns a cached vector the back end then re-filters. The port enumerates into a caller-owned slice and caches the `PhysicalDevice` records in `Backend.physical_devices` (`src/engine/vulkan_device.zig:1041`), which is the same two steps in the opposite order. |
-| `:349` | `Create` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:322` | port | `new VulkanInstance()` then `Initialize`. The port returns a value, so the heap object at `:350` and the `Ref` at `:352` are the two lines that have no row. |
-| `:355` | `Initialize` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:322` | port | The library open at `:363`-`:369` and the per-ICD name at `:373` and `:379`; `LoadGlobalProcs` at `:400`; the gate at `:404`-`:410`; `CreateVkInstance` at `:413`; `LoadInstanceProcs` at `:415`; `GatherPhysicalDevices` at `:430`. The port keeps that order and adds one step: it queries the loader's own version first (`:402`, `GatherGlobalInfo`) and refuses below the floor before the instance exists, because a 1.0 loader cannot create a 1.1 instance. `RegisterDebugUtils` at `:422` is skipped. |
-| `:435` | `CreateVkInstance` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:322` | merge | The `VkApplicationInfo` at `:479`-`:486` and the `VkDeviceCreateInfo`-shaped `createInfo` at `:488`-`:496` are the port's `app_info` and `create_info` literals. The engine name at `:484` is `"Dawn"` and the port's is `"dusk"`, because a driver that logs it must not be told it is talking to Dawn. `enabledLayerCount` and `enabledExtensionCount` are the port's zeroes at `:285`-`:286`, with the reason in the comment there. |
+| `:317` | `~VulkanInstance` | `VulkanInstance.deinit` | `src/engine/vulkan_device.zig:418` | port | Dawn destroys the messenger then the instance, and its comment at `:325` is the one the port quotes: `VkPhysicalDevice` handles die with the instance, so there is nothing to destroy and nothing to count. The port creates no messenger, so the instance is the whole teardown, and it is destroyed before the global procs and the library, which is the reverse of Dawn's field order and the order `mFunctions` requires. |
+| `:332` | `GetFunctions` | `VulkanInstance.global`, `VulkanInstance.procs` | `src/engine/vulkan_device.zig:278`, `src/engine/vulkan_device.zig:283` | merge | The three proc tiers hang off the instance, and the port names them as three fields because each is freed at a different point in the teardown. |
+| `:336` | `GetVkInstance` | `VulkanInstance.vk_instance` | `src/engine/vulkan_device.zig:280` | merge | The field. |
+| `:340` | `GetGlobalInfo` | `VulkanInstance.loader_api_version` | `src/engine/vulkan_device.zig:286` | merge | The one global field M9 reads. |
+| `:344` | `GetVkPhysicalDevices` | `VulkanInstance.enumeratePhysicalDevices` | `src/engine/vulkan_device.zig:440` | merge | Dawn returns a cached vector the back end then re-filters. The port enumerates into a caller-owned slice and caches the `PhysicalDevice` records in `Backend.physical_devices` (`src/engine/vulkan_device.zig:1041`), which is the same two steps in the opposite order. |
+| `:349` | `Create` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:327` | port | `new VulkanInstance()` then `Initialize`. The port returns a value, so the heap object at `:350` and the `Ref` at `:352` are the two lines that have no row. |
+| `:355` | `Initialize` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:327` | port | The library open at `:363`-`:369` and the per-ICD name at `:373` and `:379`; `LoadGlobalProcs` at `:400`; the gate at `:404`-`:410`; `CreateVkInstance` at `:413`; `LoadInstanceProcs` at `:415`; `GatherPhysicalDevices` at `:430`. The port keeps that order and adds one step: it queries the loader's own version first (`:402`, `GatherGlobalInfo`) and refuses below the floor before the instance exists, because a 1.0 loader cannot create a 1.1 instance. `RegisterDebugUtils` at `:422` is skipped. |
+| `:435` | `CreateVkInstance` | `VulkanInstance.create` | `src/engine/vulkan_device.zig:327` | merge | The `VkApplicationInfo` at `:479`-`:486` and the `VkDeviceCreateInfo`-shaped `createInfo` at `:488`-`:496` are the port's `app_info` and `create_info` literals. The engine name at `:484` is `"Dawn"` and the port's is `"dusk"`, because a driver that logs it must not be told it is talking to Dawn. `enabledLayerCount` and `enabledExtensionCount` are the port's zeroes at `:285`-`:286`, with the reason in the comment there. |
 | `:537` | `RegisterDebugUtils` | — | — | skip | The messenger. `docs/50-verification.md` §4.4 makes the child's stderr the primary mechanism, and the no-layer path this milestone gates on (`VK_LOADER_LAYERS_DISABLE=*`) has no messenger to read. |
 | `:554` | `StartListeningForDeviceMessages` | — | — | skip | Same reason. |
 | `:558` | `StopListeningForDeviceMessages` | — | — | skip | Same reason. |
 | `:562` | `HandleDeviceMessage` | — | — | skip | Same reason. |
-| `:572` | `Backend::Backend` | `Backend.init` | `src/engine/vulkan_device.zig:1199` | port | Dawn's init list at `:572` only names the back end. `docs/30-port-design.md` §10.3 makes a back end a module the instance names in a `switch`, so the port's record is three fields and no base class. |
-| `:576` | `DiscoverPhysicalDevices` | `Backend.discoverPhysicalDevices` | `src/engine/vulkan_device.zig:1248` | port | Ported whole, in the same order: the ICD loop at `:590`, the force-fallback early-out at `:599`-`:601`, the instance creation at `:603`-`:610`, the null-instance skip at `:612`-`:615`, the caching loop at `:619`-`:631`, and the feature-level filter at `:633`-`:637`. The caching is what Dawn's comment at `:628`-`:629` insists on, so `Backend.cacheIcd` (`src/engine/vulkan_device.zig:825`) is the same two-step. The `IsFallbackAdapter` lambda is the `PhysicalDeviceVk.cpp:1552` row. Dawn's `ConsumedErrorAndWarnOnce` at `:606` and `:622` becomes a skip: the caller asked for a device and the next ICD may have one. |
-| `:642` | `Connect` | `instance.connect` | `src/engine/instance.zig:66` | skip | Upstream's `BackendConnection` factory. `docs/30-port-design.md` §10.3 makes a back end a module, so the port's answer is a `switch` on `BackendType` with a `error.BackendNotCompiledIn` arm, which is the shape M8 already built. |
+| `:572` | `Backend::Backend` | `Backend.init` | `src/engine/vulkan_device.zig:1157` | merge | Initializes selected Vulkan backend state. Its stable context and handle-count owner are Dusk glue. |
+| `:576` | `DiscoverPhysicalDevices` | `Backend.discoverPhysicalDevices` | `src/engine/vulkan_device.zig:1206` | merge | Discovers and caches physical facts in ICD order. Frontend `Instance.discoverNative` projects capabilities and filters requested levels. Do not infer complete Dawn fallback or adapter-selection policy. |
+| `:642` | `Connect` | `Backend.init` | `src/engine/vulkan_device.zig:1157` | merge | Dusk initializes a selected backend without Dawn's `BackendConnection` class. `NativeInstanceContext` is original ownership glue, not a direct factory port. |
 
 ### `src/dawn/native/vulkan/QueueVk.cpp` — 21 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/QueueVk.cpp:62` | `DestroyCommandPoolAndBuffer` | `Queue.destroyContext` | `src/engine/queue.zig:485` | port | Ported whole, in the same order. Dawn's comment at `:66`-`:68` is the reason and the port keeps it: some drivers leak the buffer's memory if the pool goes first, so `vkFreeCommandBuffers` runs before `vkDestroyCommandPool`. |
-| `:80` | `Queue::Create` | `Queue.init` | `src/engine/queue.zig:229` | port | `new Queue` then `Initialize`. The port returns a value into a caller-owned slot, so the `Ref` at `:83` and `:85` have no row. |
-| `:88` | `Queue::Queue` | `Queue.init` | `src/engine/queue.zig:229` | merge | The init list at `:89` stores the family. The port takes the family through `Context.queue_family_index` (`src/engine/queue.zig:73`), because the family is chosen by `Device.create` before the queue exists and the queue handle is already fetched by then. |
-| `:91` | `~Queue` | `Queue.deinit` | `src/engine/queue.zig:264` | merge | An empty body. The teardown is `DestroyImpl` (`:441`), which is the row below. |
-| `:93` | `Initialize` | `Queue.init`, `Device.fetchQueue` | `src/engine/queue.zig:229`, `src/engine/vulkan_device.zig:683` | merge | Dawn fetches the queue at `:95` and then prepares a recording context at `:97`. The port splits it: `Device.fetchQueue` runs the `vkGetDeviceQueue` and `Queue.init` refuses a null handle (`src/engine/queue.zig:204`, `error.QueueHandleIsNull`), which is the assertion Dawn does not have. `SetLabelImpl` at `:99` is skipped. |
-| `:103` | `SubmitImpl` | `Queue.submit` | `src/engine/queue.zig:302` | merge | The body records each command buffer into the recording context at `:107`-`:109` and then calls `SubmitPendingCommandsImpl` at `:112`. `RecordCommands` is M18's, so M9 keeps only the second half, and `Queue.submit` takes the buffers rather than building them. |
+| `src/dawn/native/vulkan/QueueVk.cpp:62` | `DestroyCommandPoolAndBuffer` | `Queue.destroyContext` | `src/engine/queue.zig:663` | port | Ported whole, in the same order. Dawn's comment at `:66`-`:68` is the reason and the port keeps it: some drivers leak the buffer's memory if the pool goes first, so `vkFreeCommandBuffers` runs before `vkDestroyCommandPool`. |
+| `:80` | `Queue::Create` | `Queue.init` | `src/engine/queue.zig:261` | port | `new Queue` then `Initialize`. The port returns a value into a caller-owned slot, so the `Ref` at `:83` and `:85` have no row. |
+| `:88` | `Queue::Queue` | `Queue.init` | `src/engine/queue.zig:261` | merge | The init list at `:89` stores the family. The port takes the family through `Context.queue_family_index` (`src/engine/queue.zig:73`), because the family is chosen by `Device.create` before the queue exists and the queue handle is already fetched by then. |
+| `:91` | `~Queue` | `Queue.deinit` | `src/engine/queue.zig:378` | merge | An empty body. The teardown is `DestroyImpl` (`:441`), which is the row below. |
+| `:93` | `Initialize` | `Queue.init`, `Device.fetchQueue` | `src/engine/queue.zig:261`, `src/engine/vulkan_device.zig:1007` | merge | Dawn fetches the queue at `:95` and then prepares a recording context at `:97`. The port splits it: `Device.fetchQueue` runs the `vkGetDeviceQueue` and `Queue.init` refuses a null handle (`src/engine/queue.zig:204`, `error.QueueHandleIsNull`), which is the assertion Dawn does not have. `SetLabelImpl` at `:99` is skipped. |
+| `:103` | `SubmitImpl` | `Queue.submit` | `src/engine/queue.zig:434` | merge | The body records each command buffer into the recording context at `:107`-`:109` and then calls `SubmitPendingCommandsImpl` at `:112`. `RecordCommands` is M18's, so M9 keeps only the second half, and `Queue.submit` takes the buffers rather than building them. |
 | `:117` | `SetLabelImpl` | — | — | skip | `SetDebugName(device, VK_OBJECT_TYPE_QUEUE, ...)` at `:121`, which is the `UtilsVulkan.cpp:309` row this milestone skips. The TODO at `:119`-`:120` is about multi-queue, which the port does not have. |
 | `:124` | `HasPendingCommands` | — | — | skip | Returns `mRecordingContext.needsSubmit`, the dirty flag the front-end tick consults. M9's `Queue.submit` is explicit and there is no tick, so the flag has no reader. |
-| `:128` | `GetVkQueue` | `Context.vk_queue` | `src/engine/queue.zig:71` | merge | The field. |
-| `:132` | `CheckAndUpdateCompletedSerials` | `retireCompleted` | `src/engine/queue.zig:631` | port | Ported whole. Dawn's rule at `:145`-`:146` is the port's: fences are added in submission order, so the scan stops at the first that is not ready. The `CheckVkSuccess` at `:150` is `dispatch.classify` (`src/vk/dispatch.zig:1134`) returning `.@"error"`, which is `error.FenceStatusFailed` here, and the push to `mUnusedFences` at `:156` is `releaseFence`. |
+| `:128` | `GetVkQueue` | `Context.vk_queue` | `src/engine/queue.zig:79` | merge | The field. |
+| `:132` | `CheckAndUpdateCompletedSerials` | `retireCompleted` | `src/engine/queue.zig:829` | port | Ported whole. Dawn's rule at `:145`-`:146` is the port's: fences are added in submission order, so the scan stops at the first that is not ready. The `CheckVkSuccess` at `:150` is `dispatch.classify` (`src/vk/dispatch.zig:1134`) returning `.@"error"`, which is `error.FenceStatusFailed` here, and the push to `mUnusedFences` at `:156` is `releaseFence`. |
 | `:163` | `ForceEventualFlushOfCommands` | — | — | skip | ORs `mRecordingContext.used` into `mRecordingContext.needsSubmit`, which is the flag the front-end tick consults. The only callers are `QueueBase::TrackTask` (`Queue.cpp:255`) and `TrackTaskAfterEventualFlush` (`Queue.cpp:273`), both M9 skips. |
 | `:167` | `WaitForIdleForDestructionImpl` | — | — | skip | Moves the recording context to the unused list at `:171`-`:176`, calls `vkQueueWaitIdle` at `:183` and then waits with an infinite timeout at `:190`-`:191`. M9's `Device.deinit` (`src/engine/vulkan_device.zig:641`) waits through `Queue.deinit`, which sweeps both fence pools (`src/engine/queue.zig:240`-`:255`) after every context is destroyed, and the `HandleSet` assertion is what proves nothing was left in flight. |
-| `:195` | `GetPendingRecordingContext` | `Queue.commandPool`, `Queue.commandBuffer` | `src/engine/queue.zig:247`, `:226` | merge | Dawn returns the one recording context and sets `needsSubmit` and `used` at `:197`-`:198`. The port returns the two handles as accessors over `recording_index`, and the `SubmitMode` parameter is M15's recording mode, which does not exist yet. |
-| `:202` | `PrepareRecordingContext` | `Queue.createContext` | `src/engine/queue.zig:427` | port | Dawn resets and reuses a pooled context, allocating one through `BeginVkCommandBuffer` (`:255`-`:281`) when the pool is empty. The port has fixed arrays and `reserveSpareContext` (`src/engine/queue.zig:453`) is the bound: Dawn's allocation has no limit, and `AGENTS.md` §2 requires a named one. |
+| `:195` | `GetPendingRecordingContext` | `Queue.commandPool`, `Queue.commandBuffer` | `src/engine/queue.zig:279`, `src/engine/queue.zig:285` | merge | Dawn returns the one recording context and sets `needsSubmit` and `used` at `:197`-`:198`. The port returns the two handles as accessors over `recording_index`, and the `SubmitMode` parameter is M15's recording mode, which does not exist yet. |
+| `:202` | `PrepareRecordingContext` | `Queue.createContext` | `src/engine/queue.zig:605` | port | Dawn resets and reuses a pooled context, allocating one through `BeginVkCommandBuffer` (`:255`-`:281`) when the pool is empty. The port has fixed arrays and `reserveSpareContext` (`src/engine/queue.zig:453`) is the bound: Dawn's allocation has no limit, and `AGENTS.md` §2 requires a named one. |
 | `:221` | `SplitRecordingContext` | — | — | skip | Reset-and-recreate for a recording that outgrew its command buffer. M9 records one `vkCmdFillBuffer`; the context-per-submission design is `reserveSpareContext` (`src/engine/queue.zig:453`), which is the `RecycleRecordingContext` row below. |
-| `:240` | `BeginVkCommandBuffer` | `Queue.createContext` | `src/engine/queue.zig:427` | port | Ported whole: the transient pool on the queue's family, one primary buffer, begun with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` at `:287`. The port adds two null-handle refusals (`:388`, `:405`) that Dawn asserts, and records both handles in the `HandleSet` so the teardown assertion can see them. |
-| `:298` | `SubmitPendingCommandsImpl` | `Queue.submit` | `src/engine/queue.zig:302` | port | Ported whole. Three orderings are load-bearing and the port keeps all three. The context is reserved first, so a submission that stands can never afterwards be reported as a failure. The fence is acquired after the buffers are ended and returned to the pool if the submit fails (`:342`-`:355`), because a fence in neither list leaks; that is `acquireFence` and `releaseFence` (`src/engine/queue.zig:469`, `:504`). The serial is taken after `vkQueueSubmit` (`:364`-`:367`), so a failed submit never moves the timeline. The semaphore fields of `VkSubmitInfo` are M20's and M21's and every count is zero here. |
-| `:376` | `RecycleRecordingContext` | `Queue.reserveSpareContext` | `src/engine/queue.zig:517` | simplify | Dawn resets the pool and pushes it back under a serial-tracked task at `:382`. The port clears the in-flight flag in `retireCompleted` (`src/engine/queue.zig:554`), which is the same event seen from the other side, and the pools are fixed arrays so there is nothing to push back. `AGENTS.md` §6 deletes the bookkeeping rather than porting it. |
-| `:404` | `GetUnusedFence` | `Queue.acquireFence` | `src/engine/queue.zig:533` | port | The reset-a-pooled-fence path at `:410`-`:418` and the create path at `:429`-`:437`. The port adds one condition Dawn cannot have: a fixed pool can run out, so both pools being empty is `error.FencePoolExhausted` rather than a fresh allocation. |
-| `:441` | `DestroyImpl` | `Queue.deinit` | `src/engine/queue.zig:264` | port | Ported in the same order: the recording context at `:447`-`:450`, the recycled pools at `:459`-`:464`, the in-flight fences at `:468`-`:473`, then the unused ones at `:475`-`:480`. Dawn's comment at `:466`-`:467` is why the port sweeps both pools rather than only the unused one: a device loss can leave a fence in flight. The wait semaphores at `:452`-`:456` are M20's and M21's, and `QueueBase::DestroyImpl` at `:482` is the empty `Queue.cpp:151` row. |
-| `:485` | `WaitForQueueSerialImpl` | `Queue.wait` | `src/engine/queue.zig:366` | port | Ported with one deliberate difference, and the file header names it. Dawn's loop is `while (1)` at `:496` and its `VK_TIMEOUT` branch retries forever when the timeout is infinite (`:530`-`:531`), which its own comment at `:524`-`:527` admits. `AGENTS.md` §2 requires a named bound on every loop, so the port has `max_fence_wait_iteration_count` (`src/engine/queue.zig:49`) and returns `error.WaitIterationExhausted`. The search at `:500`-`:507` is `findFenceFor` (`src/engine/queue.zig:537`) and the not-found case at `:508`-`:513` is `Queue.wait`'s early return. `kWaitSerialTimeout` at `:533` is `error.FenceWaitTimedOut`, and the acceptance's 5,000 ms default (`src/engine/queue.zig:40`) replaces the caller-passed `Nanoseconds`. |
+| `:240` | `BeginVkCommandBuffer` | `Queue.createContext` | `src/engine/queue.zig:605` | port | Ported whole: the transient pool on the queue's family, one primary buffer, begun with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` at `:287`. The port adds two null-handle refusals (`:388`, `:405`) that Dawn asserts, and records both handles in the `HandleSet` so the teardown assertion can see them. |
+| `:298` | `SubmitPendingCommandsImpl` | `Queue.submit` | `src/engine/queue.zig:434` | port | Ported whole. Three orderings are load-bearing and the port keeps all three. The context is reserved first, so a submission that stands can never afterwards be reported as a failure. The fence is acquired after the buffers are ended and returned to the pool if the submit fails (`:342`-`:355`), because a fence in neither list leaks; that is `acquireFence` and `releaseFence` (`src/engine/queue.zig:469`, `:504`). The serial is taken after `vkQueueSubmit` (`:364`-`:367`), so a failed submit never moves the timeline. The semaphore fields of `VkSubmitInfo` are M20's and M21's and every count is zero here. |
+| `:376` | `RecycleRecordingContext` | `Queue.reserveSpareContext` | `src/engine/queue.zig:695` | simplify | Dawn resets the pool and pushes it back under a serial-tracked task at `:382`. The port clears the in-flight flag in `retireCompleted` (`src/engine/queue.zig:554`), which is the same event seen from the other side, and the pools are fixed arrays so there is nothing to push back. `AGENTS.md` §6 deletes the bookkeeping rather than porting it. |
+| `:404` | `GetUnusedFence` | `Queue.acquireFence` | `src/engine/queue.zig:725` | port | The reset-a-pooled-fence path at `:410`-`:418` and the create path at `:429`-`:437`. The port adds one condition Dawn cannot have: a fixed pool can run out, so both pools being empty is `error.FencePoolExhausted` rather than a fresh allocation. |
+| `:441` | `DestroyImpl` | `Queue.deinit` | `src/engine/queue.zig:378` | port | Ported in the same order: the recording context at `:447`-`:450`, the recycled pools at `:459`-`:464`, the in-flight fences at `:468`-`:473`, then the unused ones at `:475`-`:480`. Dawn's comment at `:466`-`:467` is why the port sweeps both pools rather than only the unused one: a device loss can leave a fence in flight. The wait semaphores at `:452`-`:456` are M20's and M21's, and `QueueBase::DestroyImpl` at `:482` is the empty `Queue.cpp:151` row. |
+| `:485` | `WaitForQueueSerialImpl` | `Queue.wait` | `src/engine/queue.zig:543` | port | Ported with one deliberate difference, and the file header names it. Dawn's loop is `while (1)` at `:496` and its `VK_TIMEOUT` branch retries forever when the timeout is infinite (`:530`-`:531`), which its own comment at `:524`-`:527` admits. `AGENTS.md` §2 requires a named bound on every loop, so the port has `max_fence_wait_iteration_count` (`src/engine/queue.zig:49`) and returns `error.WaitIterationExhausted`. The search at `:500`-`:507` is `findFenceFor` (`src/engine/queue.zig:537`) and the not-found case at `:508`-`:513` is `Queue.wait`'s early return. `kWaitSerialTimeout` at `:533` is `error.FenceWaitTimedOut`, and the acceptance's 5,000 ms default (`src/engine/queue.zig:40`) replaces the caller-passed `Nanoseconds`. |
 
 ### `src/dawn/native/vulkan/FencedDeleter.cpp` — 7 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/FencedDeleter.cpp:38` | `FencedDeleter` ctor | `HandleSet` | `src/engine/vulkan_device.zig:127` | skip | The ctor stores one `Device*` and nothing else. The port has no deleter object, so there is nothing to construct; the counting record it does have holds a pointer to no device and is passed in, which is why `HandleSet.acquire` takes only the set and the kind. |
+| `src/dawn/native/vulkan/FencedDeleter.cpp:38` | `FencedDeleter` ctor | `HandleSet` | `src/engine/vulkan_device.zig:130` | skip | The ctor stores one `Device*` and nothing else. The port has no deleter object, so there is nothing to construct; the counting record it does have holds a pointer to no device and is passed in, which is why `HandleSet.acquire` takes only the set and the kind. |
 | `:40` | `~FencedDeleter` | — | — | skip | The body at `:42` flushes pending deletions to `kMaxExecutionSerial`, because the deleter can still hold work at teardown. `Device.deinit` (`src/engine/vulkan_device.zig:641`) has nothing pending: `Queue.deinit` (`src/engine/queue.zig:232`) destroys every context and every fence first, and the `HandleSet` assertion after the device destroy is what proves it. |
-| `:46` | `DeleteWhenUnused` | `HandleSet.release` | `src/engine/vulkan_device.zig:141` | merge | The macro at `:45` expands once per `FENCED_DELETER_TYPES` entry, which is 17 types in deletion order (`FencedDeleter.h:49`-`:66`). The port's `HandleKind` (`src/engine/vulkan_device.zig:101`) is seven values because M9 creates seven of them plus the two parent objects Dawn destroys outside the list; the file header at `:95`-`:100` names the seven and says why `VkPhysicalDevice` is absent. The port's rule at `:135`, a destroy with no create is refused rather than allowed to wrap, is the counter's version of the `mAssumeCompleted` branch at `:48`-`:53`: a wrapped count would report a huge live number that names nothing. |
-| `:61` | `GetLastPendingDeletionSerial` | `HandleSet.isEmpty` | `src/engine/vulkan_device.zig:160` | merge | Dawn takes the maximum over 17 queues of the last serial each is waiting at, or `kBeginningOfGPUTime` when all are empty. That answers "has it gone out yet". The acceptance asks "is anything still live", which is a different question and needs a count that rises on every create and falls on every destroy. |
+| `:46` | `DeleteWhenUnused` | `HandleSet.release` | `src/engine/vulkan_device.zig:144` | merge | The macro at `:45` expands once per `FENCED_DELETER_TYPES` entry, which is 17 types in deletion order (`FencedDeleter.h:49`-`:66`). The port's `HandleKind` (`src/engine/vulkan_device.zig:101`) is seven values because M9 creates seven of them plus the two parent objects Dawn destroys outside the list; the file header at `:95`-`:100` names the seven and says why `VkPhysicalDevice` is absent. The port's rule at `:135`, a destroy with no create is refused rather than allowed to wrap, is the counter's version of the `mAssumeCompleted` branch at `:48`-`:53`: a wrapped count would report a huge live number that names nothing. |
+| `:61` | `GetLastPendingDeletionSerial` | `HandleSet.isEmpty` | `src/engine/vulkan_device.zig:163` | merge | Dawn takes the maximum over 17 queues of the last serial each is waiting at, or `kBeginningOfGPUTime` when all are empty. That answers "has it gone out yet". The acceptance asks "is anything still live", which is a different question and needs a count that rises on every create and falls on every destroy. |
 | `:74` | `GetCurrentDeletionSerial` | `Timeline.lastSubmittedSerial` | `src/platform/serial.zig:238` | merge | Dawn reads `GetPendingCommandSerial()`, the serial the next submit will take. The port's `Queue.timeline` (`src/engine/queue.zig:104`) is M4's record, and the serial a destroy is tagged with is the last one submitted, so `Timeline.lastSubmittedSerial` is the reader. There is no delete to tag: `test/vulkan_device.zig:151` destroys in creation order instead. |
-| `:78` | `UpdateCompletedSerialTo` | `Queue.complete` | `src/engine/queue.zig:586` | merge | Dawn iterates each of the 17 queues up to the completed serial, calls the destroy function, then clears (`:84`-`:87`). The port has no pending queue, so the whole call is the timeline move: `Timeline.updateCompletedTo` (`src/platform/serial.zig:248`), which is M4's row. |
+| `:78` | `UpdateCompletedSerialTo` | `Queue.complete` | `src/engine/queue.zig:781` | merge | Dawn iterates each of the 17 queues up to the completed serial, calls the destroy function, then clears (`:84`-`:87`). The port has no pending queue, so the whole call is the timeline move: `Timeline.updateCompletedTo` (`src/platform/serial.zig:248`), which is M4's row. |
 | `:93` | `AssumeCommandsComplete` | — | — | skip | Sets `mAssumeCompleted`, which makes every later delete immediate on the device-loss path. M9's device has no loss path and `Queue.deinit` destroys unconditionally, so the flag has no writer and no reader. |
 
 ### `src/dawn/native/vulkan/UtilsVulkan.cpp` — 19 rows
@@ -4358,13 +4602,13 @@ other thirty-nine name a milestone that already owns the work.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/MemoryTypeSelector.cpp:43` | `HasMemoryTypeWithFlags` | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:660` | merge | The predicate at `:46`, `(propertyFlags & flags) == flags`, is the containment test the port runs at `src/engine/vulkan_device.zig:530`. Dawn's copy is the "does any type have these flags" question the extension feature asks; the port's is the per-type question one allocation asks. |
+| `src/dawn/native/vulkan/MemoryTypeSelector.cpp:43` | `HasMemoryTypeWithFlags` | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:663` | merge | The predicate at `:46`, `(propertyFlags & flags) == flags`, is the containment test the port runs at `src/engine/vulkan_device.zig:530`. Dawn's copy is the "does any type have these flags" question the extension feature asks; the port's is the per-type question one allocation asks. |
 | `:55` | `IsMemoryKindMappable` | — | — | skip | `MemoryKind` is Dawn's allocation-intent bit set. M6's allocator owns the intent and supplies it as two flag arguments (`src/engine/vulkan_device.zig:521`-`:522`), so the enum has no row here. |
 | `:59` | `SupportsBufferMapExtendedUsages` | — | — | skip | The `BufferMapExtendedUsages` feature gate, and the TODO at `:60`-`:61` records that it is not the right predicate. `Device.create` sets `.pEnabledFeatures = null` (`src/engine/vulkan_device.zig:605`), so the feature is never on. |
-| `:65` | `MemoryTypeSelector` (`VulkanDeviceInfo`) | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:660` | merge | The selector's state is two owned vectors. The port takes a `*const vulkan.VkPhysicalDeviceMemoryProperties` from the device record (`src/engine/vulkan_device.zig:666`), which was copied once at `gather` and outlives the selector. |
-| `:68` | `MemoryTypeSelector` (vectors) | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:660` | merge | Same reason; this overload exists for the synthesised tables the tests build, and the port's caller can pass any table by pointer. |
-| `:72` | `FindBestTypeIndex` | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:660` | simplify | Ported with the two hard requirements and none of the five ordered tie-breaks at `:79`-`:155`. M9 needs exactly one answer, for the buffer the acceptance fills, and the tie-breaks only choose between types that are all legal for it. The port adds what upstream has no notion of, a forbidden-flag test at `:531`, because `vkCmdFillBuffer` on device-local memory is legal and a driver may satisfy it by doing nothing. `kInvalidMemoryTypeIndex` at `:77` becomes `error.NoMemoryType` (`src/engine/vulkan_device.zig:501`), which is what `ResourceMemoryAllocatorVk.cpp:185`-`:193` turns into an unrecoverable error for M6. |
-| `:161` | `GetRequiredMemoryPropertyFlags` | `findMemoryTypeIndex` (`required_flags`) | `src/engine/vulkan_device.zig:660` | merge | The three-way mapping from `MemoryKind` to flags at `:166`-`:178`. The port does not translate a kind, because M6 supplies the flags directly; the containment test at `:522` and `:530` is the same one either way. |
+| `:65` | `MemoryTypeSelector` (`VulkanDeviceInfo`) | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:663` | merge | The selector's state is two owned vectors. The port takes a `*const vulkan.VkPhysicalDeviceMemoryProperties` from the device record (`src/engine/vulkan_device.zig:666`), which was copied once at `gather` and outlives the selector. |
+| `:68` | `MemoryTypeSelector` (vectors) | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:663` | merge | Same reason; this overload exists for the synthesised tables the tests build, and the port's caller can pass any table by pointer. |
+| `:72` | `FindBestTypeIndex` | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:663` | simplify | Ported with the hard requirements and none of the five ordered tie-breaks at `:79`-`:155`. The type must match the allocation's `memoryTypeBits` and required property flags. An explicit forbidden-flag argument remains available, but neither mapped buffers nor the fill acceptance forbids device-local memory: host visibility can coexist with device locality on UMA devices. `kInvalidMemoryTypeIndex` at `:77` becomes `error.NoMemoryType`, which is what `ResourceMemoryAllocatorVk.cpp:185`-`:193` turns into an unrecoverable error for M6. |
+| `:161` | `GetRequiredMemoryPropertyFlags` | `findMemoryTypeIndex` | `src/engine/vulkan_device.zig:663` | merge | The three-way mapping from `MemoryKind` to flags at `:166`-`:178`. The port does not translate a kind, because M6 supplies the flags directly; the containment test at `:522` and `:530` is the same one either way. |
 
 ### `src/dawn/native/vulkan/VulkanBackend.cpp` — 13 rows
 
@@ -4394,8 +4638,8 @@ other thirty-nine name a milestone that already owns the work.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/RefCountedVkHandle.h:43` | `RefCountedVkHandle` ctor | — | — | skip | The shared-handle wrapper, and the reason the class exists: a Vulkan object two systems hold is kept alive by a ref count. The port has no reference counting, and the file header at `src/engine/vulkan_device.zig:21`-`:26` names the difference and its cause: a `Backend` owns its instances outright, which is the arena-per-device model in `docs/30-port-design.md` §1.1 rather than a second lifetime scheme. |
-| `:45` | `~RefCountedVkHandle` | — | — | skip | Hands the handle to `FencedDeleter::DeleteWhenUnused` at `:47`, which is the `FencedDeleter.cpp:46` row. With no ref count there is no last reference, so there is nothing to trigger the hand-off. |
+| `src/dawn/native/vulkan/RefCountedVkHandle.h:43` | `RefCountedVkHandle` ctor | — | — | skip | Dawn's native shared-handle wrapper is not implemented. Dusk instead counts typed dependencies, cached pipeline references, and operation pins. Backend instances retain explicit owners. |
+| `:45` | `~RefCountedVkHandle` | — | — | skip | Dawn's last-reference handoff to `FencedDeleter` is not implemented by Dusk's explicit resource release and ordered teardown. |
 | `:51` | `Get` | — | — | skip | A one-field accessor over `mHandle`, which the port's records do not have: a buffer is its own type at M10 and a fence is an element of a fixed array (`src/engine/queue.zig:112`). |
 
 ### `src/dawn/native/vulkan/RefCountedVkHandle.h` headers and constants the script cannot see
@@ -4415,15 +4659,11 @@ line.
 | `mVulkanInstancesCreated`, `mVulkanInstances`, `mPhysicalDevices` (`BackendVk.h:121`-`:123`) | `instances`, `physical_devices` | `src/engine/vulkan_device.zig:1040`-`:1041` |
 | `FENCED_DELETER_TYPES` (`FencedDeleter.h:49`-`:66`), 17 types, and the deletion-order rule at `:45`-`:48` | `HandleKind`, 7 kinds | `src/engine/vulkan_device.zig:101` |
 | `mFencesInFlight`, `mUnusedFences`, `mUnusedCommands`, `mRecordingContext`, `mQueueFamily`, `mQueue` (`QueueVk.h:84`-`:97`) and the single-queue rule at `:80`-`:83` | `fences_in_flight`, `unused_fences`, `contexts`, `recording_index`, `Context.queue_family_index`, `Context.vk_queue` | `src/engine/queue.zig:105`-`:113`, `:73`, `:71` |
-| `GatherDeviceInfo`, `GatherGlobalInfo`, `GatherPhysicalDevices` (`VulkanInfo.cpp:164`-`:500`, `:81`-`:94`, `:140`-`:162`), called from `BackendVk.cpp:430`, `:402`, `:181` and asserted at `VulkanInfo.cpp:247` | `PhysicalDevice.gather`, `queryLoaderApiVersion`, `VulkanInstance.enumeratePhysicalDevices` | `src/engine/vulkan_device.zig:470`, `:426`, `:376` |
+| `GatherDeviceInfo`, `GatherGlobalInfo`, `GatherPhysicalDevices` (`VulkanInfo.cpp:164`, `:81`, `:140`) | `PhysicalDevice.gather`, `queryLoaderApiVersion`, `VulkanInstance.enumeratePhysicalDevices` | `src/engine/vulkan_device.zig:543`, `:495`, `:441` |
 
-**A citation the port gets wrong.** The comment above
-`Device.create`'s `loadDeviceProcs` call reads
-"`LoadDeviceProcs` (`DeviceVk.cpp:139` in `Initialize`)" at
-`src/engine/vulkan_device.zig:621`. The call is at `DeviceVk.cpp:135`; line 139
-is inside the `VulkanSkipDraw` block that follows it. Nothing reads the line, so
-no assertion changes, but the pointer is wrong and will mislead the reader who
-follows it.
+**Corrected loader citation.** Native creation now cites `LoadDeviceProcs` at `DeviceVk.cpp:135`.
+The call appears in `src/engine/vulkan_device.zig:971-977`.
+The earlier `:139` reference described the following test-toggle block, not the loader call.
 
 **A citation §1 gets wrong.** The summary row at `:1178` gives this milestone
 `PhysicalDeviceVk.cpp 45`, `Queue.cpp 29` and `QueueVk.cpp 19`. The counting
@@ -4478,8 +4718,8 @@ declaration at its body.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/common/Constants.h:86` | `kCopyBufferToBufferOffsetAlignment` | `copy_offset_alignment` | `src/engine/buffer.zig:51` | port | Four bytes, on every platform, because Dawn decided to be stricter than macOS needs. |
-| `src/dawn/native/Buffer.cpp:70` | `ConcurrentUseError` | `error.BufferUseWhileInUse` | `src/engine/buffer.zig:175` | merge | One message behind one rule, so the text is written once and the six call sites that need it name a member. |
+| `src/dawn/common/Constants.h:86` | `kCopyBufferToBufferOffsetAlignment` | `copy_offset_alignment` | `src/engine/buffer.zig:52` | port | Four bytes, on every platform, because Dawn decided to be stricter than macOS needs. |
+| `src/dawn/native/Buffer.cpp:70` | `ConcurrentUseError` | `Rule` | `src/engine/buffer.zig:157` | merge | The declared error set includes `BufferUseWhileInUse`. Validation returns that member. |
 | `src/dawn/native/Buffer.cpp:94` | `ErrorBuffer::IsCPUWritableAtCreation` | — | — | skip | The error object. Dawn parks a create error and returns an object in its place; the port returns a typed error and creates nothing (`src/engine/buffer.zig:538`-`:545`). |
 | `src/dawn/native/Buffer.cpp:96` | `ErrorBuffer::MapAtCreationImpl` | — | — | skip | With the row above: a fake allocation to stand in for a mapping that never happened. |
 | `src/dawn/native/Buffer.cpp:115` | `ErrorBuffer::FinalizeMapImpl` | — | — | skip | With the row above. |
@@ -4488,70 +4728,70 @@ declaration at its body.
 | `src/dawn/native/Buffer.cpp:125` | `ErrorBuffer::UnmapImpl` | — | — | skip | With the row above. |
 | `src/dawn/native/Buffer.cpp:127` | `ErrorBuffer::GetObjectTrackingList` | — | — | skip | With the row above. |
 | `src/dawn/native/Buffer.cpp:139` | `sZeroSizedMappingData` | — | — | skip | A `uint32_t` a zero-sized map hands back so the pointer is never null. The port refuses a zero-length range (`src/engine/buffer.zig:1291`), so no fake target is needed. |
-| `src/dawn/native/Buffer.cpp:143` | `ValidateBufferUsageCombinations` | `validateBufferUsageCombinations` | `src/engine/buffer.zig:353` | port | The feature gate at `:145`-`:147` is `BufferMapExtendedUsages`. The port has no feature table, so it keeps the strict rule the gate skips over: map read takes `copy_dst` and nothing else, map write takes `copy_src` and nothing else. M7 relaxes this when the table lands. |
+| `src/dawn/native/Buffer.cpp:143` | `ValidateBufferUsageCombinations` | `validateBufferUsageCombinations` | `src/engine/buffer.zig:356` | port | The feature gate at `:145`-`:147` is `BufferMapExtendedUsages`. The port has no feature table, so it keeps the strict rule the gate skips over: map read takes `copy_dst` and nothing else, map write takes `copy_src` and nothing else. M7 relaxes this when the table lands. |
 | `src/dawn/native/Buffer.cpp:184` | `ValidateTexelBufferViewDescriptor` | — | — | skip | The texel buffer view is M11's, and this rule is only reachable through `CreateTexelView`, which is the same milestone's row. |
-| `src/dawn/native/Buffer.cpp:216` | `ComputeInternalBufferUsages` | `computeInternalBufferUsages` | `src/engine/buffer.zig:332` | port | Three additions and no device: a storage buffer also gets the read-only bit, a texel buffer the read-only texel bit, and a query resolve the internal storage bit. Upstream takes `device` and `bufferSize` for the feature gates; neither changes the three additions. |
-| `src/dawn/native/Buffer.cpp:438` | `ValidateBufferDescriptor` | `validateBufferDescriptor` | `src/engine/buffer.zig:367` | port | The rules at `:467` (empty usage), `:476` (mapped at creation, size a multiple of four) and `:480`-`:481` (above `maxBufferSize`) are the ones kept. The host-mapped chain at `:446`-`:463` is M21's, and the texel-buffer gate at `:469`-`:472` is M11's. |
-| `src/dawn/native/Buffer.cpp:493` | `BufferBase::IsMappedState` | `isMappedState` | `src/engine/buffer.zig:131` | port | The same two states. |
-| `src/dawn/native/Buffer.cpp:498` | `BufferBase::BufferBase` | `Buffer.create` | `src/engine/buffer.zig:543` | merge | Dawn constructs after the device reified the descriptor; the port validates first and allocates second, so a rejected descriptor costs one block and no `VkBuffer`. |
+| `src/dawn/native/Buffer.cpp:216` | `ComputeInternalBufferUsages` | `computeInternalBufferUsages` | `src/engine/buffer.zig:335` | port | Three additions and no device: a storage buffer also gets the read-only bit, a texel buffer the read-only texel bit, and a query resolve the internal storage bit. Upstream takes `device` and `bufferSize` for the feature gates; neither changes the three additions. |
+| `src/dawn/native/Buffer.cpp:438` | `ValidateBufferDescriptor` | `validateBufferDescriptor` | `src/engine/buffer.zig:370` | port | The rules at `:467` (empty usage), `:476` (mapped at creation, size a multiple of four) and `:480`-`:481` (above `maxBufferSize`) are the ones kept. The host-mapped chain at `:446`-`:463` is M21's, and the texel-buffer gate at `:469`-`:472` is M11's. |
+| `src/dawn/native/Buffer.cpp:493` | `BufferBase::IsMappedState` | `isMappedState` | `src/engine/buffer.zig:132` | port | The same two states. |
+| `src/dawn/native/Buffer.cpp:498` | `BufferBase::BufferBase` | `Buffer.create` | `src/engine/buffer.zig:546` | merge | Dawn constructs after the device reified the descriptor; the port validates first and allocates second, so a rejected descriptor costs one block and no `VkBuffer`. |
 | `src/dawn/native/Buffer.cpp:509` | `BufferBase::BufferBase(ErrorTag)` | — | — | skip | The error-object constructor, with the `ErrorBuffer` rows above. |
-| `src/dawn/native/Buffer.cpp:518` | `BufferBase::~BufferBase` | `Buffer.destroy` | `src/engine/buffer.zig:800` | merge | One teardown for the destructor and for `DestroyImpl`. |
-| `src/dawn/native/Buffer.cpp:525` | `BufferBase::DestroyImpl` | `Buffer.destroy` | `src/engine/buffer.zig:800` | port | The staging buffer goes first and is dropped rather than copied, because its contents are about to be freed with the buffer. The fenced deleter at `:766`-`:771` is M9's handle accounting. |
+| `src/dawn/native/Buffer.cpp:518` | `BufferBase::~BufferBase` | `Buffer.destroy` | `src/engine/buffer.zig:797` | merge | One teardown for the destructor and for `DestroyImpl`. |
+| `src/dawn/native/Buffer.cpp:525` | `BufferBase::DestroyImpl` | `Buffer.destroy` | `src/engine/buffer.zig:797` | port | The staging buffer goes first and is dropped rather than copied, because its contents are about to be freed with the buffer. The fenced deleter at `:766`-`:771` is M9's handle accounting. |
 | `src/dawn/native/Buffer.cpp:574` | `BufferBase::UseDeviceGuardForDestroy` | — | — | skip | The device guard every back end may strengthen. M9 owns the device lock; one back end needs no extra guard. |
 | `src/dawn/native/Buffer.cpp:580` | `BufferBase::MakeError` | — | — | skip | The error object, with the `ErrorBuffer` rows above. |
 | `src/dawn/native/Buffer.cpp:584` | `BufferBase::GetType` | — | — | skip | The kind byte is the arena object's field, read once when a handle resolves (`src/core/object.zig`). |
-| `src/dawn/native/Buffer.cpp:588` | `BufferBase::GetSize` | `Buffer.getSize` | `src/engine/buffer.zig:871` | port | The size the caller asked for, not the size allocated. |
-| `src/dawn/native/Buffer.cpp:592` | `BufferBase::GetAllocatedSize` | `Buffer.getAllocatedSize` | `src/engine/buffer.zig:876` | port | What the `VkBuffer` was created with, so a uniform buffer's sixteen-byte rounding is visible here and not at the call site. |
-| `src/dawn/native/Buffer.cpp:597` | `BufferBase::GetInternalUsage` | `Buffer.getInternalUsage` | `src/engine/buffer.zig:886` | port | The caller's usage plus what the engine adds for itself. |
-| `src/dawn/native/Buffer.cpp:602` | `BufferBase::GetUsage` | `Buffer.getUsage` | `src/engine/buffer.zig:881` | port | The two differ only by the row above. |
+| `src/dawn/native/Buffer.cpp:588` | `BufferBase::GetSize` | `Buffer.getSize` | `src/engine/buffer.zig:868` | port | The size the caller asked for, not the size allocated. |
+| `src/dawn/native/Buffer.cpp:592` | `BufferBase::GetAllocatedSize` | `Buffer.getAllocatedSize` | `src/engine/buffer.zig:873` | port | What the `VkBuffer` was created with, so a uniform buffer's sixteen-byte rounding is visible here and not at the call site. |
+| `src/dawn/native/Buffer.cpp:597` | `BufferBase::GetInternalUsage` | `Buffer.getInternalUsage` | `src/engine/buffer.zig:883` | port | The caller's usage plus what the engine adds for itself. |
+| `src/dawn/native/Buffer.cpp:602` | `BufferBase::GetUsage` | `Buffer.getUsage` | `src/engine/buffer.zig:878` | port | The two differ only by the row above. |
 | `src/dawn/native/Buffer.cpp:607` | `BufferBase::APIGetUsage` | — | — | skip | The M2 API surface. The port's `getUsage` is the whole answer it has. |
 | `src/dawn/native/Buffer.cpp:611` | `BufferBase::APIGetMapState` | — | — | skip | The wire map state, which folds `pending_map` and `in_use` into one value the API has no room for. `Buffer.getState` is the port's finer answer. |
-| `src/dawn/native/Buffer.cpp:630` | `BufferBase::FinalizeMap` | `Buffer.finalizeMap` | `src/engine/buffer.zig:1272` | port | The same two legal transitions, asserted rather than checked, and the same rollback to `unmapped` on failure so the buffer is still destroyable. |
+| `src/dawn/native/Buffer.cpp:630` | `BufferBase::FinalizeMap` | `Buffer.finalizeMap` | `src/engine/buffer.zig:1269` | port | The same two legal transitions, asserted rather than checked, and the same rollback to `unmapped` on failure so the buffer is still destroyable. |
 | `src/dawn/native/Buffer.cpp:660` | `BufferBase::TryMapAtCreation` | — | — | skip | The OOM-injection seam. The port's `create` returns the map failure directly, so there is nothing to swallow and retry. |
-| `src/dawn/native/Buffer.cpp:673` | `BufferBase::MapAtCreation` | `Buffer.mapAtCreation` | `src/engine/buffer.zig:1232` | port | The zero fill at `:687` covers the whole allocated range and not only the user-visible one, and `SetInitialized(true)` at `:696` is the row that stops a later clear from overwriting the caller. The two toggle gates around it need M7's table, and the port keeps the on behaviour. |
-| `src/dawn/native/Buffer.cpp:707` | `BufferBase::MapAtCreationInternal` | `Buffer.mapAtCreation` | `src/engine/buffer.zig:1232` | merge | Sub-path B is the staging buffer created at `:719`-`:733`; sub-path A is the caller's own writable mapping. Both are the same port function, because the decision upstream makes with an `if` is a branch the port also takes. |
-| `src/dawn/native/Buffer.cpp:747` | `BufferBase::GetState` | `Buffer.getState` | `src/engine/buffer.zig:851` | port |  |
-| `src/dawn/native/Buffer.cpp:751` | `BufferBase::MapMode` | `Buffer.getMapMode` | `src/engine/buffer.zig:856` | port |  |
-| `src/dawn/native/Buffer.cpp:755` | `BufferBase::MapOffset` | `Buffer.getMapOffset` | `src/engine/buffer.zig:861` | port |  |
-| `src/dawn/native/Buffer.cpp:759` | `BufferBase::MapSize` | `Buffer.getMapSize` | `src/engine/buffer.zig:866` | port | The API-visible length, which is the buffer size at creation and the requested size later. |
-| `src/dawn/native/Buffer.cpp:763` | `BufferBase::UseInternal` | `Buffer.validateCanUseOnQueueNow` | `src/engine/buffer.zig:923` | merge | Dawn's `exchange` is the port's `errdefer self.finishUse()`, and it asserts the previous state rather than returning it. |
-| `src/dawn/native/Buffer.cpp:769` | `BufferBase::ValidateCanUseOnQueueNow` | `Buffer.validateCanUseOnQueueNow` | `src/engine/buffer.zig:923` | port | Seven cases, one per state, with a switch that has no `else` so a state added without a row is a compile error. |
-| `src/dawn/native/Buffer.cpp:791` | `BufferBase::FinishUse` | `Buffer.finishUse` | `src/engine/buffer.zig:915` | port | The pair of the row above: one opens the scope, one closes it, and each asserts the other's state. |
-| `src/dawn/native/Buffer.cpp:796` | `BufferBase::APIMapAsync` | `Buffer.mapAsync` | `src/engine/buffer.zig:1424` | port | Dawn parks a `MapAsyncEvent` and resolves it from the device tick; the port resolves the map here, after the caller has waited for the serial it names. The event half is M4's future, and `mapAsync` is a total function over the two states it can reach. |
+| `src/dawn/native/Buffer.cpp:673` | `BufferBase::MapAtCreation` | `Buffer.mapAtCreation` | `src/engine/buffer.zig:1229` | port | The zero fill at `:687` covers the whole allocated range and not only the user-visible one, and `SetInitialized(true)` at `:696` is the row that stops a later clear from overwriting the caller. The two toggle gates around it need M7's table, and the port keeps the on behaviour. |
+| `src/dawn/native/Buffer.cpp:707` | `BufferBase::MapAtCreationInternal` | `Buffer.mapAtCreation` | `src/engine/buffer.zig:1229` | merge | Sub-path B is the staging buffer created at `:719`-`:733`; sub-path A is the caller's own writable mapping. Both are the same port function, because the decision upstream makes with an `if` is a branch the port also takes. |
+| `src/dawn/native/Buffer.cpp:747` | `BufferBase::GetState` | `Buffer.getState` | `src/engine/buffer.zig:848` | port |  |
+| `src/dawn/native/Buffer.cpp:751` | `BufferBase::MapMode` | `Buffer.getMapMode` | `src/engine/buffer.zig:853` | port |  |
+| `src/dawn/native/Buffer.cpp:755` | `BufferBase::MapOffset` | `Buffer.getMapOffset` | `src/engine/buffer.zig:858` | port |  |
+| `src/dawn/native/Buffer.cpp:759` | `BufferBase::MapSize` | `Buffer.getMapSize` | `src/engine/buffer.zig:863` | port | The API-visible length, which is the buffer size at creation and the requested size later. |
+| `src/dawn/native/Buffer.cpp:763` | `BufferBase::UseInternal` | `Buffer.validateCanUseOnQueueNow` | `src/engine/buffer.zig:920` | merge | Dawn's `exchange` is the port's `errdefer self.finishUse()`, and it asserts the previous state rather than returning it. |
+| `src/dawn/native/Buffer.cpp:769` | `BufferBase::ValidateCanUseOnQueueNow` | `Buffer.validateCanUseOnQueueNow` | `src/engine/buffer.zig:920` | port | Seven cases, one per state, with a switch that has no `else` so a state added without a row is a compile error. |
+| `src/dawn/native/Buffer.cpp:791` | `BufferBase::FinishUse` | `Buffer.finishUse` | `src/engine/buffer.zig:912` | port | The pair of the row above: one opens the scope, one closes it, and each asserts the other's state. |
+| `src/dawn/native/Buffer.cpp:796` | `BufferBase::APIMapAsync` | `Buffer.mapAsync` | `src/engine/buffer.zig:1421` | port | Dawn parks a `MapAsyncEvent` and resolves it from the device tick; the port resolves the map here, after the caller has waited for the serial it names. The event half is M4's future, and `mapAsync` is a total function over the two states it can reach. |
 | `src/dawn/native/Buffer.cpp:869` | `BufferBase::APIGetMappedRange` | — | — | skip | The M2 API surface. The engine callers reach the same span through `Buffer.getMappedRange`. |
 | `src/dawn/native/Buffer.cpp:873` | `BufferBase::APIGetConstMappedRange` | — | — | skip | With the row above. A read-only mapping is one `MapMode` value, not a second entry point. |
 | `src/dawn/native/Buffer.cpp:877` | `BufferBase::APIWriteMappedRange` | — | — | skip | With the row above: the copy is `Buffer.writeBuffer`, which reaches the uploader. |
 | `src/dawn/native/Buffer.cpp:887` | `BufferBase::APIReadMappedRange` | — | — | skip | With the row above. |
-| `src/dawn/native/Buffer.cpp:897` | `BufferBase::GetMappedRange` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1371` | port | `kWholeMapSize` is folded into "the size minus the offset" before the check, as at `:905`-`:906`. |
-| `src/dawn/native/Buffer.cpp:903` | `BufferBase::GetMappedRangeInternal` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1371` | merge | The optional return is the error set: upstream returns `std::nullopt` and the wrapper asserts it held a value, so the port returns an error the caller must handle. |
-| `src/dawn/native/Buffer.cpp:918` | `BufferBase::GetFullMappedAllocatedRange` | `Buffer.mappedSpan` | `src/engine/buffer.zig:1219` | port | The whole allocation including the padding, which is why the mapped-at-creation zero fill above is longer than the user-visible size. |
+| `src/dawn/native/Buffer.cpp:897` | `BufferBase::GetMappedRange` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1368` | port | `kWholeMapSize` is folded into "the size minus the offset" before the check, as at `:905`-`:906`. |
+| `src/dawn/native/Buffer.cpp:903` | `BufferBase::GetMappedRangeInternal` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1368` | merge | The optional return is the error set: upstream returns `std::nullopt` and the wrapper asserts it held a value, so the port returns an error the caller must handle. |
+| `src/dawn/native/Buffer.cpp:918` | `BufferBase::GetFullMappedAllocatedRange` | `Buffer.mappedSpan` | `src/engine/buffer.zig:1216` | port | The whole allocation including the padding, which is why the mapped-at-creation zero fill above is longer than the user-visible size. |
 | `src/dawn/native/Buffer.cpp:924` | `BufferBase::APIDestroy` | — | — | skip | The M2 API surface. The arena owns the block; `Buffer.destroy` is what releases the Vulkan handles. |
 | `src/dawn/native/Buffer.cpp:929` | `BufferBase::APIGetSize` | — | — | skip | The M2 API surface; `getSize` answers it. |
-| `src/dawn/native/Buffer.cpp:933` | `BufferBase::CopyFromStagingBuffer` | `Buffer.copyFromStagingBuffer` | `src/engine/buffer.zig:1492` | port | One recorded `vkCmdCopyBuffer` of the whole allocated size, then the staging buffer is gone. The `OnStagingMemoryFreePendingOnSubmit` at `:942` is the ring's `release`, which the port takes as an explicit call because reclaiming on the serial needs the memory module's queue. |
+| `src/dawn/native/Buffer.cpp:933` | `BufferBase::CopyFromStagingBuffer` | `Buffer.copyFromStagingBuffer` | `src/engine/buffer.zig:1489` | port | One recorded `vkCmdCopyBuffer` of the whole allocated size, then the staging buffer is gone. The `OnStagingMemoryFreePendingOnSubmit` at `:942` is the ring's `release`, which the port takes as an explicit call because reclaiming on the serial needs the memory module's queue. |
 | `src/dawn/native/Buffer.cpp:946` | `BufferBase::APIUnmap` | — | — | skip | The M2 API surface. The `MaybeSubmitPendingCommands` call inside it is the ring's own threshold row and the port has one queue. |
-| `src/dawn/native/Buffer.cpp:957` | `BufferBase::Unmap` | `Buffer.unmap` | `src/engine/buffer.zig:1459` | port | Every case, including the `forDestroy` branch at `:972`-`:975` that drops the staging contents instead of copying them. The port has one `destroy`, so `forDestroy` is the `staging != null` case in `Buffer.destroy`. |
+| `src/dawn/native/Buffer.cpp:957` | `BufferBase::Unmap` | `Buffer.unmap` | `src/engine/buffer.zig:1456` | port | Every case, including the `forDestroy` branch at `:972`-`:975` that drops the staging contents instead of copying them. The port has one `destroy`, so `forDestroy` is the `staging != null` case in `Buffer.destroy`. |
 | `src/dawn/native/Buffer.cpp:1001` | `BufferBase::UnmapEarly` | — | — | skip | Aborts a pending map from the unmap path. Only a pending map can abort, and M4 owns the future a pending map resolves. |
-| `src/dawn/native/Buffer.cpp:1018` | `BufferBase::UnmapInternal` | `Buffer.unmap` | `src/engine/buffer.zig:1459` | merge | Merged into the row above; it is the non-reentrant body `Unmap` inlines. |
-| `src/dawn/native/Buffer.cpp:1067` | `BufferBase::ValidateMapAsync` | `Buffer.validateMapAsync` | `src/engine/buffer.zig:1312` | port | The offset bound at `:1072`, the eight-byte offset at `:1075`, the four-byte size at `:1076` and the range bound at `:1078`. The host-mapped refusal at `:1070` is M21's, because it tests a flag no port object has yet. |
-| `src/dawn/native/Buffer.cpp:1104` | `BufferBase::CanGetMappedRange` | `Buffer.canGetMappedRange` | `src/engine/buffer.zig:1334` | port | Upstream's `writable` parameter becomes the one case it drives: a read-only mapping refuses a writable request. The port's `getMappedRange` is the caller, so there is one public range function and one private predicate. |
-| `src/dawn/native/Buffer.cpp:1156` | `BufferBase::ValidateUnmap` | `Buffer.validateUnmap` | `src/engine/buffer.zig:1452` | port | The only rule at `:1158` refuses unmapping a host-mapped buffer, which is M21's row, so the port's set is empty and says why. |
-| `src/dawn/native/Buffer.cpp:1162` | `BufferBase::NeedsInitialization` | `Buffer.needsInitialization` | `src/engine/buffer.zig:894` | port | The toggle at `:1163` is `LazyClearResourceOnFirstUse`, which defaults on (`Adapter.cpp:254`). The port keeps the on behaviour and names the toggle it would read. |
-| `src/dawn/native/Buffer.cpp:1166` | `BufferBase::MarkUsedInPendingCommands` | `Buffer.markUsedInPendingCommands` | `src/engine/buffer.zig:899` | merge | The no-argument overload reads the queue's pending serial; the port takes that serial as a parameter, so it reads no clock and holds no queue pointer. Merged with the row below. |
-| `src/dawn/native/Buffer.cpp:1172` | `BufferBase::MarkUsedInPendingCommands(ExecutionSerial)` | `Buffer.markUsedInPendingCommands` | `src/engine/buffer.zig:899` | merge | With the row above. |
-| `src/dawn/native/Buffer.cpp:1179` | `BufferBase::GetLastUsageSerial` | `Buffer.getLastUsageSerial` | `src/engine/buffer.zig:904` | port |  |
-| `src/dawn/native/Buffer.cpp:1183` | `BufferBase::UploadData` | `Buffer.uploadThroughRing` | `src/engine/buffer.zig:1571` | port | The ring path the acceptance names. Upstream wraps the reservation in `WithUploadReservation` and copies, then asks for the copy; the port's `writeBuffer` opens the use scope, this function does the copy, and `UploadRing.release` takes the reservation back. The bytes reach the destination as a recorded `vkCmdCopyBuffer` and the destination's own memory is never touched on the CPU. |
+| `src/dawn/native/Buffer.cpp:1018` | `BufferBase::UnmapInternal` | `Buffer.unmap` | `src/engine/buffer.zig:1456` | merge | Merged into the row above; it is the non-reentrant body `Unmap` inlines. |
+| `src/dawn/native/Buffer.cpp:1067` | `BufferBase::ValidateMapAsync` | `Buffer.validateMapAsync` | `src/engine/buffer.zig:1309` | port | The offset bound at `:1072`, the eight-byte offset at `:1075`, the four-byte size at `:1076` and the range bound at `:1078`. The host-mapped refusal at `:1070` is M21's, because it tests a flag no port object has yet. |
+| `src/dawn/native/Buffer.cpp:1104` | `BufferBase::CanGetMappedRange` | `Buffer.canGetMappedRange` | `src/engine/buffer.zig:1331` | port | Upstream's `writable` parameter becomes the one case it drives: a read-only mapping refuses a writable request. The port's `getMappedRange` is the caller, so there is one public range function and one private predicate. |
+| `src/dawn/native/Buffer.cpp:1156` | `BufferBase::ValidateUnmap` | `Buffer.validateUnmap` | `src/engine/buffer.zig:1449` | port | The only rule at `:1158` refuses unmapping a host-mapped buffer, which is M21's row, so the port's set is empty and says why. |
+| `src/dawn/native/Buffer.cpp:1162` | `BufferBase::NeedsInitialization` | `Buffer.needsInitialization` | `src/engine/buffer.zig:891` | port | The toggle at `:1163` is `LazyClearResourceOnFirstUse`, which defaults on (`Adapter.cpp:254`). The port keeps the on behaviour and names the toggle it would read. |
+| `src/dawn/native/Buffer.cpp:1166` | `BufferBase::MarkUsedInPendingCommands` | `Buffer.markUsedInPendingCommands` | `src/engine/buffer.zig:896` | merge | The no-argument overload reads the queue's pending serial; the port takes that serial as a parameter, so it reads no clock and holds no queue pointer. Merged with the row below. |
+| `src/dawn/native/Buffer.cpp:1172` | `BufferBase::MarkUsedInPendingCommands(ExecutionSerial)` | `Buffer.markUsedInPendingCommands` | `src/engine/buffer.zig:896` | merge | With the row above. |
+| `src/dawn/native/Buffer.cpp:1179` | `BufferBase::GetLastUsageSerial` | `Buffer.getLastUsageSerial` | `src/engine/buffer.zig:901` | port |  |
+| `src/dawn/native/Buffer.cpp:1183` | `BufferBase::UploadData` | `Buffer.uploadThroughRing` | `src/engine/buffer.zig:1568` | port | The ring path the acceptance names. Upstream wraps the reservation in `WithUploadReservation` and copies, then asks for the copy; the port's `writeBuffer` opens the use scope, this function does the copy, and `UploadRing.release` takes the reservation back. The bytes reach the destination as a recorded `vkCmdCopyBuffer` and the destination's own memory is never touched on the CPU. |
 | `src/dawn/native/Buffer.cpp:1198` | `BufferBase::OnEndAccess` | — | — | skip | The shared-memory access protocol. M21. |
 | `src/dawn/native/Buffer.cpp:1205` | `BufferBase::OnBeginAccess` | — | — | skip | With the row above. |
 | `src/dawn/native/Buffer.cpp:1213` | `BufferBase::HasAccess` | — | — | skip | With the row above. |
-| `src/dawn/native/Buffer.cpp:1217` | `BufferBase::IsDestroyed` | `Buffer.state` | `src/engine/buffer.zig:501` | merge | A field read, with `destroyed` one of the seven `State` values. |
-| `src/dawn/native/Buffer.cpp:1221` | `BufferBase::SetInitialized` | `Buffer.is_data_initialized` | `src/engine/buffer.zig:511` | merge | One flag rather than a setter, so no call site can set it without also being the place that wrote the bytes. |
-| `src/dawn/native/Buffer.cpp:1225` | `BufferBase::IsResourceInitialized` | `Buffer.needsInitialization` | `src/engine/buffer.zig:894` | merge | With the row above: the flag read from the other side. |
-| `src/dawn/native/Buffer.cpp:1229` | `BufferBase::IsFullBufferRange` | `Buffer.isFullBufferRange` | `src/engine/buffer.zig:909` | port |  |
+| `src/dawn/native/Buffer.cpp:1217` | `BufferBase::IsDestroyed` | `Buffer.state` | `src/engine/buffer.zig:504` | merge | A field read, with `destroyed` one of the seven `State` values. |
+| `src/dawn/native/Buffer.cpp:1221` | `BufferBase::SetInitialized` | `Buffer.is_data_initialized` | `src/engine/buffer.zig:514` | merge | One flag rather than a setter, so no call site can set it without also being the place that wrote the bytes. |
+| `src/dawn/native/Buffer.cpp:1225` | `BufferBase::IsResourceInitialized` | `Buffer.needsInitialization` | `src/engine/buffer.zig:891` | merge | With the row above: the flag read from the other side. |
+| `src/dawn/native/Buffer.cpp:1229` | `BufferBase::IsFullBufferRange` | `Buffer.isFullBufferRange` | `src/engine/buffer.zig:906` | port |  |
 | `src/dawn/native/Buffer.cpp:1233` | `BufferBase::DumpMemoryStatistics` | — | — | skip | `MemoryDump` is a Dawn diagnostics type. §2 skips `dawn/common/MemoryDump` with the rest of the debug surface. |
 | `src/dawn/native/Buffer.cpp:1242` | `BufferBase::CreateTexelView` | — | — | skip | M11's texel buffer view, created from the buffer's texel usage. |
 | `src/dawn/native/Buffer.cpp:1248` | `BufferBase::APICreateTexelView` | — | — | skip | With the row above. |
 | `src/dawn/native/Buffer.cpp:1258` | `BufferBase::GetTexelBufferViewTrackingList` | — | — | skip | With the row above: the tracking list belongs to the view, and the arena destroys views with their buffer in M11's design. |
-| `src/dawn/native/Buffer.cpp:1262` | `BufferBase::TransitionState` | `Buffer.transitionState` | `src/engine/buffer.zig:940` | port | Upstream's compare-and-exchange becomes a field compare under the device mutex. A lost race is the caller's error to name, not a spin. |
+| `src/dawn/native/Buffer.cpp:1262` | `BufferBase::TransitionState` | `Buffer.transitionState` | `src/engine/buffer.zig:937` | port | Upstream's compare-and-exchange becomes a field compare under the device mutex. A lost race is the caller's error to name, not a spin. |
 | `src/dawn/native/Buffer.cpp:1270` | `ScopedUseBuffer::ScopedUseBuffer()` | — | — | skip | The empty state of a scoped-lock object. The port's use scope is a `defer`, which has no empty state. |
 | `src/dawn/native/Buffer.cpp:1272` | `ScopedUseBuffer::ScopedUseBuffer(BufferBase*)` | — | — | skip | With the row above. |
 | `src/dawn/native/Buffer.cpp:1277` | `ScopedUseBuffer::~ScopedUseBuffer` | — | — | skip | With the row above. |
@@ -4564,46 +4804,46 @@ declaration at its body.
 | `src/dawn/native/Buffer.cpp:333` | `MapAsyncEvent::UnmapEarly` | — | — | skip | With the row above, and the same reason as `BufferBase::UnmapEarly`. |
 | `src/dawn/native/Buffer.cpp:340` | `MapAsyncEvent::RunCallback` | — | — | skip | With the row above: the raw callback the M2 future surface owns. |
 | `src/dawn/native/Buffer.cpp:345` | `MapAsyncEvent::Complete` | — | — | skip | With the row above. Its body is the resolve that `Buffer.mapAsync` does synchronously. |
-| `src/dawn/native/Buffer.h:170` | `BufferBase::GetMappedRangeSpan<T>` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1371` | simplify | One byte span, not a template over it: a Zig caller reinterprets the `[]u8` when it wants a typed view, and the alignment question the TODO at `:171`-`:176` raises cannot arise because the caller knows its own type's alignment. |
+| `src/dawn/native/Buffer.h:170` | `BufferBase::GetMappedRangeSpan<T>` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1368` | simplify | One byte span, not a template over it: a Zig caller reinterprets the `[]u8` when it wants a typed view, and the alignment question the TODO at `:171`-`:176` raises cannot arise because the caller knows its own type's alignment. |
 | `src/dawn/native/Buffer.h:184` | `BufferBase::GetMappedDataAs<T>` | — | — | merge | Merged into the row above. |
 
 ### `src/dawn/native/vulkan/BufferVk.cpp` — the Vulkan buffer
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/BufferVk.cpp:59` | `VulkanBufferUsage` | `vulkanBufferUsage` | `src/engine/buffer.zig:383` | port | One function over a `u32` mask rather than a `wgpu::BufferUsage`, because the internal usage bits above the twelve public ones do not fit the generated type. |
-| `src/dawn/native/vulkan/BufferVk.cpp:97` | `VulkanPipelineStage` | `vulkanPipelineStage` | `src/engine/buffer.zig:409` | port | One deliberate difference, named: upstream maps a mappable usage to `VK_PIPELINE_STAGE_TRANSFER_BIT` at `:100`-`:101`, the port maps it to `VK_PIPELINE_STAGE_HOST_BIT`. A map is a host operation and the transfer stage is where the copy that follows it lives, so the two stages have to be separable or the barrier over-reaches. |
-| `src/dawn/native/vulkan/BufferVk.cpp:131` | `VulkanAccessFlags` | `vulkanAccessFlags` | `src/engine/buffer.zig:434` | port |  |
-| `src/dawn/native/vulkan/BufferVk.cpp:172` | `GetMemoryKindFor` | `memoryKindFor` | `src/engine/buffer.zig:460` | port | `kDeviceLocalBufferUsages` at `:183`-`:187` is the same nine usages. Upstream returns a flag set; the port returns a struct of three booleans, because a caller asks one question and a flag set would make it read three. |
-| `src/dawn/native/vulkan/BufferVk.cpp:197` | `GetMappedMemoryRange` | `Buffer.mappedMemoryRange` | `src/engine/buffer.zig:1153` | port | The offset down to an atom boundary and the size up to one, then the clamp to the allocation. The atom size is the device's, taken from the limits rather than from the physical device on every call. |
-| `src/dawn/native/vulkan/BufferVk.cpp:224` | `Buffer::Create` | `Buffer.create` | `src/engine/buffer.zig:543` | port | Upstream picks between `InitializeHostMapped` and `Initialize` at `:228`-`:232`. The port has one `create` and the host-mapped branch is M21's row, so the `else` arm is the whole body. |
-| `src/dawn/native/vulkan/BufferVk.cpp:236` | `Buffer::Initialize` | `Buffer.initialize` | `src/engine/buffer.zig:586` | port | The whole size arithmetic: the four-byte alignment constant at `:238`, the extra byte at `:240`-`:247`, the four-byte floor at `:258`, `Align` at `:264` and the uniform sixteen-byte rounding at `:268`-`:269`. The `VkBufferUsage` always carries `CopyDst` (`:289`), the requirements come from `:301`, the memory from `:304`-`:305` and the bind from `:308`-`:312`. |
-| `src/dawn/native/vulkan/BufferVk.cpp:314`-`:320` | the host-visible and host-coherent reads | `Buffer.host_visible`, `Buffer.host_coherent` | `src/engine/buffer.zig:523`, `:520` | port | Read off the chosen memory type rather than off the physical device, which is the same answer and one lookup fewer. |
+| `src/dawn/native/vulkan/BufferVk.cpp:59` | `VulkanBufferUsage` | `vulkanBufferUsage` | `src/engine/buffer.zig:386` | port | One function over a `u32` mask rather than a `wgpu::BufferUsage`, because the internal usage bits above the twelve public ones do not fit the generated type. |
+| `src/dawn/native/vulkan/BufferVk.cpp:97` | `VulkanPipelineStage` | `vulkanPipelineStage` | `src/engine/buffer.zig:412` | port | One deliberate difference, named: upstream maps a mappable usage to `VK_PIPELINE_STAGE_TRANSFER_BIT` at `:100`-`:101`, the port maps it to `VK_PIPELINE_STAGE_HOST_BIT`. A map is a host operation and the transfer stage is where the copy that follows it lives, so the two stages have to be separable or the barrier over-reaches. |
+| `src/dawn/native/vulkan/BufferVk.cpp:131` | `VulkanAccessFlags` | `vulkanAccessFlags` | `src/engine/buffer.zig:437` | port |  |
+| `src/dawn/native/vulkan/BufferVk.cpp:172` | `GetMemoryKindFor` | `memoryKindFor` | `src/engine/buffer.zig:463` | port | `kDeviceLocalBufferUsages` at `:183`-`:187` is the same nine usages. Upstream returns a flag set; the port returns a struct of three booleans, because a caller asks one question and a flag set would make it read three. |
+| `src/dawn/native/vulkan/BufferVk.cpp:197` | `GetMappedMemoryRange` | `Buffer.mappedMemoryRange` | `src/engine/buffer.zig:1150` | port | The offset down to an atom boundary and the size up to one, then the clamp to the allocation. The atom size is the device's, taken from the limits rather than from the physical device on every call. |
+| `src/dawn/native/vulkan/BufferVk.cpp:224` | `Buffer::Create` | `Buffer.create` | `src/engine/buffer.zig:546` | merge | Creates the native buffer through `initialize`. Host-mapped external-memory import remains outside this subset. Dusk allocation and staging ownership differs from Dawn. |
+| `src/dawn/native/vulkan/BufferVk.cpp:236` | `Buffer::Initialize` | `Buffer.initialize` | `src/engine/buffer.zig:589` | merge | Preserves buffer size/usage preparation and native creation corresponding to `vkCreateBuffer` at `:294-297`. Dusk uses its own memory selection and lazy-clear policy. |
+| `src/dawn/native/vulkan/BufferVk.cpp:314`-`:320` | the host-visible and host-coherent reads | `Buffer.host_visible`, `Buffer.host_coherent` | `src/engine/buffer.zig:526`, `src/engine/buffer.zig:527` | port | Read off the chosen memory type rather than off the physical device, which is the same answer and one lookup fewer. |
 | `src/dawn/native/vulkan/BufferVk.cpp:322`-`:325` | the creation-time padding clear | — | — | skip | Dawn clears the padding at creation because its lazy clear is toggle-gated. The port always clears on first use, and that clear covers the whole allocation including the padding, so the creation-time clear would be a second command for the same bytes. |
 | `src/dawn/native/vulkan/BufferVk.cpp:365` | `Buffer::InitializeHostMapped` | — | — | skip | The host-mapped import. It needs the external-memory path, which is M21. |
-| `src/dawn/native/vulkan/BufferVk.cpp:456` | `Buffer::~Buffer` | `Buffer.destroy` | `src/engine/buffer.zig:800` | merge | `= default` upstream. The port's `destroy` releases the mapping, the buffer and the memory in that order. |
-| `src/dawn/native/vulkan/BufferVk.cpp:458` | `Buffer::GetHandle` | `Buffer.getHandle` | `src/engine/buffer.zig:846` | port |  |
-| `src/dawn/native/vulkan/BufferVk.cpp:462` | `Buffer::TransitionUsageNow` | `Buffer.transitionUsageNow` | `src/engine/buffer.zig:1044` | port | Track, then emit. The eager-transition hook at `:465` is M9's queue-side collection, and the port's `transitionMappableBuffersEagerly` is where it runs. |
-| `src/dawn/native/vulkan/BufferVk.cpp:470` | `Buffer::TrackUsageAndGetResourceBarrier` | `Buffer.trackUsageAndGetResourceBarrier` | `src/engine/buffer.zig:954` | port | One function, one order, because every buffer barrier in the back end comes through it. The map-usage case at `:479`-`:489` records no host-to-GPU barrier and the reason is the two `vkQueueSubmit` dependencies it names; the read-only widening at `:510`-`:513` is the same line. |
-| `src/dawn/native/vulkan/BufferVk.cpp:565` | `Buffer::IsCPUWritableAtCreation` | `Buffer.isCpuWritableAtCreation` | `src/engine/buffer.zig:1226` | port | Upstream answers it as "the allocation has a mapped span"; the port answers the same fact from its own `mapped` field, which is set once when the memory kind asked for host access. |
+| `src/dawn/native/vulkan/BufferVk.cpp:456` | `Buffer::~Buffer` | `Buffer.destroy` | `src/engine/buffer.zig:797` | merge | `= default` upstream. The port's `destroy` releases the mapping, the buffer and the memory in that order. |
+| `src/dawn/native/vulkan/BufferVk.cpp:458` | `Buffer::GetHandle` | `Buffer.getHandle` | `src/engine/buffer.zig:843` | port |  |
+| `src/dawn/native/vulkan/BufferVk.cpp:462` | `Buffer::TransitionUsageNow` | `Buffer.transitionUsageNow` | `src/engine/buffer.zig:1041` | port | Track, then emit. The eager-transition hook at `:465` is M9's queue-side collection, and the port's `transitionMappableBuffersEagerly` is where it runs. |
+| `src/dawn/native/vulkan/BufferVk.cpp:470` | `Buffer::TrackUsageAndGetResourceBarrier` | `Buffer.trackUsageAndGetResourceBarrier` | `src/engine/buffer.zig:951` | port | One function, one order, because every buffer barrier in the back end comes through it. The map-usage case at `:479`-`:489` records no host-to-GPU barrier and the reason is the two `vkQueueSubmit` dependencies it names; the read-only widening at `:510`-`:513` is the same line. |
+| `src/dawn/native/vulkan/BufferVk.cpp:565` | `Buffer::IsCPUWritableAtCreation` | `Buffer.isCpuWritableAtCreation` | `src/engine/buffer.zig:1223` | port | Upstream answers it as "the allocation has a mapped span"; the port answers the same fact from its own `mapped` field, which is set once when the memory kind asked for host access. |
 | `src/dawn/native/vulkan/BufferVk.cpp:570` | `Buffer::MapAtCreationImpl` | — | — | skip | An empty body. Dawn maps lazily and the mapping is what `MapAsyncImpl` would take; the port maps once when the memory is allocated, so there is nothing for a map-at-creation hook to do. |
 | `src/dawn/native/vulkan/BufferVk.cpp:574` | `Buffer::MapAsyncImpl` | — | — | skip | An empty body, for the same reason. |
-| `src/dawn/native/vulkan/BufferVk.cpp:578` | `Buffer::FinalizeMapImpl` | `Buffer.finalizeMapImpl` | `src/engine/buffer.zig:1286` | port | The lazy clear at `:584`, the flush it may need at `:599`, and the invalidate at `:603`-`:618`. The rule at `:607`-`:609` is the port's `gpu_writable` at `:1305`: a map read always invalidates, and a map write does unless nothing on the GPU could have written the range. |
-| `src/dawn/native/vulkan/BufferVk.cpp:623` | `Buffer::UnmapImpl` | `Buffer.unmapImpl` | `src/engine/buffer.zig:1484` | port | CPU-visible memory stays mapped for ever, so an unmap flushes a write and does nothing else. `newState` is the port's `old_state` parameter under its own name. |
-| `src/dawn/native/vulkan/BufferVk.cpp:637` | `Buffer::GetMappedRangeImpl` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1371` | merge | A subspan of the mapped span, which is what `mappedSpan` and `getMappedRange` do between them. There is one public range function in the port because there is one kind of range to hand back. |
-| `src/dawn/native/vulkan/BufferVk.cpp:641` | `Buffer::UploadData` | `Buffer.uploadData` | `src/engine/buffer.zig:1549` | port | The three-way decision at `:657`: in use, pending writes, or not CPU writable takes the ring; anything else writes into the destination's own mapping. The `hasPendingWrites` test at `:654`-`:655` is the port's `has_pending_writes` rewritten. **One divergence, named:** upstream branches on `!mHostVisible` while the port branches on `!isCpuWritableAtCreation()`. They agree for every allocation the port makes, because the port maps exactly when the kind asks for host access, but upstream's own comment at `:314`-`:315` says host visibility can hold for a buffer that never asked for it, so a driver-reported mapped span is the property the port needs. |
-| `src/dawn/native/vulkan/BufferVk.cpp:666`-`:682` | the zero-then-copy lambda | `Buffer.DirectUpload` | `src/engine/buffer.zig:1630` | merge | Dawn's lambda captures the buffer; the port's operation takes its state as a parameter, so nothing is captured and the caller names its own state (`AGENTS.md` §3). `SetInitialized(true)` at `:682` is the port's `is_data_initialized = true` at `:1529`. |
-| `src/dawn/native/vulkan/BufferVk.cpp:689` | `Buffer::MapMemoryAndPerformOperation` | `Buffer.mapMemoryAndPerformOperation` | `src/engine/buffer.zig:1200` | port | Over the mapping this buffer keeps for its whole life, which is what `crbug.com/dawn/774` asks for. The template parameter becomes a function pointer and a context. |
-| `src/dawn/native/vulkan/BufferVk.cpp:756` | `Buffer::DestroyImpl` | `Buffer.destroy` | `src/engine/buffer.zig:800` | port | The sub-allocation return at `:766`, the fenced delete at `:769` and the host-mapped dispose task at `:778`-`:796`. The first is M6's memory module, the second M9's handle accounting and the third M21's row. |
-| `src/dawn/native/vulkan/BufferVk.cpp:799` | `Buffer::EnsureDataInitialized` | `Buffer.ensureDataInitializedAsDestination` | `src/engine/buffer.zig:1135` | merge | Dawn has three overloads because it has a `BufferInitRange` type. The port has one function over an offset and a size, and the full-range case is the one that skips the clear. |
-| `src/dawn/native/vulkan/BufferVk.cpp:808` | `Buffer::EnsureDataInitializedAsDestination(offset, size)` | `Buffer.ensureDataInitializedAsDestination` | `src/engine/buffer.zig:1135` | port | The full-range check is the port's `isFullBufferRange`: every byte is overwritten, so a clear would be a wasted command. |
+| `src/dawn/native/vulkan/BufferVk.cpp:578` | `Buffer::FinalizeMapImpl` | `Buffer.finalizeMapImpl` | `src/engine/buffer.zig:1283` | port | The lazy clear at `:584`, the flush it may need at `:599`, and the invalidate at `:603`-`:618`. The rule at `:607`-`:609` is the port's `gpu_writable` at `:1305`: a map read always invalidates, and a map write does unless nothing on the GPU could have written the range. |
+| `src/dawn/native/vulkan/BufferVk.cpp:623` | `Buffer::UnmapImpl` | `Buffer.unmapImpl` | `src/engine/buffer.zig:1481` | port | CPU-visible memory stays mapped for ever, so an unmap flushes a write and does nothing else. `newState` is the port's `old_state` parameter under its own name. |
+| `src/dawn/native/vulkan/BufferVk.cpp:637` | `Buffer::GetMappedRangeImpl` | `Buffer.getMappedRange` | `src/engine/buffer.zig:1368` | merge | A subspan of the mapped span, which is what `mappedSpan` and `getMappedRange` do between them. There is one public range function in the port because there is one kind of range to hand back. |
+| `src/dawn/native/vulkan/BufferVk.cpp:641` | `Buffer::UploadData` | `Buffer.uploadData` | `src/engine/buffer.zig:1546` | port | The three-way decision at `:657`: in use, pending writes, or not CPU writable takes the ring; anything else writes into the destination's own mapping. The `hasPendingWrites` test at `:654`-`:655` is the port's `has_pending_writes` rewritten. **One divergence, named:** upstream branches on `!mHostVisible` while the port branches on `!isCpuWritableAtCreation()`. They agree for every allocation the port makes, because the port maps exactly when the kind asks for host access, but upstream's own comment at `:314`-`:315` says host visibility can hold for a buffer that never asked for it, so a driver-reported mapped span is the property the port needs. |
+| `src/dawn/native/vulkan/BufferVk.cpp:666`-`:682` | the zero-then-copy lambda | `Buffer.DirectUpload` | `src/engine/buffer.zig:1616` | merge | Dawn's lambda captures the buffer; the port's operation takes its state as a parameter, so nothing is captured and the caller names its own state (`AGENTS.md` §3). `SetInitialized(true)` at `:682` is the port's `is_data_initialized = true` at `:1529`. |
+| `src/dawn/native/vulkan/BufferVk.cpp:689` | `Buffer::MapMemoryAndPerformOperation` | `Buffer.mapMemoryAndPerformOperation` | `src/engine/buffer.zig:1197` | port | Over the mapping this buffer keeps for its whole life, which is what `crbug.com/dawn/774` asks for. The template parameter becomes a function pointer and a context. |
+| `src/dawn/native/vulkan/BufferVk.cpp:756` | `Buffer::DestroyImpl` | `Buffer.destroy` | `src/engine/buffer.zig:797` | port | The sub-allocation return at `:766`, the fenced delete at `:769` and the host-mapped dispose task at `:778`-`:796`. The first is M6's memory module, the second M9's handle accounting and the third M21's row. |
+| `src/dawn/native/vulkan/BufferVk.cpp:799` | `Buffer::EnsureDataInitialized` | `Buffer.ensureDataInitializedAsDestination` | `src/engine/buffer.zig:1132` | merge | Dawn has three overloads because it has a `BufferInitRange` type. The port has one function over an offset and a size, and the full-range case is the one that skips the clear. |
+| `src/dawn/native/vulkan/BufferVk.cpp:808` | `Buffer::EnsureDataInitializedAsDestination(offset, size)` | `Buffer.ensureDataInitializedAsDestination` | `src/engine/buffer.zig:1132` | port | The full-range check is the port's `isFullBufferRange`: every byte is overwritten, so a clear would be a wasted command. |
 | `src/dawn/native/vulkan/BufferVk.cpp:824` | `Buffer::EnsureDataInitializedAsDestination(BufferInitRange)` | — | — | skip | The overload above, keyed on a range type the port has no reason to have. |
-| `src/dawn/native/vulkan/BufferVk.cpp:840` | `Buffer::TransitionMappableBuffersEagerly` | `Buffer.transitionMappableBuffersEagerly` | `src/engine/buffer.zig:1071` | port | One barrier per buffer merged into one emission, which is the whole point of the eager transition: a mappable buffer's host access must be visible before the submit that follows it. |
-| `src/dawn/native/vulkan/BufferVk.cpp:858` | `Buffer::SetLabelImpl` | `Buffer.setLabel` | `src/engine/buffer.zig:773` | port | A null proc is `VK_EXT_debug_utils` not being enabled, which is not a failure. |
-| `src/dawn/native/vulkan/BufferVk.cpp:862` | `Buffer::InitializeToZero` | `Buffer.initializeToZero` | `src/engine/buffer.zig:1127` | port | A transition to `copy_dst`, a `vkCmdFillBuffer` over the allocated size, and the flag. |
-| `src/dawn/native/vulkan/BufferVk.cpp:870` | `Buffer::ClearBuffer` | `Buffer.clearBuffer` | `src/engine/buffer.zig:1104` | port | The size must be a multiple of four, so a zero size returns before the call rather than asserting. |
+| `src/dawn/native/vulkan/BufferVk.cpp:840` | `Buffer::TransitionMappableBuffersEagerly` | `Buffer.transitionMappableBuffersEagerly` | `src/engine/buffer.zig:1068` | port | One barrier per buffer merged into one emission, which is the whole point of the eager transition: a mappable buffer's host access must be visible before the submit that follows it. |
+| `src/dawn/native/vulkan/BufferVk.cpp:858` | `Buffer::SetLabelImpl` | `Buffer.setLabel` | `src/engine/buffer.zig:770` | port | A null proc is `VK_EXT_debug_utils` not being enabled, which is not a failure. |
+| `src/dawn/native/vulkan/BufferVk.cpp:862` | `Buffer::InitializeToZero` | `Buffer.initializeToZero` | `src/engine/buffer.zig:1124` | port | A transition to `copy_dst`, a `vkCmdFillBuffer` over the allocated size, and the flag. |
+| `src/dawn/native/vulkan/BufferVk.cpp:870` | `Buffer::ClearBuffer` | `Buffer.clearBuffer` | `src/engine/buffer.zig:1101` | port | The size must be a multiple of four, so a zero size returns before the call rather than asserting. |
 | `src/dawn/native/vulkan/BufferVk.cpp:887` | `BufferBarrier::IsEmpty` | `BufferBarrier.isEmpty` | `src/engine/recording_context.zig:53` | port | An empty barrier is not emitted, so a buffer that has never been used costs no command. |
-| `src/dawn/native/vulkan/BufferVk.cpp:891` | `BufferBarrier::Merge` | `Buffer.transitionMappableBuffersEagerly` | `src/engine/buffer.zig:1071` | merge | Four field-wise ors, written in the loop at `:1016`-`:1019` rather than as a method: the type is `recording_context.BufferBarrier`, and the comment at `:1012`-`:1015` names `AGENTS.md` §6 as the reason the method is not there. |
+| `src/dawn/native/vulkan/BufferVk.cpp:891` | `BufferBarrier::Merge` | `Buffer.transitionMappableBuffersEagerly` | `src/engine/buffer.zig:1068` | merge | Four field-wise ors, written in the loop at `:1016`-`:1019` rather than as a method: the type is `recording_context.BufferBarrier`, and the comment at `:1012`-`:1015` names `AGENTS.md` §6 as the reason the method is not there. |
 
 ### `src/dawn/native/DynamicUploader.{h,cpp}` — the staging ring
 
@@ -4613,11 +4853,11 @@ reserves through this object. The rows are here because they land here.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/DynamicUploader.cpp:43` | `kRingBufferSize` | `upload_ring_size` | `src/engine/buffer.zig:71` | port | Four MiB, and a field rather than a constant so a caller can ask for less. |
-| `src/dawn/native/DynamicUploader.cpp:46` | `DynamicUploader::DynamicUploader` | `UploadRing.init` | `src/engine/buffer.zig:1732` | port | Nothing exists yet. Dawn creates the first ring lazily on the first reserve, and so does the port. |
-| `src/dawn/native/DynamicUploader.cpp:48` | `DynamicUploader::Reserve` | `UploadRing.reserve` | `src/engine/buffer.zig:1760` | port | Three returns upstream: a request larger than the ring gets its own staging buffer (`:54`-`:76`), a ring that does not fit appends another, and a fit takes a slice of the current ring. **Two divergences, named.** The port reports the first as `UploadRingRequestTooLarge` and refuses to wrap at all, because a silently separate allocation would make the free accounting a second thing to get right. The eight-byte alignment at `:51` is kept and is what makes a ring offset both a legal copy offset and a legal mapping offset. |
-| `src/dawn/native/DynamicUploader.cpp:116` | the lazily created `Dawn_DynamicUploaderStaging` buffer | `UploadRing.ensureStagingBuffer` | `src/engine/buffer.zig:1803` | port | A copy-source, map-write buffer mapped at creation, so its whole range is host memory for the ring to carve up. The size is the allocator's size aligned to four, which is the same alignment the mapped-at-creation size rule at `Buffer.cpp:476` requires. The lazy half is the `mStagingBuffer == nullptr` test at `:111`. |
-| `src/dawn/native/DynamicUploader.cpp:137` | `DynamicUploader::OnStagingMemoryFreePendingOnSubmit` | `UploadRing.release` | `src/engine/buffer.zig:1822` | port | Upstream ties the release to the pending submit serial through `UpdateMemoryPendingSubmit`. The port takes the release as an explicit call, because a serial-reclaim hook needs the memory module's reclaim queue and this milestone does not have one. The bound is what makes the port's `release` refuse a count it did not hand out. |
+| `src/dawn/native/DynamicUploader.cpp:43` | `kRingBufferSize` | `upload_ring_size` | `src/engine/buffer.zig:72` | port | Four MiB, and a field rather than a constant so a caller can ask for less. |
+| `src/dawn/native/DynamicUploader.cpp:46` | `DynamicUploader::DynamicUploader` | `UploadRing.init` | `src/engine/buffer.zig:1708` | port | Nothing exists yet. Dawn creates the first ring lazily on the first reserve, and so does the port. |
+| `src/dawn/native/DynamicUploader.cpp:48` | `DynamicUploader::Reserve` | `UploadRing.reserve` | `src/engine/buffer.zig:1735` | port | Three returns upstream: a request larger than the ring gets its own staging buffer (`:54`-`:76`), a ring that does not fit appends another, and a fit takes a slice of the current ring. **Two divergences, named.** The port reports the first as `UploadRingRequestTooLarge` and refuses to wrap at all, because a silently separate allocation would make the free accounting a second thing to get right. The eight-byte alignment at `:51` is kept and is what makes a ring offset both a legal copy offset and a legal mapping offset. |
+| `src/dawn/native/DynamicUploader.cpp:116` | the lazily created `Dawn_DynamicUploaderStaging` buffer | `UploadRing.ensureStagingBuffer` | `src/engine/buffer.zig:1767` | port | A copy-source, map-write buffer mapped at creation, so its whole range is host memory for the ring to carve up. The size is the allocator's size aligned to four, which is the same alignment the mapped-at-creation size rule at `Buffer.cpp:476` requires. The lazy half is the `mStagingBuffer == nullptr` test at `:111`. |
+| `src/dawn/native/DynamicUploader.cpp:137` | `DynamicUploader::OnStagingMemoryFreePendingOnSubmit` | `UploadRing.reclaim` | `src/engine/buffer.zig:1789` | simplify | Reservations carry the actual pending recording serial. Reclamation accepts an observed completed serial. Failed recording cancels only the newest reservation. |
 | `src/dawn/native/DynamicUploader.cpp:143` | `DynamicUploader::MaybeSubmitPendingCommands` | — | — | skip | A sixteen-megabyte pending threshold that submits early. The port has one queue and submits per recorded work item, so there is no accumulation to flush. |
 | `src/dawn/native/DynamicUploader.cpp:166` | `DynamicUploader::Deallocate` | — | — | skip | Walks the rings and frees what the completed serial released. M6's memory module owns the reclaim queue this would read. |
 | `src/dawn/native/DynamicUploader.cpp:186` | `DynamicUploader::UpdateMemoryPendingSubmit` | — | — | skip | With the row above: it is the counter this row resets at `:193`. |
@@ -4666,88 +4906,118 @@ actually has, plus every upstream function that names one the port does not, so
 a skip is as visible as a port. What the census also counts and this table does
 not is named in the closing paragraph, with the milestone that owns it.
 
-**What the table does not claim.** A Vulkan image. The front end holds no
-Vulkan (`AGENTS.md` §3), so a texture here is a validated descriptor plus the
-linear store its copies read and write, and the image behind it is M18's.
+**Frontend and native separation.** The frontend validates texture descriptors without issuing Vulkan calls.
+The typed native facade then initializes real images and views through the factories below.
+Physical image-format-property validation is Dusk glue, not another Dawn creation function.
+
+| Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
+| --- | --- | --- | --- | --- | --- |
+| `src/dawn/native/vulkan/TextureVk.cpp:1441` | `InternalTexture::Create` | `Texture.initializeNative` | `src/engine/texture.zig:285` | merge | Combines native wrapper construction and image initialization. High `Texture.create` remains a separate frontend step. |
+| `src/dawn/native/vulkan/TextureVk.cpp:1450` | `InternalTexture::Initialize` | `Texture.initializeNative` | `src/engine/texture.zig:285` | merge | Existing image factory corresponds to `vkCreateImage` at `:1530-1532`. Allocation, validation, and release policy differs from Dawn. |
+| `src/dawn/native/vulkan/TextureVk.cpp:2086` | `TextureView::Create` | `TextureView.initializeNative` | `src/engine/texture.zig:1276` | merge | Combines native view construction and initialization after frontend view creation. |
+| `src/dawn/native/vulkan/TextureVk.cpp:2095` | `TextureView::Initialize` | `TextureView.initializeNative` | `src/engine/texture.zig:1276` | merge | Creates the view corresponding to `vkCreateImageView` at `:2158-2160`. Dusk retains the parent through typed dependency ownership. |
+
+The pinned factory evidence is in `docs/02-dawn-design.md` §4.16.4.
+
+**Native lazy initialization, 2026-10-07.**
+`Texture.ensureSubresourceContentInitialized` (`src/engine/texture.zig:589`)
+selects compressed staging or native image clear commands. Compressed images
+use a queue-owned host-zeroed buffer. The queue's persistent allocator owns
+that buffer until its submission serial completes. Recording scratch does not
+own it. Native multisample initialization uses image clears, not an invalid
+buffer-to-multisample copy. Host-visible and device-local memory flags can both
+be set. Neither mapping nor lazy initialization excludes UMA memory.
+
+**Checked native borrow, 2026-10-07.** `Texture.validateNativeRange`
+(`src/engine/texture.zig:489`) returns `NativeError!*NativeTexture`.
+It rejects a missing native object before it validates the range.
+The returned pointer is BORROWED. `Texture.transitionState`
+(`src/engine/texture.zig:502`) accepts this checked pointer instead of reading
+`self.native` again. This refactor does not change the public error contract.
+The earlier missing-guard/null-panic inference was wrong. The prior source
+already returned `TextureNativeNotInitialized` before range validation.
+Parent artifact 211 passed both new lifecycle rejection regressions in Debug
+and actual ReleaseSafe. This verifies the existing rejection behavior, not a
+new public API or an added error contract.
 
 ### `src/dawn/native/Texture.cpp` — the rules and the accessors
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Texture.cpp:72` | `ValidateCanViewTextureAs` | `validateCanViewTextureAs` | `src/engine/texture.zig` | port | Three returns in upstream's order: a view naming one aspect must name the texture's own format, a listed format passes, and a format that is neither compatible nor listed is the last error. |
-| `src/dawn/native/Texture.cpp:122` | `IsTextureViewDimensionCompatibleWithTextureDimension` | `isViewDimensionCompatibleWithTextureDimension` | `src/engine/texture.zig` | port | The compatibility branch at `:133` is the `cube_array` case. The device that owns the profile lands at M16, so the mode is a parameter here. |
-| `src/dawn/native/Texture.cpp:172` | `IsArrayLayerValidForTextureViewDimension` | `isArrayLayerValidForViewDimension` | `src/engine/texture.zig` | port | One switch over the dimension with no `else`, so a dimension added to the enum without a row is a compile error. |
-| `src/dawn/native/Texture.cpp:193` | `ValidateSampleCount` | `validateSampleCount` | `src/engine/texture.zig` | port | Upstream takes the internal usage as a third argument; the port reads the caller's usage off the descriptor, which is the only usage a creation-time check may see. |
-| `src/dawn/native/Texture.cpp:237` | `ValidateTextureViewDimensionCompatibility` | `validateTextureViewDimensionCompatibility` | `src/engine/texture.zig` | port | Takes the resolved descriptor rather than the raw one, so the defaults are filled once and the two halves cannot disagree. |
-| `src/dawn/native/Texture.cpp:265` | the cube-not-square check | `error.TextureViewCubeNotSquare` | `src/engine/texture.zig` | merge | One named error inside the rule above, so M16's re-gate row 6 can reach it by name. |
-| `src/dawn/native/Texture.cpp:269` | the compatibility cube-array check | `error.TextureViewCubeArrayCompatibility` | `src/engine/texture.zig` | merge | The other half of M16's row 6. |
-| `src/dawn/native/Texture.cpp:287` | `ValidateTextureSize` | `validateTextureSize` | `src/engine/texture.zig` | port | The device's limits arrive as `TextureLimits`, four members, because the whole limit table is M7's. |
-| `src/dawn/native/Texture.cpp:294` | the per-dimension maximum extent | `maxExtentFor` | `src/engine/texture.zig` | merge | A switch over the dimension instead of a second switch inside the rule. |
-| `src/dawn/native/Texture.cpp:369` | the mip-level-count limit | `ceilLog2` | `src/engine/texture.zig` | port | The halvings that reach one, plus one. Dawn's `Log2` lives in `Numeric.h`, which M7 owns, so the port writes the count out at the one site that needs it. |
-| `src/dawn/native/Texture.cpp:387` | the unaligned-compression block check | `error.TextureCompressedBlockAlignment` | `src/engine/texture.zig` | port | The feature gate on that line is a feature read. Without the feature Dawn rejects, so the rule the port keeps is the strict one and M7 relaxes it when the feature table lands. |
-| `src/dawn/native/Texture.cpp:402` | `ValidateTextureUsageConstraints` | `validateTextureUsageConstraints` | `src/engine/texture.zig` | port | `compatibility_mode` is a parameter and reads nothing at M11; the row below is the one it would read. |
+| `src/dawn/native/Texture.cpp:72` | `ValidateCanViewTextureAs` | `validateCanViewTextureAs` | `src/engine/texture.zig:1918` | port | Three returns in upstream's order: a view naming one aspect must name the texture's own format, a listed format passes, and a format that is neither compatible nor listed is the last error. |
+| `src/dawn/native/Texture.cpp:122` | `IsTextureViewDimensionCompatibleWithTextureDimension` | `isViewDimensionCompatibleWithTextureDimension` | `src/engine/texture.zig:2020` | port | The compatibility branch at `:133` is the `cube_array` case. The device that owns the profile lands at M16, so the mode is a parameter here. |
+| `src/dawn/native/Texture.cpp:172` | `IsArrayLayerValidForTextureViewDimension` | `isArrayLayerValidForViewDimension` | `src/engine/texture.zig:2009` | port | One switch over the dimension with no `else`, so a dimension added to the enum without a row is a compile error. |
+| `src/dawn/native/Texture.cpp:193` | `ValidateSampleCount` | `validateSampleCount` | `src/engine/texture.zig:1793` | port | Upstream takes the internal usage as a third argument; the port reads the caller's usage off the descriptor, which is the only usage a creation-time check may see. |
+| `src/dawn/native/Texture.cpp:237` | `ValidateTextureViewDimensionCompatibility` | `validateTextureViewDimensionCompatibility` | `src/engine/texture.zig:1971` | port | Takes the resolved descriptor rather than the raw one, so the defaults are filled once and the two halves cannot disagree. |
+| `src/dawn/native/Texture.cpp:265` | the cube-not-square check | `ValidationError` | `src/core/errors.zig:19` | merge | One named error inside the rule above, so M16's re-gate row 6 can reach it by name. |
+| `src/dawn/native/Texture.cpp:269` | the compatibility cube-array check | `ValidationError` | `src/core/errors.zig:19` | merge | The other half of M16's row 6. |
+| `src/dawn/native/Texture.cpp:287` | `ValidateTextureSize` | `validateTextureSize` | `src/engine/texture.zig:1812` | port | The device's limits arrive as `TextureLimits`, four members, because the whole limit table is M7's. |
+| `src/dawn/native/Texture.cpp:294` | the per-dimension maximum extent | `maxExtentFor` | `src/engine/texture.zig:2407` | merge | A switch over the dimension instead of a second switch inside the rule. |
+| `src/dawn/native/Texture.cpp:369` | the mip-level-count limit | `ceilLog2` | `src/engine/texture.zig:2429` | port | The halvings that reach one, plus one. Dawn's `Log2` lives in `Numeric.h`, which M7 owns, so the port writes the count out at the one site that needs it. |
+| `src/dawn/native/Texture.cpp:387` | the unaligned-compression block check | `ValidationError` | `src/core/errors.zig:19` | merge | The feature gate on that line is a feature read. Without the feature Dawn rejects, so the rule the port keeps is the strict one and M7 relaxes it when the feature table lands. |
+| `src/dawn/native/Texture.cpp:402` | `ValidateTextureUsageConstraints` | `validateTextureUsageConstraints` | `src/engine/texture.zig:1742` | port | `compatibility_mode` is a parameter and reads nothing at M11; the row below is the one it would read. |
 | `src/dawn/native/Texture.cpp:410` | `kValidCompressedUsages` | — | — | merge | A three-bit mask spelled out at the one site that tests it. |
 | `src/dawn/native/Texture.cpp:443` | the transient-attachment toggle | — | — | skip | `Toggle::DisableTransientAttachment`. A toggle has no value to read until M7 builds the table, and a rule that cannot read its toggle is not a rule. |
-| `src/dawn/native/Texture.cpp:487` | `GetTextureViewUsage` | `resolveViewUsage` | `src/engine/texture.zig` | port | Two returns: a named usage wins, and a view that names none inherits the texture's. |
+| `src/dawn/native/Texture.cpp:487` | `GetTextureViewUsage` | `resolveViewUsage` | `src/engine/texture.zig:2139` | port | Two returns: a named usage wins, and a view that names none inherits the texture's. |
 | `src/dawn/native/Texture.cpp:499` | the component-swizzle feature gate | — | — | skip | `Feature::TextureComponentSwizzle`. The four calls below stay; the gate does not, for the reason the row above gives. |
-| `src/dawn/native/Texture.cpp:504` | `ValidateComponentSwizzle` (four calls, `:504`-`:507`) | `validateComponentSwizzle` | `src/engine/texture.zig` | merge | Four calls over four components become one function over the struct, with one error name for all four. |
-| `src/dawn/native/Texture.cpp:513` | `ValidateTextureViewUsage` | `validateTextureViewUsage` | `src/engine/texture.zig` | port | The subset check and the transient-attachment refusal at `:523`. |
+| `src/dawn/native/Texture.cpp:504` | `ValidateComponentSwizzle` (four calls, `:504`-`:507`) | `validateComponentSwizzle` | `src/engine/texture.zig:2039` | merge | Four calls over four components become one function over the struct, with one error name for all four. |
+| `src/dawn/native/Texture.cpp:513` | `ValidateTextureViewUsage` | `validateTextureViewUsage` | `src/engine/texture.zig:1944` | port | The subset check and the transient-attachment refusal at `:523`. |
 | `src/dawn/native/Texture.cpp:529` | the second `ValidateTextureUsageConstraints` call inside that rule | — | — | simplify | The port checks the subset and not the inherited usage against the constraint set. A subset of a usage that passed the creation rules passes them again, so the second pass has no case to reject that the first did not. |
-| `src/dawn/native/Texture.cpp:650` | `ResolveDefaultCompatiblityTextureBindingViewDimensionImpl` | `resolveBindingViewDimension` | `src/engine/texture.zig` | merge | The `_Impl` and its wrapper are one function. The port drops Dawn's misspelling of "compatibility" because `AGENTS.md` §2 names things for what they are. |
+| `src/dawn/native/Texture.cpp:650` | `ResolveDefaultCompatiblityTextureBindingViewDimensionImpl` | `resolveBindingViewDimension` | `src/engine/texture.zig:2052` | merge | The `_Impl` and its wrapper are one function. The port drops Dawn's misspelling of "compatibility" because `AGENTS.md` §2 names things for what they are. |
 | `src/dawn/native/Texture.cpp:657` | the flexible-texture-views early return | — | — | skip | `HasFlexibleTextureViews()` reads a feature and the compatibility profile, and M16 owns both. A core device still answers `undefined_` here, which is what upstream answers it. |
 | `src/dawn/native/Texture.cpp:693` | `AddInternalUsages` | — | — | skip | Four additions, each gated on a toggle or a feature. M7 owns the tables and M18, which replays the image, is the first reader. |
-| `src/dawn/native/Texture.cpp:738` | `AdjustViewInternalUsages` | `adjustInternalUsages`, `adjustViewInternalUsages` | `src/engine/texture.zig` | port | Two functions rather than one, one per call site: a texture adjusts its own usage, a view adjusts after it has narrowed the dimension. |
+| `src/dawn/native/Texture.cpp:738` | `AdjustViewInternalUsages` | `adjustInternalUsages`, `adjustViewInternalUsages` | `src/engine/texture.zig:2149`, `src/engine/texture.zig:2165` | port | Two functions rather than one, one per call site: a texture adjusts its own usage, a view adjusts after it has narrowed the dimension. |
 | `src/dawn/native/Texture.cpp:748` | the one-dimensional render-attachment removal | — | — | merge | The second of the two functions above. |
 | `src/dawn/native/Texture.cpp:753` | the storage-usage removal | — | — | merge | The first of the two functions above. |
-| `src/dawn/native/Texture.cpp:785` | `ValidateTextureDescriptor` | `validateTextureDescriptor` | `src/engine/texture.zig` | port | The order is upstream's, so a descriptor that breaks two rules reports the rule upstream reports first. |
-| `src/dawn/native/Texture.cpp:830` | the multi-planar rejection | `error.TextureUsageCompressedFormat` | `src/engine/texture.zig` | port | Upstream reaches the shared-memory branch through a switch arm, so it reuses a texture-usage name. The port has no multi-planar surface to name for, and M21 is where that name would live. |
-| `src/dawn/native/Texture.cpp:838` | `ValidateTextureViewFormatCompatibility` over `viewFormats` | `isViewCompatibleWith` | `src/engine/texture.zig` | merge | The list walk is inlined into the rule; the comparison itself is the shared function, because the view rules read it too. |
-| `src/dawn/native/Texture.cpp:923` | `ValidateTextureViewDescriptor` | `validateTextureViewDescriptor` | `src/engine/texture.zig` | port | Both ranges are checked against the caller's numbers and not the resolved ones: the defaults were filled from the texture and can never exceed it. |
-| `src/dawn/native/Texture.cpp:954` | the missing-aspect rejection | `error.TextureViewAspectMissing` | `src/engine/texture.zig` | merge | With `selectFormatAspects`, which is where the mask is computed. |
-| `src/dawn/native/Texture.cpp:969` | the mip-range rejection | `error.TextureViewMipRangeExceeds` | `src/engine/texture.zig` | port | The rule `test/texture.zig` asserts in its third case. |
-| `src/dawn/native/Texture.cpp:1000` | `GetTextureViewDescriptorWithDefaults` | `resolveViewDescriptor` | `src/engine/texture.zig` | port | Returns a copy, as upstream: the caller's descriptor is never mutated. |
+| `src/dawn/native/Texture.cpp:785` | `ValidateTextureDescriptor` | `validateTextureDescriptor` | `src/engine/texture.zig:1667` | port | The order is upstream's, so a descriptor that breaks two rules reports the rule upstream reports first. |
+| `src/dawn/native/Texture.cpp:830` | the multi-planar rejection | `ValidationError` | `src/core/errors.zig:19` | merge | Upstream reaches the shared-memory branch through a switch arm, so it reuses a texture-usage name. The port has no multi-planar surface to name for, and M21 is where that name would live. |
+| `src/dawn/native/Texture.cpp:838` | `ValidateTextureViewFormatCompatibility` over `viewFormats` | `Format.viewCompatibleWithApi` | `src/engine/format.zig:177` | merge | Canonical format metadata owns view compatibility. The texture validator calls this declaration. |
+| `src/dawn/native/Texture.cpp:923` | `ValidateTextureViewDescriptor` | `validateTextureViewDescriptor` | `src/engine/texture.zig:1866` | port | Both ranges are checked against the caller's numbers and not the resolved ones: the defaults were filled from the texture and can never exceed it. |
+| `src/dawn/native/Texture.cpp:954` | the missing-aspect rejection | `ValidationError` | `src/core/errors.zig:19` | merge | With `selectFormatAspects`, which is where the mask is computed. |
+| `src/dawn/native/Texture.cpp:969` | the mip-range rejection | `ValidationError` | `src/core/errors.zig:19` | merge | The rule `test/texture.zig` asserts in its third case. |
+| `src/dawn/native/Texture.cpp:1000` | `GetTextureViewDescriptorWithDefaults` | `resolveViewDescriptor` | `src/engine/texture.zig:2077` | port | Returns a copy, as upstream: the caller's descriptor is never mutated. |
 | `src/dawn/native/Texture.cpp:1012` | the dimension default | — | — | merge | One arm of the switch inside the resolver above. |
 | `src/dawn/native/Texture.cpp:1064` | the `default:` arm of the layer-count switch | — | — | port | Upstream does not treat it as unreachable and neither does the port: the dimension enum is validated only after the defaults are filled, so `undefined_` reaches this switch. |
-| `src/dawn/native/Texture.cpp:1079` | `IsValidSampleCount` | `isValidSampleCount` | `src/engine/texture.zig` | port | WebGPU has two sample counts and the rule says which. |
-| `src/dawn/native/Texture.cpp:1104` | `TextureBase::TextureBase` | `Texture.create` | `src/engine/texture.zig` | port | Upstream constructs after validation with the format already reified by the device. The port validates first and allocates second, so a rejected descriptor costs one arena block and no store. |
-| `src/dawn/native/Texture.cpp:1116` | the subresource count | `Texture.subresourceCount` | `src/engine/texture.zig` | port | Mip levels times array layers times the aspect count. |
+| `src/dawn/native/Texture.cpp:1079` | `IsValidSampleCount` | `isValidSampleCount` | `src/engine/texture.zig:1632` | port | WebGPU has two sample counts and the rule says which. |
+| `src/dawn/native/Texture.cpp:1104` | `TextureBase::TextureBase` | `Texture.create` | `src/engine/texture.zig:738` | port | Upstream constructs after validation with the format already reified by the device. The port validates first and allocates second, so a rejected descriptor costs one arena block and no store. |
+| `src/dawn/native/Texture.cpp:1116` | the subresource count | `Texture.subresourceCount` | `src/engine/texture.zig:886` | port | Mip levels times array layers times the aspect count. |
 | `src/dawn/native/Texture.cpp:1142` | the error-state constructor | — | — | merge | The port has one constructor and one state: a rejected descriptor leaves the arena object in `failed`, which is what `header.last_error` answers. |
-| `src/dawn/native/Texture.cpp:1168` | `DestroyImpl` | `Texture.destroy` | `src/engine/texture.zig` | simplify | The port drops the store slices. The reference each view holds is what keeps the texture alive, so there is no view list to walk and nothing else to destroy. |
+| `src/dawn/native/Texture.cpp:1168` | `DestroyImpl` | `Texture.destroy` | `src/engine/texture.zig:1233` | simplify | The port drops the store slices. The reference each view holds is what keeps the texture alive, so there is no view list to walk and nothing else to destroy. |
 | `src/dawn/native/Texture.cpp:1196` | `MakeError` | — | — | merge | The `failed` state, with the row above. |
 | `src/dawn/native/Texture.cpp:1201` | `GetType` | — | — | skip | The kind is the arena's field, read once by `resolveHeader` (`src/core/device.zig:134`). |
 | `src/dawn/native/Texture.cpp:1232` | `GetSizeLabel` | — | — | skip | A debug label, read by no rule and no replay. |
-| `src/dawn/native/Texture.cpp:1247` | `GetDimension` | `Texture.getDimension` | `src/engine/texture.zig` | port | A field read in both. |
-| `src/dawn/native/Texture.cpp:1252` | `GetCompatibilityTextureBindingViewDimension` | `Texture.getBindingViewDimension` | `src/engine/texture.zig` | port | With the row that resolves it. |
-| `src/dawn/native/Texture.cpp:1257` | `GetFormat` | `Texture.getFormat`, `Texture.getFormatInfo` | `src/engine/texture.zig` | merge | Two readers of one field: the replay wants the enum and the rules want the block size. |
-| `src/dawn/native/Texture.cpp:1261` | `GetViewFormats` | `Texture.isViewFormatListed` | `src/engine/texture.zig` | simplify | A scan over a slice, not a set: the list holds at most the formats the caller declared at creation. |
-| `src/dawn/native/Texture.cpp:1266` | `GetBaseSize` | `Texture.getBaseSize` | `src/engine/texture.zig` | port | For a multi-planar format this is plane 0 upstream; the port rejects multi-planar creation, so no other plane has a size here. |
+| `src/dawn/native/Texture.cpp:1247` | `GetDimension` | `Texture.getDimension` | `src/engine/texture.zig:811` | port | A field read in both. |
+| `src/dawn/native/Texture.cpp:1252` | `GetCompatibilityTextureBindingViewDimension` | `Texture.getBindingViewDimension` | `src/engine/texture.zig:846` | port | With the row that resolves it. |
+| `src/dawn/native/Texture.cpp:1257` | `GetFormat` | `Texture.getFormat`, `Texture.getFormatInfo` | `src/engine/texture.zig:818`, `src/engine/texture.zig:825` | merge | Two readers of one field: the replay wants the enum and the rules want the block size. |
+| `src/dawn/native/Texture.cpp:1261` | `GetViewFormats` | `Texture.isViewFormatListed` | `src/engine/texture.zig:1176` | simplify | A scan over a slice, not a set: the list holds at most the formats the caller declared at creation. |
+| `src/dawn/native/Texture.cpp:1266` | `GetBaseSize` | `Texture.getBaseSize` | `src/engine/texture.zig:853` | port | For a multi-planar format this is plane 0 upstream; the port rejects multi-planar creation, so no other plane has a size here. |
 | `src/dawn/native/Texture.cpp:1271`, `:1312` | `GetSize` (both overloads) | — | — | skip | The plane-size rules belong to the shared-memory surface, and without a second plane the question has one answer, which is the base size. |
-| `src/dawn/native/Texture.cpp:1316` | `GetWidth` | `Texture.getWidth` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1320` | `GetHeight` | `Texture.getHeight` | `src/engine/texture.zig` | port | |
+| `src/dawn/native/Texture.cpp:1316` | `GetWidth` | `Texture.getWidth` | `src/engine/texture.zig:858` | port | |
+| `src/dawn/native/Texture.cpp:1320` | `GetHeight` | `Texture.getHeight` | `src/engine/texture.zig:863` | port | |
 | `src/dawn/native/Texture.cpp:1324` | `GetDepth` | — | — | merge | A 3D texture's depth is a mip dimension, so `getArrayLayers` and the mip arithmetic answer it between them. |
-| `src/dawn/native/Texture.cpp:1329` | `GetArrayLayers` | `Texture.getArrayLayers` | `src/engine/texture.zig` | port | A 3D texture has one layer however deep it is. |
-| `src/dawn/native/Texture.cpp:1336` | `GetNumMipLevels` | `Texture.getNumMipLevels` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1340` | `GetAllSubresources` | `Texture.getAllSubresources` | `src/engine/texture.zig` | port | The aspects come from the format rather than from a default, so the range is total for the format. |
-| `src/dawn/native/Texture.cpp:1344` | `GetSampleCount` | `Texture.getSampleCount` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1348` | `GetSubresourceCount` | `Texture.subresourceCount` | `src/engine/texture.zig` | port | The mip level varies fastest, then the array layer, then the aspect. |
-| `src/dawn/native/Texture.cpp:1352` | `GetUsage` | `Texture.getUsage` | `src/engine/texture.zig` | port | The caller's usage, without what the engine adds for itself. |
-| `src/dawn/native/Texture.cpp:1356` | `GetInternalUsage` | `Texture.getInternalUsage` | `src/engine/texture.zig` | port | The two differ only in what `adjustInternalUsages` removes, because the port adds no usage a toggle does not ask for. |
+| `src/dawn/native/Texture.cpp:1329` | `GetArrayLayers` | `Texture.getArrayLayers` | `src/engine/texture.zig:869` | port | A 3D texture has one layer however deep it is. |
+| `src/dawn/native/Texture.cpp:1336` | `GetNumMipLevels` | `Texture.getNumMipLevels` | `src/engine/texture.zig:875` | port | |
+| `src/dawn/native/Texture.cpp:1340` | `GetAllSubresources` | `Texture.getAllSubresources` | `src/engine/texture.zig:907` | port | The aspects come from the format rather than from a default, so the range is total for the format. |
+| `src/dawn/native/Texture.cpp:1344` | `GetSampleCount` | `Texture.getSampleCount` | `src/engine/texture.zig:880` | port | |
+| `src/dawn/native/Texture.cpp:1348` | `GetSubresourceCount` | `Texture.subresourceCount` | `src/engine/texture.zig:886` | port | The mip level varies fastest, then the array layer, then the aspect. |
+| `src/dawn/native/Texture.cpp:1352` | `GetUsage` | `Texture.getUsage` | `src/engine/texture.zig:895` | port | The caller's usage, without what the engine adds for itself. |
+| `src/dawn/native/Texture.cpp:1356` | `GetInternalUsage` | `Texture.getInternalUsage` | `src/engine/texture.zig:902` | port | The two differ only in what `adjustInternalUsages` removes, because the port adds no usage a toggle does not ask for. |
 | `src/dawn/native/Texture.cpp:1361` | `AddInternalUsage` | — | — | skip | With `AddInternalUsages`. |
 | `src/dawn/native/Texture.cpp:1366`, `:1371`, `:1375` | `IsDestroyed`, `IsResourceInitialized`, `SetInitialized` | — | — | skip | The arena answers the first from the object state, and the port's store is zeroed by construction, so the other two have nothing to decide. |
 | `src/dawn/native/Texture.cpp:1379`, `:1390`, `:1396` | `OnEndAccess`, `OnBeginAccess`, `HasAccess` | — | — | skip | The GPU timeline. M9 builds it and M18 is the first reader of a texture's end-of-access. |
-| `src/dawn/native/Texture.cpp:1401` | `GetSubresourceIndex` | `Texture.subresourceIndex`, `Texture.aspectIndex` | `src/engine/texture.zig` | merge | One index and the aspect position it reads. |
-| `src/dawn/native/Texture.cpp:1408` | `IsSubresourceContentInitialized` | `Texture.isSubresourceContentInitialized` | `src/engine/texture.zig` | port | One flag per subresource and an index that can never leave the table, because the range was validated first. |
-| `src/dawn/native/Texture.cpp:1426` | `SetIsSubresourceContentInitialized` | `Texture.setSubresourceContentInitialized` | `src/engine/texture.zig` | port | |
+| `src/dawn/native/Texture.cpp:1401` | `GetSubresourceIndex` | `Texture.subresourceIndex`, `Texture.aspectIndex` | `src/engine/texture.zig:932`, `src/engine/texture.zig:926` | merge | One index and the aspect position it reads. |
+| `src/dawn/native/Texture.cpp:1408` | `IsSubresourceContentInitialized` | `Texture.isSubresourceContentInitialized` | `src/engine/texture.zig:1086` | port | One flag per subresource and an index that can never leave the table, because the range was validated first. |
+| `src/dawn/native/Texture.cpp:1426` | `SetIsSubresourceContentInitialized` | `Texture.setSubresourceContentInitialized` | `src/engine/texture.zig:1104` | port | |
 | `src/dawn/native/Texture.cpp:1449` | `ValidateCanUseInSubmitNow` | — | — | skip | A submit-time check over the lazy-clear state, and M18 owns the first submit. |
-| `src/dawn/native/Texture.cpp:1475` | `IsMultisampledTexture` | `Texture.isMultisampledTexture` | `src/engine/texture.zig` | port | |
+| `src/dawn/native/Texture.cpp:1475` | `IsMultisampledTexture` | `Texture.isMultisampledTexture` | `src/engine/texture.zig:918` | port | |
 | `src/dawn/native/Texture.cpp:1480` | `IsReadOnly` | — | — | skip | Reads the flag the toggle table owns. M7. |
-| `src/dawn/native/Texture.cpp:1484` | `CoversFullSubresource` | `Texture.coversFullSubresource` | `src/engine/texture.zig` | port | Compared against the physical size, because a copy of a compressed subresource names whole blocks. |
-| `src/dawn/native/Texture.cpp:1501` | `GetMipLevelSingleSubresourceVirtualSize` | `Texture.getMipLevelSingleSubresourceVirtualSize` | `src/engine/texture.zig` | port | Every dimension halves per level and stops at one. |
-| `src/dawn/native/Texture.cpp:1517` | `GetMipLevelSingleSubresourcePhysicalSize` | `Texture.getMipLevelSingleSubresourcePhysicalSize`, `roundUpToBlocks` | `src/engine/texture.zig` | merge | The block padding is one helper so both physical-size readers share it and cannot round differently. |
+| `src/dawn/native/Texture.cpp:1484` | `CoversFullSubresource` | `Texture.coversFullSubresource` | `src/engine/texture.zig:1069` | port | Compared against the physical size, because a copy of a compressed subresource names whole blocks. |
+| `src/dawn/native/Texture.cpp:1501` | `GetMipLevelSingleSubresourceVirtualSize` | `Texture.getMipLevelSingleSubresourceVirtualSize` | `src/engine/texture.zig:1011` | port | Every dimension halves per level and stops at one. |
+| `src/dawn/native/Texture.cpp:1517` | `GetMipLevelSingleSubresourcePhysicalSize` | `Texture.getMipLevelSingleSubresourcePhysicalSize`, `roundUpToBlocks` | `src/engine/texture.zig:1048`, `src/engine/texture.zig:2442` | merge | The block padding is one helper so both physical-size readers share it and cannot round differently. |
 | `src/dawn/native/Texture.cpp:1535` | `ClampToMipLevelVirtualSize` | — | — | skip | The copy path validates a range rather than clamping one, so a caller never sees a silently shortened copy. |
-| `src/dawn/native/Texture.cpp:1551` | `GetMipLevelSubresourceVirtualSize` | `Texture.getMipLevelSubresourceVirtualSize` | `src/engine/texture.zig` | port | The difference from the single-subresource size is the array layer count, which never halves with the level. |
-| `src/dawn/native/Texture.cpp:1559` | `GetMipLevelSubresourcePhysicalSize` | `Texture.getMipLevelSubresourcePhysicalSize` | `src/engine/texture.zig` | port | The reader the linear copy sizes its destination against. |
-| `src/dawn/native/Texture.cpp:1577` | `CreateView` | `Texture.createView` | `src/engine/texture.zig` | port | |
+| `src/dawn/native/Texture.cpp:1551` | `GetMipLevelSubresourceVirtualSize` | `Texture.getMipLevelSubresourceVirtualSize` | `src/engine/texture.zig:1034` | port | The difference from the single-subresource size is the array layer count, which never halves with the level. |
+| `src/dawn/native/Texture.cpp:1559` | `GetMipLevelSubresourcePhysicalSize` | `Texture.getMipLevelSubresourcePhysicalSize` | `src/engine/texture.zig:1059` | port | The reader the linear copy sizes its destination against. |
+| `src/dawn/native/Texture.cpp:1577` | `CreateView` | `Texture.createView` | `src/engine/texture.zig:1121` | port | |
 | `src/dawn/native/Texture.cpp:1585` | `CreateErrorView` | — | — | merge | The `failed` state, with the row above. |
 | `src/dawn/native/Texture.cpp:1589` | `GetViewTrackingList` | — | — | skip | The arena owns the object list and the tracking pointer with it. |
 | `src/dawn/native/Texture.cpp:1593` | `APICreateView` | — | — | merge | The rule is the port's; there is no wrapper that only forwards. |
@@ -4755,84 +5025,84 @@ linear store its copies read and write, and the image behind it is M18's.
 | `src/dawn/native/Texture.cpp:1613`, `:1629` | `DumpMemoryStatistics`, `ComputeEstimatedByteSize` | — | — | skip | The memory dump. The store's size is `bytes.len`, which is the number the dump would print. |
 | `src/dawn/native/Texture.cpp:1652` | `GetOrCreateDefaultView` | — | — | skip | The default view is the resolved empty descriptor, and the milestone that asks for a default view creates one from that descriptor. |
 | `src/dawn/native/Texture.cpp:1666`, `:1671` | `UseDeviceGuardForDestroy`, `APIDestroy` | — | — | merge | The arena destroys the object and the device deinit reclaims the block. |
-| `src/dawn/native/Texture.cpp:1677`-`:1708` | the eight `APIGet*` accessors | the eight `Texture.get*` | `src/engine/texture.zig` | merge | Each is a field read upstream and a field read in the port; only the name changes, from `APIGet` to `get`. |
+| `src/dawn/native/Texture.cpp:1677`-`:1708` | the eight `APIGet*` accessors | `Texture.getWidth`, `Texture.getHeight`, `Texture.getArrayLayers`, `Texture.getNumMipLevels`, `Texture.getSampleCount`, `Texture.getDimension`, `Texture.getFormat`, `Texture.getUsage` | `src/engine/texture.zig:858`, `src/engine/texture.zig:863`, `src/engine/texture.zig:869`, `src/engine/texture.zig:875`, `src/engine/texture.zig:880`, `src/engine/texture.zig:811`, `src/engine/texture.zig:818`, `src/engine/texture.zig:895` | merge | Each is a field read upstream and a field read in the port; only the name changes, from `APIGet` to `get`. |
 | `src/dawn/native/Texture.cpp:1712`, `:1718`, `:1724`, `:1732` | the four resource-table hooks | — | — | skip | The resource table. M12 owns it and is the first reader. |
 | `src/dawn/native/Texture.cpp:1741` | `APISetOwnershipForMemoryDump` | — | — | skip | With the memory dump. |
-| `src/dawn/native/Texture.cpp:1786` | `TextureViewBase::TextureViewBase` | `TextureView` fields | `src/engine/texture.zig` | port | The private members are public fields; the range, the aspects and the swizzle are written from the resolved descriptor, never from the caller's numbers. |
+| `src/dawn/native/Texture.cpp:1786` | `TextureViewBase::TextureViewBase` | `TextureView` fields | `src/engine/texture.zig:1260` | port | The private members are public fields; the range, the aspects and the swizzle are written from the resolved descriptor, never from the caller's numbers. |
 | `src/dawn/native/Texture.cpp:1819` | the view error-state constructor | — | — | merge | The `failed` state. |
-| `src/dawn/native/Texture.cpp:1824` | `TextureViewBase::DestroyImpl` | `TextureView.destroy` | `src/engine/texture.zig` | simplify | Upstream's body is empty because the texture owns the reference. The port's release *is* that reference going, so the function has one statement instead of none. |
-| `src/dawn/native/Texture.cpp:1857` | `GetTexture` | `TextureView.getTexture` | `src/engine/texture.zig` | port | The `const` overload at `:1852` is the same field and merges with it. |
-| `src/dawn/native/Texture.cpp:1862` | `GetAspects` | `TextureView.getAspects` | `src/engine/texture.zig` | port | The aspects are the format's mask narrowed by the descriptor's aspect, not the descriptor's aspect alone. |
-| `src/dawn/native/Texture.cpp:1867` | `GetFormat` | `TextureView.getFormat`, `TextureView.getFormatInfo` | `src/engine/texture.zig` | merge | As on the texture: the enum for the replay and the block facts for the rules. |
-| `src/dawn/native/Texture.cpp:1872` | `GetDimension` | `TextureView.getDimension` | `src/engine/texture.zig` | port | The resolved dimension, which may differ from the texture's. |
-| `src/dawn/native/Texture.cpp:1877` | `GetBaseMipLevel` | `TextureView.getBaseMipLevel` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1882` | `GetLevelCount` | `TextureView.getLevelCount` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1887` | `GetBaseArrayLayer` | `TextureView.getBaseArrayLayer` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1892` | `GetLayerCount` | `TextureView.getLayerCount` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1897` | `GetSubresourceRange` | `TextureView.getSubresourceRange` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1907` | `GetUsage` | `TextureView.getUsage` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1912` | `GetInternalUsage` | `TextureView.getInternalUsage` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1917` | `GetSwizzle` | `TextureView.getSwizzle` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/Texture.cpp:1926` | `IsSwizzleIdentity` | `TextureView.isSwizzleIdentity` | `src/engine/texture.zig` | simplify | Upstream caches the answer in a flag at construction (`:1814`). The port compares the four components, because nothing can change them after creation and a second copy of a field is a field that can go stale. |
+| `src/dawn/native/Texture.cpp:1824` | `TextureViewBase::DestroyImpl` | `TextureView.destroy` | `src/engine/texture.zig:1473` | simplify | Upstream's body is empty because the texture owns the reference. The port's release *is* that reference going, so the function has one statement instead of none. |
+| `src/dawn/native/Texture.cpp:1857` | `GetTexture` | `TextureView.getTexture` | `src/engine/texture.zig:1401` | port | The `const` overload at `:1852` is the same field and merges with it. |
+| `src/dawn/native/Texture.cpp:1862` | `GetAspects` | `TextureView.getAspects` | `src/engine/texture.zig:1421` | port | The aspects are the format's mask narrowed by the descriptor's aspect, not the descriptor's aspect alone. |
+| `src/dawn/native/Texture.cpp:1867` | `GetFormat` | `TextureView.getFormat`, `TextureView.getFormatInfo` | `src/engine/texture.zig:1406`, `src/engine/texture.zig:1411` | merge | As on the texture: the enum for the replay and the block facts for the rules. |
+| `src/dawn/native/Texture.cpp:1872` | `GetDimension` | `TextureView.getDimension` | `src/engine/texture.zig:1416` | port | The resolved dimension, which may differ from the texture's. |
+| `src/dawn/native/Texture.cpp:1877` | `GetBaseMipLevel` | `TextureView.getBaseMipLevel` | `src/engine/texture.zig:1426` | port | |
+| `src/dawn/native/Texture.cpp:1882` | `GetLevelCount` | `TextureView.getLevelCount` | `src/engine/texture.zig:1431` | port | |
+| `src/dawn/native/Texture.cpp:1887` | `GetBaseArrayLayer` | `TextureView.getBaseArrayLayer` | `src/engine/texture.zig:1436` | port | |
+| `src/dawn/native/Texture.cpp:1892` | `GetLayerCount` | `TextureView.getLayerCount` | `src/engine/texture.zig:1441` | port | |
+| `src/dawn/native/Texture.cpp:1897` | `GetSubresourceRange` | `TextureView.getSubresourceRange` | `src/engine/texture.zig:1446` | port | |
+| `src/dawn/native/Texture.cpp:1907` | `GetUsage` | `TextureView.getUsage` | `src/engine/texture.zig:1451` | port | |
+| `src/dawn/native/Texture.cpp:1912` | `GetInternalUsage` | `TextureView.getInternalUsage` | `src/engine/texture.zig:1456` | port | |
+| `src/dawn/native/Texture.cpp:1917` | `GetSwizzle` | `TextureView.getSwizzle` | `src/engine/texture.zig:1461` | port | |
+| `src/dawn/native/Texture.cpp:1926` | `IsSwizzleIdentity` | `TextureView.isSwizzleIdentity` | `src/engine/texture.zig:1467` | simplify | Upstream caches the answer in a flag at construction (`:1814`). The port compares the four components, because nothing can change them after creation and a second copy of a field is a field that can go stale. |
 | `src/dawn/native/Texture.cpp:1930`, `:1934`, `:1939` | `IsYCbCr`, `HasYCbCrDescriptor`, `IsYCbCrFilterable` | — | — | skip | The YCbCr descriptor chain is Vulkan-only and its rules are gated on `Feature::YCbCrVulkanSamplers`, which the feature table owns. M7 owns the gate; M18 owns the replay. |
 
 ### `src/dawn/native/Texture.h` — the members the rules read
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Texture.h:85` | `kRGBASwizzle` | `identitySwizzle` | `src/engine/texture.zig` | port | The four components a swizzle that changes nothing names. |
-| `src/dawn/native/Texture.h:298` | `mViewFormats` | `Texture.view_formats` | `src/engine/texture.zig` | port | Copied into the arena, because the descriptor's slice belongs to the caller and does not outlive the call. |
-| `src/dawn/native/Texture.h:319` | `mIsSubresourceContentInitializedAtIndex` | `Texture.initialized` | `src/engine/texture.zig` | port | One flag per subresource, allocated and zeroed with the offsets table. |
-| `src/dawn/native/Texture.h:341` | `class TextureViewBase` | `TextureView` | `src/engine/texture.zig` | port | The private members become public fields (`docs/10-architecture.md`, Object model), and the accessors below are the named reads the callers use. |
-| `src/dawn/native/Texture.h:388` | `Ref<TextureBase> mTexture` | `TextureView.texture` with `header.retain` | `src/engine/texture.zig` | port | The arena has no reference counter, so the view holds the arena block alive for as long as the view object lives. Dawn spells the same thing with that one word. |
+| `src/dawn/native/Texture.h:85` | `kRGBASwizzle` | `identitySwizzle` | `src/engine/texture.zig:1571` | port | The four components a swizzle that changes nothing names. |
+| `src/dawn/native/Texture.h:298` | `mViewFormats` | `Texture.view_formats` | `src/engine/texture.zig:264` | port | Copied into the arena, because the descriptor's slice belongs to the caller and does not outlive the call. |
+| `src/dawn/native/Texture.h:319` | `mIsSubresourceContentInitializedAtIndex` | `Texture.initialized` | `src/engine/texture.zig:277` | port | One flag per subresource, allocated and zeroed with the offsets table. |
+| `src/dawn/native/Texture.h:341` | `class TextureViewBase` | `TextureView` | `src/engine/texture.zig:1260` | port | The private members become public fields (`docs/10-architecture.md`, Object model), and the accessors below are the named reads the callers use. |
+| `src/dawn/native/Texture.h:388` | `Ref<TextureBase> mTexture` | `TextureView.texture` | `src/engine/texture.zig:1263` | port | The arena has no reference counter, so the view holds the arena block alive for as long as the view object lives. Dawn spells the same thing with that one word. |
 | `src/dawn/native/Texture.h:399` | `mIsSwizzleIdentity` | — | — | skip | The row that computes the answer on demand instead. |
 
 ### `src/dawn/native/Subresource.h` — the aspect and the range
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Subresource.h:39` | `enum class Aspect` | `Aspect` | `src/engine/texture.zig` | port | The enumerators keep upstream's values, so the bit order `subresourceIndex` counts is upstream's and a mask built elsewhere means the same thing. |
-| `src/dawn/native/Subresource.h:72` | `SelectFormatAspects` | `selectFormatAspects` | `src/engine/texture.zig` | port | A public aspect selects a mask, and a format with no such aspect selects none, which is the rejection at `Texture.cpp:954`. |
-| `src/dawn/native/Subresource.h:88` | `struct SubresourceRange` | `SubresourceRange` | `src/engine/texture.zig` | port | The aspects are the mask the format already holds, so the range carries one type where upstream carries the format and the mask. |
-| `src/dawn/native/Subresource.h:111` | `GetAspectIndex` | `aspectIndexIn` | `src/engine/texture.zig` | port | An absent aspect answers one past the last present one, so two aspects cannot alias one subresource. |
+| `src/dawn/native/Subresource.h:39` | `enum class Aspect` | `Aspect` | `src/engine/texture.zig:113` | port | The enumerators keep upstream's values, so the bit order `subresourceIndex` counts is upstream's and a mask built elsewhere means the same thing. |
+| `src/dawn/native/Subresource.h:72` | `SelectFormatAspects` | `selectFormatAspects` | `src/engine/texture.zig:1608` | port | A public aspect selects a mask, and a format with no such aspect selects none, which is the rejection at `Texture.cpp:954`. |
+| `src/dawn/native/Subresource.h:88` | `struct SubresourceRange` | `SubresourceRange` | `src/engine/texture.zig:192` | port | The aspects are the mask the format already holds, so the range carries one type where upstream carries the format and the mask. |
+| `src/dawn/native/Subresource.h:111` | `GetAspectIndex` | `aspectIndexIn` | `src/engine/texture.zig:2458` | port | An absent aspect answers one past the last present one, so two aspects cannot alias one subresource. |
 | `src/dawn/native/Subresource.cpp` | the range constructors | — | — | skip | Six spellings of one aggregate in the port: the range is built from the resolved descriptor and nowhere else. |
 
 ### `src/dawn/native/Format.cpp` — one comparison
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Format.cpp:135` | `Format::ViewCompatibleWith` | `isViewCompatibleWith` | `src/engine/texture.zig` | port | Two formats are view compatible when they share a base format, which is why the srgb variants of one format are not view compatible with each other. |
+| `src/dawn/native/Format.cpp:135` | `Format::ViewCompatibleWith` | `Format.viewCompatibleWithApi` | `src/engine/format.zig:177` | merge | Canonical format metadata owns view compatibility. The texture validator calls this declaration. |
 
 ### `src/dawn/native/CommandValidation.cpp` — the linear copy rules
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/common/Constants.h:44` | `kTextureBytesPerRowAlignment` | `texture_bytes_per_row_alignment` | `src/engine/texture.zig` | port | A `u32` constant named for what it is. It is the alignment a Vulkan `bufferRowLength` in texels has to honour, so it belongs to the queue and not to the copy. |
+| `src/dawn/common/Constants.h:44` | `kTextureBytesPerRowAlignment` | `texture_bytes_per_row_alignment` | `src/engine/texture.zig:109` | port | A `u32` constant named for what it is. It is the alignment a Vulkan `bufferRowLength` in texels has to honour, so it belongs to the queue and not to the copy. |
 | `src/dawn/native/CommandValidation.cpp:249` | the `TexelBlockInfo` overload of `ComputeRequiredBytesInCopy` | — | — | merge | The port has one overload, over the format's block size, because the block facts already arrive as one `FormatInfo`. |
-| `src/dawn/native/CommandValidation.cpp:295` | the `TypedTexelBlockInfo` overload | `computeRequiredBytesInCopy` | `src/engine/texture.zig` | port | Every image but the last contributes a whole stride; the last contributes the bytes its last row holds. |
-| `src/dawn/native/CommandValidation.cpp:345` | `ApplyDefaultTexelCopyBufferLayoutOptions` | `applyDefaultLayout` | `src/engine/texture.zig` | port | The default pitch is the row length rounded up to 256, which is why a four-row sixteen-byte copy touches 784 bytes and not 64. |
+| `src/dawn/native/CommandValidation.cpp:295` | the `TypedTexelBlockInfo` overload | `computeRequiredBytesInCopy` | `src/engine/texture.zig:2215` | port | Every image but the last contributes a whole stride; the last contributes the bytes its last row holds. |
+| `src/dawn/native/CommandValidation.cpp:345` | `ApplyDefaultTexelCopyBufferLayoutOptions` | `applyDefaultLayout` | `src/engine/texture.zig:2181` | port | The default pitch is the row length rounded up to 256, which is why a four-row sixteen-byte copy touches 784 bytes and not 64. |
 | `src/dawn/native/CommandValidation.cpp:366` | `ValidateLinearTextureData` | — | — | merge | The four checks are inlined into `resolveCopy`, because each of them reads the copy's own numbers and there is nothing to pass. |
-| `src/dawn/native/CommandValidation.cpp:423` | `ValidateTexelCopyBufferInfo` | `resolveCopy` | `src/engine/texture.zig` | port | |
-| `src/dawn/native/CommandValidation.cpp:432` | the `bytesPerRow % alignment` check | `error.CopyBytesPerRowNotAligned` | `src/engine/texture.zig` | port | Upstream reads the alignment from `texelCopyBufferRowAlignmentLimits` under `Feature::DawnTexelCopyBufferRowAlignment`. The port fixes it at the constant, which is the floor that feature may not go below, so every pitch the port accepts is one Dawn accepts. |
-| `src/dawn/native/CommandValidation.cpp:440` | `ValidateTexelCopyTextureInfo` | `resolveCopy` | `src/engine/texture.zig` | port | The mip level, the aspect and the multisample whole-subresource requirement. |
-| `src/dawn/native/CommandValidation.cpp:475` | `ValidateTextureCopyRange` | `validateCopyOrigin` | `src/engine/texture.zig` | port | Three `u64` additions, one per dimension, which is what makes the sums safe on a 32-bit extent. |
+| `src/dawn/native/CommandValidation.cpp:423` | `ValidateTexelCopyBufferInfo` | `resolveCopy` | `src/engine/texture.zig:2258` | port | |
+| `src/dawn/native/CommandValidation.cpp:432` | the `bytesPerRow % alignment` check | `ValidationError` | `src/core/errors.zig:19` | merge | Upstream reads the alignment from `texelCopyBufferRowAlignmentLimits` under `Feature::DawnTexelCopyBufferRowAlignment`. The port fixes it at the constant, which is the floor that feature may not go below, so every pitch the port accepts is one Dawn accepts. |
+| `src/dawn/native/CommandValidation.cpp:440` | `ValidateTexelCopyTextureInfo` | `resolveCopy` | `src/engine/texture.zig:2258` | port | The mip level, the aspect and the multisample whole-subresource requirement. |
+| `src/dawn/native/CommandValidation.cpp:475` | `ValidateTextureCopyRange` | `validateCopyOrigin` | `src/engine/texture.zig:2326` | port | Three `u64` additions, one per dimension, which is what makes the sums safe on a 32-bit extent. |
 
 ### `src/dawn/native/Queue.cpp` and `CommandEncoder.cpp` — the three copy entry points
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Queue.cpp:344` | `QueueBase::APIWriteTexture` | `Texture.writeTexture` | `src/engine/texture.zig` | port | The front end holds no Vulkan, so the write lands in the linear store the texture owns and needs no staging buffer. |
+| `src/dawn/native/Queue.cpp:344` | `QueueBase::APIWriteTexture` | `Texture.writeTexture` | `src/engine/texture.zig:1191` | port | The front end holds no Vulkan, so the write lands in the linear store the texture owns and needs no staging buffer. |
 | `src/dawn/native/Queue.cpp:375` | `QueueBase::WriteTextureImpl` | — | — | skip | The staging buffer and the upload. M10 builds the uploader and M18 replays the image. |
 | `src/dawn/native/Queue.cpp:556` | `QueueBase::ValidateWriteTexture` | — | — | merge | The four validators below, run against the store's length instead of a staging buffer's. |
-| `src/dawn/native/CommandEncoder.cpp:1956` | `CommandEncoder::APICopyTextureToBuffer` | `Texture.copyTextureToBuffer` | `src/engine/texture.zig` | port | The encoder records the command; the front end's own store is the source, so the copy is the record. |
+| `src/dawn/native/CommandEncoder.cpp:1956` | `CommandEncoder::APICopyTextureToBuffer` | `Texture.copyTextureToBuffer` | `src/engine/texture.zig:1214` | port | The encoder records the command; the front end's own store is the source, so the copy is the record. |
 | `src/dawn/native/CommandEncoder.cpp:1845` | `CommandEncoder::APICopyBufferToTexture` | — | — | skip | The buffer-side source is M10's upload path, and the move is `writeTexture` with the two roles swapped. |
 
 ### `src/dawn/native/TexelBufferView.cpp` — the two format rules
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/TexelBufferView.cpp:39` | `IsFormatSupportedForTexelBuffer` | `formatSupportedForTexelBuffer` | `src/engine/texture.zig` | port | The twelve formats the texel-buffer proposal names, spelled out so a format added to the enum without a row is a compile error. |
-| `src/dawn/native/TexelBufferView.cpp:59` | `ValidateTexelBufferFormat` | `validateTexelBufferFormat` | `src/engine/texture.zig` | port | Two rules: undefined, then unsupported. |
+| `src/dawn/native/TexelBufferView.cpp:39` | `IsFormatSupportedForTexelBuffer` | `formatSupportedForTexelBuffer` | `src/engine/texture.zig:1638` | port | The twelve formats the texel-buffer proposal names, spelled out so a format added to the enum without a row is a compile error. |
+| `src/dawn/native/TexelBufferView.cpp:59` | `ValidateTexelBufferFormat` | `validateTexelBufferFormat` | `src/engine/texture.zig:1658` | port | Two rules: undefined, then unsupported. |
 | `src/dawn/native/TexelBufferView.cpp:96`-`:116` | the six `TexelBufferViewBase` accessors | — | — | skip | The object is created by `BufferBase::CreateTexelBufferView`, which lands with the buffer at M10. The two rules above are here because the rules in this file read them. |
 
 ### `src/dawn/native/Sampler.{h,cpp}` — the sampler
@@ -4895,129 +5165,137 @@ lines between them and land with the milestone that has a bindless path to
 drive them; nothing at M12 writes a descriptor, so a resource table has no
 caller.
 
-**The content-hash dedup is M14's row.** `BindGroupLayout.cpp` hands the packed
-layout to a `ContentLessObjectCache` keyed on `ComputeContentHash`, which makes
-two equal layouts the same object. The port computes the hash and the equality
-it keys on (`BindGroupLayout.contentHash`, `isLayoutEqual`) and builds no
-cache. `layout_vk.zig`'s header names this, and the reason is M14's device-wide
-object cache, not a missing row.
+**Live native dedup.** The device weak bind-group-layout index now uses packed layout hash and full equality.
+`native_resources.createBindGroupLayout` also compares validation counts and compatibility tokens before it acquires a user alias.
+Logical binding numbers survive descriptor entry reordering.
+The low-level layout builder remains separate from this device-owned lifetime contract.
 
 #### `native/BindGroupLayout.{h,cpp}` — the frontend layout
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/BindGroupLayout.h:41` | `class BindGroupLayoutBase` | `BindGroupLayout` | `src/pipeline/bind_group_layout.zig` | merge | `ApiObjectBase` inheritance becomes a plain struct; `Ref<BindGroupLayoutInternalBase>` (`:47`) becomes an owned `layout_internal.Layout` by value, because `AGENTS.md` §1 fixes the allocator as a parameter and the arena as M3's, not this file's. |
-| `src/dawn/native/BindGroupLayout.h:56` | `BindGroupLayoutBase::GetPipelineCompatibilityToken` | `BindGroupLayout.pipelineCompatibilityToken` | `src/pipeline/bind_group_layout.zig` | port | Reads the stored token. The `TypedInteger` wrapper over `u64` (`IntegerTypes.h:139`) is dropped: the wrapper exists to stop a token comparing against an id, and a bare `u64` cannot be compared against anything else at a call site the type checker sees. |
-| `src/dawn/native/BindGroupLayout.h:53` | `BindGroupLayoutBase::GetInternalBindGroupLayout` | `BindGroupLayout.internal` | `src/pipeline/bind_group_layout.zig` | simplify | A private field with one reader upstream. The port needs the packed layout at the Vulkan call site, so the field is public rather than a second accessor pair. |
-| `src/dawn/native/BindGroupLayout.h:54` | `BindGroupLayoutBase::IsLayoutEqual` | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig` | port | The token first, then the internal layout. `exclude_compatibility_token` is what the implicit-layout cache needs (`Device.cpp:2152`), where a pipeline may reach its own deduced layout through a different token. |
+| `src/dawn/native/BindGroupLayout.h:41` | `class BindGroupLayoutBase` | `BindGroupLayout` | `src/pipeline/bind_group_layout.zig:90` | merge | `ApiObjectBase` inheritance becomes a plain struct; `Ref<BindGroupLayoutInternalBase>` (`:47`) becomes an owned `layout_internal.Layout` by value, because `AGENTS.md` §1 fixes the allocator as a parameter and the arena as M3's, not this file's. |
+| `src/dawn/native/BindGroupLayout.h:56` | `BindGroupLayoutBase::GetPipelineCompatibilityToken` | `BindGroupLayout.pipelineCompatibilityToken` | `src/pipeline/bind_group_layout.zig:121` | port | Reads the stored token. The `TypedInteger` wrapper over `u64` (`IntegerTypes.h:139`) is dropped: the wrapper exists to stop a token comparing against an id, and a bare `u64` cannot be compared against anything else at a call site the type checker sees. |
+| `src/dawn/native/BindGroupLayout.h:53` | `BindGroupLayoutBase::GetInternalBindGroupLayout` | `BindGroupLayout.internal` | `src/pipeline/bind_group_layout.zig:91` | simplify | A private field with one reader upstream. The port needs the packed layout at the Vulkan call site, so the field is public rather than a second accessor pair. |
+| `src/dawn/native/BindGroupLayout.h:54` | `BindGroupLayoutBase::IsLayoutEqual` | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig:131` | port | The token first, then the internal layout. `exclude_compatibility_token` is what the implicit-layout cache needs (`Device.cpp:2152`), where a pipeline may reach its own deduced layout through a different token. |
 | `src/dawn/native/BindGroupLayout.h:50` | `BindGroupLayoutBase::GetType` | — | — | skip | The object-type tag. `core.Handle.kindName` (`src/core/handle.zig`) answers it for every kind from one table, and a per-class override would be a second answer. |
-| `src/dawn/native/BindGroupLayout.h:60` | `BindGroupLayoutBase::IsEmpty` | `BindGroupLayout.isEmpty` | `src/pipeline/bind_group_layout.zig` | port | Reads `Layout.isEmpty`, which is `entries.len == 0` upstream too. |
-| `src/dawn/native/BindGroupLayout.cpp:34` | `BindGroupLayoutBase::BindGroupLayoutBase` (ref path) | `BindGroupLayout.init` | `src/pipeline/bind_group_layout.zig` | port | Ports `BindGroupLayoutBase::Create` with `BindGroupLayoutInternalBase`'s constructor (`:766`-`:771`). The port takes the packed layout by value and hands it back for the caller to free. |
+| `src/dawn/native/BindGroupLayout.h:60` | `BindGroupLayoutBase::IsEmpty` | `BindGroupLayout.isEmpty` | `src/pipeline/bind_group_layout.zig:145` | port | Reads `Layout.isEmpty`, which is `entries.len == 0` upstream too. |
+| `src/dawn/native/BindGroupLayout.cpp:34` | `BindGroupLayoutBase::BindGroupLayoutBase` (ref path) | `BindGroupLayout.init` | `src/pipeline/bind_group_layout.zig:102` | port | Ports `BindGroupLayoutBase::Create` with `BindGroupLayoutInternalBase`'s constructor (`:766`-`:771`). The port takes the packed layout by value and hands it back for the caller to free. |
 | `src/dawn/native/BindGroupLayout.cpp:44` | `BindGroupLayoutBase::BindGroupLayoutBase` (error path) | — | — | skip | `MakeError` builds a layout that already failed. The port's `init` returns `Error!BindGroupLayout` and never produces a half-built object, so there is no error layout to construct. |
 | `src/dawn/native/BindGroupLayout.cpp:59` | `BindGroupLayoutBase::MakeError` | — | — | skip | With the row above. |
-| `src/dawn/native/BindGroupLayout.cpp:76` | `BindGroupLayoutBase::DestroyImpl` | `BindGroupLayout.deinit` | `src/pipeline/bind_group_layout.zig` | port | Upstream's body is empty because the `Ref` drops; the port has an owned slice and frees it, so the body is `Layout.deinit`. |
-| `src/dawn/native/BindGroupLayout.cpp:78` | `BindGroupLayoutBase::SetLabelImpl` | `BindGroupLayout.label` | `src/pipeline/bind_group_layout.zig` | simplify | Upstream propagates the label to the deduplicated internal layout. The port stores the descriptor's label directly, because there is no second object to label: the dedup cache is M14's row. |
+| `src/dawn/native/BindGroupLayout.cpp:76` | `BindGroupLayoutBase::DestroyImpl` | `BindGroupLayout.deinit` | `src/pipeline/bind_group_layout.zig:115` | port | Upstream's body is empty because the `Ref` drops; the port has an owned slice and frees it, so the body is `Layout.deinit`. |
+| `src/dawn/native/BindGroupLayout.cpp:78` | `BindGroupLayoutBase::SetLabelImpl` | `BindGroupLayout.label` | `src/pipeline/bind_group_layout.zig:93` | simplify | Upstream propagates the label to the deduplicated internal layout. The port stores the descriptor's label directly, because there is no second object to label: the dedup cache is M14's row. |
 
 #### `native/PipelineCompatibilityToken` — the token the compatibility rule is made of
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/IntegerTypes.h:139` | `PipelineCompatibilityToken` | `PipelineCompatibilityToken` | `src/pipeline/bind_group_layout.zig` | port | `TypedInteger<struct PipelineCompatibilityTokenT, uint64_t>`, carried as `u64`. |
-| `src/dawn/native/IntegerTypes.h:140` | `kExplicitPCT` | `explicit_compatibility_token` | `src/pipeline/bind_group_layout.zig` | port | Zero. A deduced layout mints a non-zero token, so the two can never be equal and a deduced layout can never be mixed with a written one. |
-| `src/dawn/native/Device.cpp:283` | `DeviceBase::mNextPipelineCompatibilityToken(1)` | `TokenCounter.next_token` | `src/pipeline/bind_group_layout.zig` | port | The device-atomic counter upstream; the port keeps it in the object that owns it rather than in a file-scope global, because `AGENTS.md` §2 makes hidden state a review finding. |
-| `src/dawn/native/Device.cpp:2522` | `DeviceBase::GetNextPipelineCompatibilityToken` | `TokenCounter.mint` | `src/pipeline/bind_group_layout.zig` | port | A post-increment that returns the old value. The port refuses to wrap: a silent wrap would reuse a live token, so the last value is `error.TokenCounterExhausted`. |
-| `src/dawn/native/PipelineLayout.cpp:122` | `ValidatePipelineLayoutDescriptor` PCT check | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig` | port | The `DAWN_INVALID_IF` that refuses a deduced layout in a written pipeline layout. The port expresses the same rule as the token comparison in `isLayoutEqual`, which is where a caller that must decide compatibility already looks. `test/bind_group.zig` asserts both halves. |
+| `src/dawn/native/IntegerTypes.h:139` | `PipelineCompatibilityToken` | `PipelineCompatibilityToken` | `src/pipeline/bind_group_layout.zig:52` | port | `TypedInteger<struct PipelineCompatibilityTokenT, uint64_t>`, carried as `u64`. |
+| `src/dawn/native/IntegerTypes.h:140` | `kExplicitPCT` | `explicit_compatibility_token` | `src/pipeline/bind_group_layout.zig:57` | port | Zero. A deduced layout mints a non-zero token, so the two can never be equal and a deduced layout can never be mixed with a written one. |
+| `src/dawn/native/Device.cpp:283` | `DeviceBase::mNextPipelineCompatibilityToken(1)` | `TokenCounter.next_token` | `src/pipeline/bind_group_layout.zig:66` | port | The device-atomic counter upstream; the port keeps it in the object that owns it rather than in a file-scope global, because `AGENTS.md` §2 makes hidden state a review finding. |
+| `src/dawn/native/Device.cpp:2522` | `DeviceBase::GetNextPipelineCompatibilityToken` | `TokenCounter.mint` | `src/pipeline/bind_group_layout.zig:72` | port | A post-increment that returns the old value. The port refuses to wrap: a silent wrap would reuse a live token, so the last value is `error.TokenCounterExhausted`. |
+| `src/dawn/native/PipelineLayout.cpp:122` | `ValidatePipelineLayoutDescriptor` PCT check | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig:131` | port | The `DAWN_INVALID_IF` that refuses a deduced layout in a written pipeline layout. The port expresses the same rule as the token comparison in `isLayoutEqual`, which is where a caller that must decide compatibility already looks. `test/bind_group.zig` asserts both halves. |
 
 #### `native/BindGroupLayoutInternal.{h,cpp}` — the packed layout
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:114` | `BindGroupLayoutEntry`'s optional-member chain | `Entry` | `src/pipeline/layout_internal.zig` | port | Dawn's chain of optional members becomes one tagged union of optional members, so a caller can still name two kinds and be refused by `countKinds`. The struct itself is generated from `webgpu.json` by `generator/templates/api_cpp.h` and has no line in the pinned tree; what the port mirrors is the chain this loop walks, one `entry->` member at a time, ending in the two `bindingMemberCount` refusals at `:280`-`:286`. `array_size` of zero clamps to one at `BindGroupLayoutInternal.cpp:110`. |
-| `src/dawn/native/BindGroupLayoutInternal.h:63` | `enum BindingTypeOrder` | `BindingTypeOrder` | `src/pipeline/layout_internal.zig` | port | The value is the index space of `Layout.type_start`, so a new kind is a compile error until it is placed where Dawn places it. Upstream scopes it to `dawn::native` rather than making it an `enum class`, so the enumerators are unqualified names in that namespace. |
-| `src/dawn/native/BindGroupLayoutInternal.h:100` | `APIBindingIndex` | `ApiBindingIndex` | `src/pipeline/layout_internal.zig` | port | A `u32`-backed enum with `toInt`/`fromInt`. Indexes the user-facing entries alone. |
-| `src/dawn/native/BindGroupLayoutInternal.h:103` | `BindingIndex` | `BindingIndex` | `src/pipeline/layout_internal.zig` | port | Indexes the whole vector, private entries included. The declaration is `IntegerTypes.h:62`; this comment is where the two index spaces are told apart. |
-| `src/dawn/native/BindGroupLayoutInternal.h:109` | `class BindGroupLayoutInternalBase` | `Layout` | `src/pipeline/layout_internal.zig` | port | The packed layout. The arena the device owns upstream is replaced by the caller's allocator, which is `AGENTS.md` §1. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:689` | `BindGroupLayoutInternalBase::BindGroupLayoutInternalBase` | `Layout.init` | `src/pipeline/layout_internal.zig` | port | `ConvertAndExpandBGLEntries` (`:524`) runs in front of the constructor body, so validation, expansion, sort and packing are one function. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:114` | `BindGroupLayoutEntry`'s optional-member chain | `Entry` | `src/pipeline/layout_internal.zig:318` | port | Dawn's chain of optional members becomes one tagged union of optional members, so a caller can still name two kinds and be refused by `countKinds`. The struct itself is generated from `webgpu.json` by `generator/templates/api_cpp.h` and has no line in the pinned tree; what the port mirrors is the chain this loop walks, one `entry->` member at a time, ending in the two `bindingMemberCount` refusals at `:280`-`:286`. `array_size` of zero clamps to one at `BindGroupLayoutInternal.cpp:110`. |
+| `src/dawn/native/BindGroupLayoutInternal.h:63` | `enum BindingTypeOrder` | `BindingTypeOrder` | `src/pipeline/layout_internal.zig:154` | port | The value is the index space of `Layout.type_start`, so a new kind is a compile error until it is placed where Dawn places it. Upstream scopes it to `dawn::native` rather than making it an `enum class`, so the enumerators are unqualified names in that namespace. |
+| `src/dawn/native/BindGroupLayoutInternal.h:100` | `APIBindingIndex` | `ApiBindingIndex` | `src/pipeline/layout_internal.zig:399` | port | A `u32`-backed enum with `toInt`/`fromInt`. Indexes the user-facing entries alone. |
+| `src/dawn/native/BindGroupLayoutInternal.h:103` | `BindingIndex` | `BindingIndex` | `src/pipeline/layout_internal.zig:385` | port | Indexes the whole vector, private entries included. The declaration is `IntegerTypes.h:62`; this comment is where the two index spaces are told apart. |
+| `src/dawn/native/BindGroupLayoutInternal.h:109` | `class BindGroupLayoutInternalBase` | `Layout` | `src/pipeline/layout_internal.zig:473` | port | The packed layout. The arena the device owns upstream is replaced by the caller's allocator, which is `AGENTS.md` §1. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:689` | `BindGroupLayoutInternalBase::BindGroupLayoutInternalBase` | `Layout.init` | `src/pipeline/layout_internal.zig:505` | port | `ConvertAndExpandBGLEntries` (`:524`) runs in front of the constructor body, so validation, expansion, sort and packing are one function. |
 | `src/dawn/native/BindGroupLayoutInternal.cpp:766` | `BindGroupLayoutInternalBase::BindGroupLayoutInternalBase` (tracked) | — | — | skip | The tracking constructor. The port has no object-tracking list; `core.ObjectArena` (M3) is where a layout is registered, and a second registration list would be a second convention. |
 | `src/dawn/native/BindGroupLayoutInternal.cpp:773` | `BindGroupLayoutInternalBase::BindGroupLayoutInternalBase` (error tag) | — | — | skip | With `BindGroupLayout.cpp:44`; the port never builds a half-validated layout. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:778` | `~BindGroupLayoutInternalBase` | `Layout.deinit` | `src/pipeline/layout_internal.zig` | port | `toOwnedSlice` hands back a static empty slice for a list that never grew, and a static slice is not the allocator's to free, so the empty case returns early. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:481` | `SortBindingsCompare` | `lessBindingFirst` | `src/pipeline/layout_internal.zig` | port | Type order first, then binding number. The second key is load-bearing: dynamic buffers are applied in increasing binding number and binding-array elements stay contiguous for a back end (`:510`-`:513`). |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:619` | `std::sort` over `ExpandedBindingInfo::entries` | `std.sort.insertion` call | `src/pipeline/layout_internal.zig` | simplify | An insertion sort rather than Dawn's `std::sort`. The vector holds at most `max_bindings_per_bind_group` user entries, and a merge sort would allocate. `src/platform/serial.zig` sorts the same way for the same reason. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:447` | `ConvertToBindingInfo` | `convertToBinding` | `src/pipeline/layout_internal.zig` | port | The one place a caller's entry becomes a stored binding, so the kind count is checked once and every caller gets a `BindingLayout` union. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:407` | `CreateSampledTextureBindingForExternalTexture` | private-entry construction | `src/pipeline/layout_internal.zig` | merge | Inlined into `Layout.init`. It is a three-field literal, and a function returning one literal is not a boundary. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:420` | `CreateUniformBindingForExternalTexture` | private-entry construction | `src/pipeline/layout_internal.zig` | merge | With the row above. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:433` | `CreateStaticSamplerBindingForExternalTexture` | private-entry construction | `src/pipeline/layout_internal.zig` | merge | With the row above. Dawn's version reads a device flag; the port reads `ValidateOptions.needs_static_sampler_for_external_texture`. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:524` | `ConvertAndExpandBGLEntries` | `Layout.init` expansion loop | `src/pipeline/layout_internal.zig` | merge | Merged into `Layout.init` rather than kept separate. The expansion writes `expanded`, `expansions` and `sampler_links` and is meaningless without the sort and prefix sum that follow it. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:538` | `ExternalTextureExpansion` | `ExternalTextureBinding` | `src/pipeline/layout_internal.zig` | port | The private entries an external texture grows into, counted down from `maxInt(u32)` at `:531`, which is what keeps them out of `api_binding_map`. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:548` | `staticSamplerToSingleTextureBinding` | `SamplerLink` loop | `src/pipeline/layout_internal.zig` | merge | The rewrite of a sampler into an index after the sort (`:643`-`:647`) is one loop over a collected list. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:754` | `mBindingTypeStart` prefix sum | `Layout.type_start` | `src/pipeline/layout_internal.zig` | port | The range of one order is `[type_start[order], type_start[order + 1])`, so the last value is the stored count and `std.debug.assert(sum == stored_count)` catches a kind added to the order without a range. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:762` | `mValidationBindingCounts` | `Layout.validation_counts` | `src/pipeline/layout_internal.zig` | port | Computed from the descriptor, not from the expansion, which is what `ValidatePipelineLayoutDescriptor` reads at `PipelineLayout.cpp:127`-`:128`. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:707` | `mUnverifiedBufferCount` | `Layout.unverified_buffer_count` | `src/pipeline/layout_internal.zig` | port | Buffers whose minimum size is zero, which a bind group cannot check a size against. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:917` | `GetDynamicStorageBufferCount` | `Layout.dynamic_storage_buffer_count` | `src/pipeline/layout_internal.zig` | port | The counter `BindingInfo.cpp:199` refuses a layout above, which `Limits.cpp:391` clamps to `Constants.h:114`. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:835` | `ComputeContentHash` | `Layout.content_hash` | `src/pipeline/layout_internal.zig` | port | `Wyhash` over the sorted vector, so two equal layouts built from differently ordered descriptors hash the same. The dedup cache this keys on is M14's row. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:884` | `EqualityFunc::operator()` | `Layout.eql` | `src/pipeline/layout_internal.zig` | port | The hash first, then every binding field by field. `BindGroupLayout.isLayoutEqual` calls it after the token comparison. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:901` | `IsEmpty` | `Layout.isEmpty` | `src/pipeline/layout_internal.zig` | port | `entries.len == 0`, which decides whether a pipeline layout sets a group bit (`PipelineLayout.cpp:179`). |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:906` | `GetBindingCount` | `Layout.queryBindingCount` | `src/pipeline/layout_internal.zig` | port | The number of user-facing entries. It is not the stored count when an external texture grew private entries in, which is why `Layout` carries two index spaces. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:1016` | `GetBindingDataSize` | `Layout.entries.len` | `src/pipeline/layout_internal.zig` | simplify | Upstream returns a byte size for a contiguous allocation. The port holds `[]Binding` directly, so the length is the length; the byte count would only be `len * @sizeOf(Binding)`, which is a caller arithmetic. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:1035` | `ComputeBindingDataPointers` | `Layout.api_binding_map` | `src/pipeline/layout_internal.zig` | merge | Upstream walks a packed blob and returns pointers into it. The port holds bindings by value in a slice, so a pointer into it is an index; the map is what replaces the walk. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:778` | `~BindGroupLayoutInternalBase` | `Layout.deinit` | `src/pipeline/layout_internal.zig:726` | port | `toOwnedSlice` hands back a static empty slice for a list that never grew, and a static slice is not the allocator's to free, so the empty case returns early. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:481` | `SortBindingsCompare` | `lessBindingFirst` | `src/pipeline/layout_internal.zig:805` | port | Type order first, then binding number. The second key is load-bearing: dynamic buffers are applied in increasing binding number and binding-array elements stay contiguous for a back end (`:510`-`:513`). |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:619` | `std::sort` over `ExpandedBindingInfo::entries` | `Layout.init` | `src/pipeline/layout_internal.zig:505` | simplify | An insertion sort rather than Dawn's `std::sort`. The vector holds at most `max_bindings_per_bind_group` user entries, and a merge sort would allocate. `src/platform/serial.zig` sorts the same way for the same reason. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:447` | `ConvertToBindingInfo` | `convertToBinding` | `src/pipeline/layout_internal.zig:916` | port | The one place a caller's entry becomes a stored binding, so the kind count is checked once and every caller gets a `BindingLayout` union. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:407` | `CreateSampledTextureBindingForExternalTexture` | `Layout.init` | `src/pipeline/layout_internal.zig:505` | merge | Inlined into `Layout.init`. It is a three-field literal, and a function returning one literal is not a boundary. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:420` | `CreateUniformBindingForExternalTexture` | `Layout.init` | `src/pipeline/layout_internal.zig:505` | merge | With the row above. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:433` | `CreateStaticSamplerBindingForExternalTexture` | `Layout.init` | `src/pipeline/layout_internal.zig:505` | merge | With the row above. Dawn's version reads a device flag; the port reads `ValidateOptions.needs_static_sampler_for_external_texture`. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:524` | `ConvertAndExpandBGLEntries` | `Layout.init` expansion loop | `src/pipeline/layout_internal.zig:505` | merge | Merged into `Layout.init` rather than kept separate. The expansion writes `expanded`, `expansions` and `sampler_links` and is meaningless without the sort and prefix sum that follow it. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:538` | `ExternalTextureExpansion` | `ExternalTextureBinding` | `src/pipeline/layout_internal.zig:272` | port | The private entries an external texture grows into, counted down from `maxInt(u32)` at `:531`, which is what keeps them out of `api_binding_map`. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:548` | `staticSamplerToSingleTextureBinding` | `SamplerLink` loop | `src/pipeline/layout_internal.zig:875` | merge | The rewrite of a sampler into an index after the sort (`:643`-`:647`) is one loop over a collected list. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:754` | `mBindingTypeStart` prefix sum | `Layout.type_start` | `src/pipeline/layout_internal.zig:480` | port | The range of one order is `[type_start[order], type_start[order + 1])`, so the last value is the stored count and `std.debug.assert(sum == stored_count)` catches a kind added to the order without a range. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:762` | `mValidationBindingCounts` | `Layout.validation_counts` | `src/pipeline/layout_internal.zig:487` | port | Computed from the descriptor, not from the expansion, which is what `ValidatePipelineLayoutDescriptor` reads at `PipelineLayout.cpp:127`-`:128`. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:707` | `mUnverifiedBufferCount` | `Layout.unverified_buffer_count` | `src/pipeline/layout_internal.zig:490` | port | Buffers whose minimum size is zero, which a bind group cannot check a size against. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:917` | `GetDynamicStorageBufferCount` | `Layout.dynamic_storage_buffer_count` | `src/pipeline/layout_internal.zig:494` | port | The counter `BindingInfo.cpp:199` refuses a layout above, which `Limits.cpp:391` clamps to `Constants.h:114`. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:835` | `ComputeContentHash` | `Layout.content_hash` | `src/pipeline/layout_internal.zig:498` | port | `Wyhash` over the sorted vector, so two equal layouts built from differently ordered descriptors hash the same. The dedup cache this keys on is M14's row. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:884` | `EqualityFunc::operator()` | `Layout.eql` | `src/pipeline/layout_internal.zig:787` | port | The hash first, then every binding field by field. `BindGroupLayout.isLayoutEqual` calls it after the token comparison. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:901` | `IsEmpty` | `Layout.isEmpty` | `src/pipeline/layout_internal.zig:744` | port | `entries.len == 0`, which decides whether a pipeline layout sets a group bit (`PipelineLayout.cpp:179`). |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:906` | `GetBindingCount` | `Layout.queryBindingCount` | `src/pipeline/layout_internal.zig:738` | port | The number of user-facing entries. It is not the stored count when an external texture grew private entries in, which is why `Layout` carries two index spaces. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:1016` | `GetBindingDataSize` | `Layout.entries` | `src/pipeline/layout_internal.zig:476` | simplify | Upstream returns a byte size for a contiguous allocation. The port holds `[]Binding` directly, so the length is the length; the byte count would only be `len * @sizeOf(Binding)`, which is a caller arithmetic. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:1035` | `ComputeBindingDataPointers` | `Layout.api_binding_map` | `src/pipeline/layout_internal.zig:482` | merge | Upstream walks a packed blob and returns pointers into it. The port holds bindings by value in a slice, so a pointer into it is an index; the map is what replaces the walk. |
 | `src/dawn/native/BindGroupLayoutInternal.cpp:818` | `GetBoundExternalTextureMap` | — | — | skip | The bind-group-side map from an `APIBindingIndex` to a position in `BindGroup::GetBoundExternalTextures`. It answers a question only `BindGroup.cpp` asks, and no bind group holds resources at M12. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:338` | `ValidateBindGroupLayoutDescriptor` | `validateDescriptor` | `src/pipeline/layout_internal.zig` | port | Every entry, then the binding numbers, then the per-stage counts. The binding-number check runs before the expansion, because the expansion writes binding numbers the caller never wrote. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:105` | `ValidateBindGroupLayoutEntry` | `validateEntry` | `src/pipeline/layout_internal.zig` | port | The one entry, after the kind count has been refused elsewhere. Every rule it reports is a member of `layout_internal.Error`, and `bind_group_layout.zig`'s comptime sweep checks that the union exposes all of them. |
-| `src/dawn/native/BindGroupLayoutInternal.cpp:295` | `ValidateStaticSamplersWithTextureBindings` | `validateDescriptor` static-sampler block | `src/pipeline/layout_internal.zig` | merge | Merged into `validateDescriptor` because it is a loop over the numbers the same pass already collected, and it needs the descriptor the pass is walking. |
-| `src/dawn/common/Constants.h:36` | `kMaxBindGroups` | `max_bind_groups` | `src/pipeline/layout_internal.zig` | port | Named here because `PipelineLayout.cpp:179` walks the groups. Nothing at M12 enumerates them, so the constant has no reader yet. |
-| `src/dawn/common/Constants.h:37` | `kMaxBindingsPerBindGroup` | `max_bindings_per_bind_group` | `src/pipeline/layout_internal.zig` | port | A binding number at or above this is refused, which is what keeps the private entries an external texture grows into out of a caller's reach. |
-| `src/dawn/common/Constants.h:42` | `kNumStages` | `ShaderStages.stage_count` | `src/pipeline/layout_internal.zig` | port | Three. A named constant because every loop over a per-stage counter has to state its own bound. Upstream spells it `kNumStages`, not a stage count by name. |
-| `src/dawn/native/BindingInfo.h:264` | `IncrementBindingCounts` | `BindingCounts.add` | `src/pipeline/layout_internal.zig` | port | One entry's counts, added inline over the three stages so the stage set is the packed struct's own field list rather than a hand-written index. |
-| `src/dawn/native/BindingInfo.h:267` | `ValidateBindingCounts` | `validateDescriptor` storage-buffer block | `src/pipeline/layout_internal.zig` | merge | Two of the rules land, the two per-stage storage-buffer ceilings, merged into the same function because `ValidateOptions` carries them and the acceptance needs a layout that builds. The rest of `ValidateBindingCounts` is M14's, where the pipeline layout has a device's limits to read; that half carries no row here because `AGENTS.md` §6 says a row is for something that is ported. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:338` | `ValidateBindGroupLayoutDescriptor` | `validateDescriptor` | `src/pipeline/layout_internal.zig:972` | port | Every entry, then the binding numbers, then the per-stage counts. The binding-number check runs before the expansion, because the expansion writes binding numbers the caller never wrote. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:105` | `ValidateBindGroupLayoutEntry` | `validateEntry` | `src/pipeline/layout_internal.zig:1069` | port | The one entry, after the kind count has been refused elsewhere. Every rule it reports is a member of `layout_internal.Error`, and `bind_group_layout.zig`'s comptime sweep checks that the union exposes all of them. |
+| `src/dawn/native/BindGroupLayoutInternal.cpp:295` | `ValidateStaticSamplersWithTextureBindings` | `validateDescriptor` static-sampler block | `src/pipeline/layout_internal.zig:972` | merge | Merged into `validateDescriptor` because it is a loop over the numbers the same pass already collected, and it needs the descriptor the pass is walking. |
+| `src/dawn/common/Constants.h:36` | `kMaxBindGroups` | `max_bind_groups` | `src/pipeline/layout_internal.zig:26` | port | Named here because `PipelineLayout.cpp:179` walks the groups. Nothing at M12 enumerates them, so the constant has no reader yet. |
+| `src/dawn/common/Constants.h:37` | `kMaxBindingsPerBindGroup` | `max_bindings_per_bind_group` | `src/pipeline/layout_internal.zig:32` | port | A binding number at or above this is refused, which is what keeps the private entries an external texture grows into out of a caller's reach. |
+| `src/dawn/common/Constants.h:42` | `kNumStages` | `ShaderStages.stage_count` | `src/pipeline/layout_internal.zig:116` | port | Three. A named constant because every loop over a per-stage counter has to state its own bound. Upstream spells it `kNumStages`, not a stage count by name. |
+| `src/dawn/native/BindingInfo.h:264` | `IncrementBindingCounts` | `BindingCounts.add` | `src/pipeline/layout_internal.zig:424` | port | One entry's counts, added inline over the three stages so the stage set is the packed struct's own field list rather than a hand-written index. |
+| `src/dawn/native/BindingInfo.h:267` | `ValidateBindingCounts` | `validateDescriptor` storage-buffer block | `src/pipeline/layout_internal.zig:972` | merge | Two of the rules land, the two per-stage storage-buffer ceilings, merged into the same function because `ValidateOptions` carries them and the acceptance needs a layout that builds. The rest of `ValidateBindingCounts` is M14's, where the pipeline layout has a device's limits to read; that half carries no row here because `AGENTS.md` §6 says a row is for something that is ported. |
 
 #### `vulkan/BindGroupLayoutVk.{h,cpp}` — the Vulkan layout back end
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/vulkan/BindGroupLayoutVk.h:55` | `class BindGroupLayout` | — | — | skip | The class is the packed layout plus a handle plus a cache. The port splits those: `Layout` stays in `layout_internal.zig`, and the handle is a value `layout_vk` builds and destroys. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:56` | `ComputeVulkanStaticBindings` | `descriptorCountsPerType` | `src/pipeline/layout_vk.zig` | port | Produces Dawn's `descriptorCountPerType`, which `DescriptorSetAllocator` divides by its sum (`DescriptorSetAllocator.cpp:61`-`:73`). Entries come out sorted by the descriptor type's numeric value, so two runs of the same layout produce the same array. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:157` | `VulkanDescriptorType` | `descriptorTypeFor` | `src/pipeline/layout_vk.zig` | port | The switch is exhaustive over `BindingLayout`, so a new kind is a compile error until it is mapped. An external texture has no descriptor of its own, so Dawn's `DAWN_UNREACHABLE` at `:211` is a claim the port can make too. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:108` | stage mask computation | `stageFlagsFor` | `src/pipeline/layout_vk.zig` | port | The `VkShaderStageFlags` one binding is visible from, built from the packed `ShaderStages` bitfield. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:230` | `BindGroupLayout::Initialize` | `createDescriptorSetLayout` | `src/pipeline/layout_vk.zig` | port | Creates the handle from the binding array `ComputeVulkanStaticBindings` produced. The array is written in the packed layout's own order, which is what makes a cached handle comparable at all. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:56` | `ComputeVulkanStaticBindings` | `descriptorCountsPerType` | `src/pipeline/layout_vk.zig:122` | port | Produces Dawn's `descriptorCountPerType`, which `DescriptorSetAllocator` divides by its sum (`DescriptorSetAllocator.cpp:61`-`:73`). Entries come out sorted by the descriptor type's numeric value, so two runs of the same layout produce the same array. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:157` | `VulkanDescriptorType` | `descriptorTypeFor` | `src/pipeline/layout_vk.zig:62` | port | The switch is exhaustive over `BindingLayout`, so a new kind is a compile error until it is mapped. An external texture has no descriptor of its own, so Dawn's `DAWN_UNREACHABLE` at `:211` is a claim the port can make too. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:108` | stage mask computation | `stageFlagsFor` | `src/pipeline/layout_vk.zig:101` | port | The `VkShaderStageFlags` one binding is visible from, built from the packed `ShaderStages` bitfield. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:215` | `BindGroupLayout::Create` | `Layout.init`, `createDescriptorSetLayout` | `src/pipeline/layout_internal.zig:505`, `src/pipeline/layout_vk.zig:190` | merge | Combines packed frontend validation and existing native layout creation. Typed facade dependency retention is Dusk glue. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:230` | `BindGroupLayout::Initialize` | `createDescriptorSetLayout` | `src/pipeline/layout_vk.zig:190` | merge | Creates the supported native descriptor layout. The matching Dawn native call is in `GetOrCreateSpecialization` at `:286-288`. Dusk does not port that specialization cache or every binding kind. |
 | `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:304` | `BindGroupLayout::GetOrCreateSpecializedHandle` | — | — | skip | The static-sampler specialization map (`BindGroupLayoutVk.h:120`-`:125`). A specialized layout is a different set layout for the same bind group layout, and nothing at M12 writes a static sampler, so there is no specialization to ask for. M14's cache owns the map when one exists. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:311` | `BindGroupLayout::DestroyImpl` | `destroyDescriptorSetLayout` | `src/pipeline/layout_vk.zig` | port | Dawn hands the handle to the fenced deleter; the port destroys it here and leaves the fence to the caller that owns the device, because this file has no path to one. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:311` | `BindGroupLayout::DestroyImpl` | `destroyDescriptorSetLayout` | `src/pipeline/layout_vk.zig:224` | port | Dawn hands the handle to the fenced deleter; the port destroys it here and leaves the fence to the caller that owns the device, because this file has no path to one. |
 | `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:345` | `BindGroupLayout::DeallocateBindGroup` | — | — | skip | Frees the bind group slab (`BindGroupLayoutVk.h:111`). No bind group holds a slab at M12. |
-| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:349` | `BindGroupLayout::DeallocateDescriptorSet` | `DescriptorSetAllocator.deallocate` | `src/pipeline/bind_group_descriptor_set.zig` | merge | The same call as `DescriptorSetAllocator::Deallocate`, reached through the layout upstream. The port calls it on the allocator, which owns the pools, and the layout owns no allocator. |
+| `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:349` | `BindGroupLayout::DeallocateDescriptorSet` | `DescriptorSetAllocator.deallocate` | `src/pipeline/bind_group_descriptor_set.zig:251` | merge | The same call as `DescriptorSetAllocator::Deallocate`, reached through the layout upstream. The port calls it on the allocator, which owns the pools, and the layout owns no allocator. |
 | `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:353` | `BindGroupLayout::ReduceMemoryUsage` | — | — | skip | Releases caches on a memory-pressure signal. The port has no cache here and no pressure signal. |
 | `src/dawn/native/vulkan/BindGroupLayoutVk.cpp:376` | `BindGroupLayout::SetLabelImpl` | — | — | skip | A debug label for the driver's own output. The port has no log sink, which `AGENTS.md` §5 records as out of scope. |
+
+#### `vulkan/BindGroupVk.cpp` — native bind-group creation
+
+| Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
+| --- | --- | --- | --- | --- | --- |
+| `src/dawn/native/vulkan/BindGroupVk.cpp:51` | `BindGroup::Create` | `BindGroup.create` | `src/engine/bind_group.zig:100` | merge | Dusk creates native descriptor storage without Dawn's layout allocator wrapper. Typed owner checks and retained dependencies are separate glue. |
+| `src/dawn/native/vulkan/BindGroupVk.cpp:69` | `BindGroup::InitializeImpl` | `BindGroup.create` | `src/engine/bind_group.zig:100` | merge | Existing factory writes the supported native descriptors. This does not port Dawn's full binding table. |
+
 
 #### `vulkan/PipelineLayoutVk.{h,cpp}` — the pipeline layout handle
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/vulkan/PipelineLayoutVk.h:44` | `class PipelineLayout` | — | — | skip | The class is a per-specialization cache over a `CreateVkPipelineLayout` that takes an ordered slice of set layouts. The port keeps the function and takes the slice directly, so the class has nothing left to hold. |
-| `src/dawn/native/vulkan/PipelineLayoutVk.h:82` | `PipelineLayout::CreateVkPipelineLayout` | `createPipelineLayout` | `src/pipeline/layout_vk.zig` | port | Upstream orders the sets framebuffer-fetch first, then the resource table, then the bind group layouts. The port takes the ordered slice rather than a pipeline layout, because the two leading sets land with the milestones that own them: the order is then visible in the argument instead of hidden in a branch here. |
+| `src/dawn/native/vulkan/PipelineLayoutVk.cpp:45` | `PipelineLayout::Create` | `LayoutInput.create` | `src/pipeline/pipeline.zig:295` | merge | Existing native layout factory returns a typed input. The facade separately retains ordered group dependencies. |
+| `src/dawn/native/vulkan/PipelineLayoutVk.cpp:53` | `PipelineLayout::CreateVkPipelineLayout` | `createPipelineLayout` | `src/pipeline/layout_vk.zig:242` | merge | Uses an explicit ordered set-layout slice. Native creation corresponds to `vkCreatePipelineLayout` at `:107-113`. Dawn's framebuffer-fetch/resource-table ordering policy is not a complete port. |
 | `src/dawn/native/vulkan/PipelineLayoutVk.h:80` | `PipelineLayout::Initialize` | — | — | skip | The cache lookup per set layout (`:116`-`:152`). One `VkPipelineLayout` per specialization is M14's device-wide cache, not this file's, and `layout_vk.zig`'s header names that. |
-| `src/dawn/native/vulkan/PipelineLayoutVk.h:77` | `PipelineLayout::DestroyImpl` | `destroyPipelineLayout` | `src/pipeline/layout_vk.zig` | port | With `BindGroupLayoutVk.cpp:311`. |
+| `src/dawn/native/vulkan/PipelineLayoutVk.h:77` | `PipelineLayout::DestroyImpl` | `destroyPipelineLayout` | `src/pipeline/layout_vk.zig:295` | port | With `BindGroupLayoutVk.cpp:311`. |
 | `src/dawn/native/vulkan/PipelineLayoutVk.cpp:161` | `PipelineLayout::SetLabelImpl` | — | — | skip | With `BindGroupLayoutVk.cpp:376`. |
 
 #### `vulkan/DescriptorSetAllocator.{h,cpp}` and `vulkan/DescriptorSetAllocation.h`
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/DescriptorSetAllocation.h:36` | `struct DescriptorSetAllocation` | `DescriptorSetAllocation` | `src/pipeline/bind_group_descriptor_set.zig` | port | The whole ownership token a bind group needs to give a set back: the set, the pool it came from and its index in that pool. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:45` | `kMaxDescriptorsPerPool` | `max_descriptors_per_pool` | `src/pipeline/bind_group_descriptor_set.zig` | port | 512. The target a pool is sized to, and the divisor in the `mMaxSets` computation at `:73`. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:65` | `class DescriptorSetAllocator` | `DescriptorSetAllocator` | `src/pipeline/bind_group_descriptor_set.zig` | port | One layout, many sets. Every set in one allocator was allocated against the single `VkDescriptorSetLayout` it was built with (`DescriptorSetAllocator.h:70`-`:74`), which is why it is never shared across two. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:93` | `struct Pool` | `Pool` | `src/pipeline/bind_group_descriptor_set.zig` | port | One `VkDescriptorPool` and the sets cut from it. The free list is a LIFO, which is why `allocate` reads the back (`DescriptorSetAllocator.cpp:106`-`:107`). |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:102` | `struct Deallocation` | `Deallocation` | `src/pipeline/bind_group_descriptor_set.zig` | port | One queued deallocation: which pool, which set. |
+| `src/dawn/native/vulkan/DescriptorSetAllocation.h:36` | `struct DescriptorSetAllocation` | `DescriptorSetAllocation` | `src/pipeline/bind_group_descriptor_set.zig:45` | port | The whole ownership token a bind group needs to give a set back: the set, the pool it came from and its index in that pool. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:45` | `kMaxDescriptorsPerPool` | `max_descriptors_per_pool` | `src/pipeline/bind_group_descriptor_set.zig:40` | port | 512. The target a pool is sized to, and the divisor in the `mMaxSets` computation at `:73`. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:65` | `class DescriptorSetAllocator` | `DescriptorSetAllocator` | `src/pipeline/bind_group_descriptor_set.zig:102` | port | One layout, many sets. Every set in one allocator was allocated against the single `VkDescriptorSetLayout` it was built with (`DescriptorSetAllocator.h:70`-`:74`), which is why it is never shared across two. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:93` | `struct Pool` | `Pool` | `src/pipeline/bind_group_descriptor_set.zig:53` | port | One `VkDescriptorPool` and the sets cut from it. The free list is a LIFO, which is why `allocate` reads the back (`DescriptorSetAllocator.cpp:106`-`:107`). |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:102` | `struct Deallocation` | `Deallocation` | `src/pipeline/bind_group_descriptor_set.zig:69` | port | One queued deallocation: which pool, which set. |
 | `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:48` | `DescriptorSetAllocator::Create` | — | — | merge | `AcquireRef(new DescriptorSetAllocator(...))` is a factory over the constructor; the port returns the constructor's result directly. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:54` | `DescriptorSetAllocator::DescriptorSetAllocator` | `DescriptorSetAllocator.init` | `src/pipeline/bind_group_descriptor_set.zig` | port | Every per-type count must be above zero, which is Dawn's `DAWN_CHECK(count > 0)` at `:62`; the port reports it rather than dividing by it. The total floors at one (`:67`-`:68`) and the quotient floors at one set per pool (`:72`-`:73`), so no input divides by zero and no pool holds nothing. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:82` | `~DescriptorSetAllocator` | `DescriptorSetAllocator.deinit` | `src/pipeline/bind_group_descriptor_set.zig` | port | Dawn hands the pools to a fenced deleter because a pool may still be read by the GPU; the port destroys them here and leaves the fence to the caller that owns the device. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:91` | `DescriptorSetAllocator::Allocate` | `DescriptorSetAllocator.allocate` | `src/pipeline/bind_group_descriptor_set.zig` | port | Cuts a pool on the first call, then takes the free list's back. The pool is read after the index is popped from `available_pool_indices`, so the order is the order Dawn's is. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:116` | `DescriptorSetAllocator::Deallocate` | `DescriptorSetAllocator.deallocate` | `src/pipeline/bind_group_descriptor_set.zig` | port | Queues against the queue's pending serial and clears the caller's allocation (`:140`), so a bind group that outlives its deallocation reads a null set rather than a recycled one. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:150` | `DescriptorSetAllocator::FinishDeallocation` | `DescriptorSetAllocator.finishDeallocation` | `src/pipeline/bind_group_descriptor_set.zig` | port | The device's tick calls it with the completed serial (`vulkan/DeviceVk.cpp:368`). A pool with a free set already is not re-added to the available list, so a pool is listed exactly once. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:165` | `DescriptorSetAllocator::AllocateDescriptorPool` | `DescriptorSetAllocator.allocateDescriptorPool` | `src/pipeline/bind_group_descriptor_set.zig` | port | Allocates every set of the pool up front (`:198`-`:213`), because the specification offers no way to grow a pool afterwards. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:91` | `DescriptorSetAllocator::mMaxSets` | `DescriptorSetAllocator.max_sets_per_pool` | `src/pipeline/bind_group_descriptor_set.zig` | port | The size one pool is cut at, and the count `test/bind_group.zig` asserts from the two-binding layout. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:99` | `DescriptorSetAllocator::mAvailableDescriptorPoolIndices` | `DescriptorSetAllocator.available_pool_indices` | `src/pipeline/bind_group_descriptor_set.zig` | port | A pool is listed only while it has a free set (`DescriptorSetAllocator.cpp:109`-`:111`), which is what makes a set still out with the GPU cost a set from the same pool rather than a new pool. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:106` | `DescriptorSetAllocator::mPendingDeallocations` | `DescriptorSetAllocator.pending_deallocations` | `src/pipeline/bind_group_descriptor_set.zig` | port | A `SerialQueue`, so a deallocation is drained in submission order and `enqueueMonotonic` refuses a serial below the last one. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:154` | `DAWN_ASSERT` on a deallocation's pool index | `error.DeallocationOutOfRange` | `src/pipeline/bind_group_descriptor_set.zig` | port | Dawn asserts the same domain; the port reports it, because an error a caller can act on is what `AGENTS.md` §3 wants instead of a debug-only assert. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:66` | `using PoolIndex` | `u32` field types | `src/pipeline/bind_group_descriptor_set.zig` | simplify | A one-use alias for `uint32_t`. The port names the width. |
-| `src/dawn/native/vulkan/DescriptorSetAllocator.h:67` | `using SetIndex` | `u16` field types | `src/pipeline/bind_group_descriptor_set.zig` | simplify | With the row above; the width is load-bearing (`uint16_t`) and is written where it is used. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:54` | `DescriptorSetAllocator::DescriptorSetAllocator` | `DescriptorSetAllocator.init` | `src/pipeline/bind_group_descriptor_set.zig:131` | port | Every per-type count must be above zero, which is Dawn's `DAWN_CHECK(count > 0)` at `:62`; the port reports it rather than dividing by it. The total floors at one (`:67`-`:68`) and the quotient floors at one set per pool (`:72`-`:73`), so no input divides by zero and no pool holds nothing. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:82` | `~DescriptorSetAllocator` | `DescriptorSetAllocator.deinit` | `src/pipeline/bind_group_descriptor_set.zig:191` | port | Dawn hands the pools to a fenced deleter because a pool may still be read by the GPU; the port destroys them here and leaves the fence to the caller that owns the device. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:91` | `DescriptorSetAllocator::Allocate` | `DescriptorSetAllocator.allocate` | `src/pipeline/bind_group_descriptor_set.zig:216` | port | Cuts a pool on the first call, then takes the free list's back. The pool is read after the index is popped from `available_pool_indices`, so the order is the order Dawn's is. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:116` | `DescriptorSetAllocator::Deallocate` | `DescriptorSetAllocator.deallocate` | `src/pipeline/bind_group_descriptor_set.zig:251` | port | Queues against the queue's pending serial and clears the caller's allocation (`:140`), so a bind group that outlives its deallocation reads a null set rather than a recycled one. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:150` | `DescriptorSetAllocator::FinishDeallocation` | `DescriptorSetAllocator.finishDeallocation` | `src/pipeline/bind_group_descriptor_set.zig:273` | port | The device's tick calls it with the completed serial (`vulkan/DeviceVk.cpp:368`). A pool with a free set already is not re-added to the available list, so a pool is listed exactly once. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:165` | `DescriptorSetAllocator::AllocateDescriptorPool` | `DescriptorSetAllocator.allocateDescriptorPool` | `src/pipeline/bind_group_descriptor_set.zig:313` | port | Allocates every set of the pool up front (`:198`-`:213`), because the specification offers no way to grow a pool afterwards. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:91` | `DescriptorSetAllocator::mMaxSets` | `DescriptorSetAllocator.max_sets_per_pool` | `src/pipeline/bind_group_descriptor_set.zig:115` | port | The size one pool is cut at, and the count `test/bind_group.zig` asserts from the two-binding layout. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:99` | `DescriptorSetAllocator::mAvailableDescriptorPoolIndices` | `DescriptorSetAllocator.available_pool_indices` | `src/pipeline/bind_group_descriptor_set.zig:119` | port | A pool is listed only while it has a free set (`DescriptorSetAllocator.cpp:109`-`:111`), which is what makes a set still out with the GPU cost a set from the same pool rather than a new pool. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:106` | `DescriptorSetAllocator::mPendingDeallocations` | `DescriptorSetAllocator.pending_deallocations` | `src/pipeline/bind_group_descriptor_set.zig:121` | port | A `SerialQueue`, so a deallocation is drained in submission order and `enqueueMonotonic` refuses a serial below the last one. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.cpp:154` | `DAWN_ASSERT` on a deallocation's pool index | `DeallocateError` | `src/pipeline/bind_group_descriptor_set.zig:80` | port | Dawn asserts the same domain; the port reports it, because an error a caller can act on is what `AGENTS.md` §3 wants instead of a debug-only assert. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:66` | `using PoolIndex` | `DescriptorSetAllocation.pool_index` | `src/pipeline/bind_group_descriptor_set.zig:47` | simplify | A one-use alias for `uint32_t`. The port names the width. |
+| `src/dawn/native/vulkan/DescriptorSetAllocator.h:67` | `using SetIndex` | `DescriptorSetAllocation.set_index` | `src/pipeline/bind_group_descriptor_set.zig:48` | simplify | With the row above; the width is load-bearing (`uint16_t`) and is written where it is used. |
 
 #### `native/ResourceTable.{h,cpp}` and `native/ResourceTableDefaultResources.{h,cpp}`
 
@@ -5036,7 +5314,7 @@ object cache, not a missing row.
 | `src/dawn/native/BindGroupTracker.h` (172 lines) | `class BindGroupTracker` | — | — | skip | Tracks which bind groups a pipeline used, to detect a bind group outliving the pipeline it was built against. That is a usage-validation concern, and `docs/40-plan.md`'s M8 note records that the port has no bind-group usage-validation mode. |
 | `src/dawn/native/PipelineLayout.cpp:157` | `PipelineLayoutBase::PipelineLayoutBase` | — | — | skip | The per-group validation: dynamic storage-buffer count, group mask, `AccumulateBindingCounts` (`:127`). A pipeline layout is M14's object; `createPipelineLayout` takes the ordered set layouts directly and the validation lands with the caller that has a device's limits. |
 | `src/dawn/native/PipelineLayout.cpp:179` | `mMask.set(group, !bgl->IsEmpty())` | — | — | skip | With the row above. The mask decides which set indices a draw touches; `GetBindGroupLayoutsMask` reads it back at `:666`, and M15's stream and M18's replay are where a draw reads it. |
-| `src/dawn/native/PipelineLayout.cpp:122` | `ValidatePipelineLayoutDescriptor` | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig` | merge | The PCT check is the one rule here that has a M12 reader, and it is already listed under the token table above. The rest of the validator is the per-group validation the two rows above skip. |
+| `src/dawn/native/PipelineLayout.cpp:122` | `ValidatePipelineLayoutDescriptor` | `BindGroupLayout.isLayoutEqual` | `src/pipeline/bind_group_layout.zig:131` | merge | The PCT check is the one rule here that has a M12 reader, and it is already listed under the token table above. The rest of the validator is the per-group validation the two rows above skip. |
 
 **What M12 claims to have built.** `src/pipeline/layout_internal.zig`,
 `src/pipeline/bind_group_layout.zig`, `src/pipeline/layout_vk.zig`,
@@ -5079,14 +5357,10 @@ Every function definition read in the twelve files has a row.
 `src/pipeline/shader_module_vk.zig`, `src/pipeline/shader_reflect.zig`,
 `src/pipeline/shader_compilation_messages.zig` and `test/shader_module.zig`.
 
-**Where the rows go.** 13 are `port` and 30 are `merge`; the other 65 are
-`skip`. That ratio is the milestone rather than a shortfall. Dawn's module is a
-cache entry around a `tint::Program` it must keep alive
-(`ShaderModule.h:113`-`:118`), and every reflection row in it reads that program
-(`ShaderModule.cpp:795`, `:1314`). The port has the caller's words and no
-program, so nineteen Tint conversion functions, four Tint-program accessors,
-two parse functions and eleven M11 or M14 rules have no reader at M13. What is
-left is the seam `docs/02-dawn-design.md` §4.9 says Dawn has no branch for.
+**Where the rows go.** 13 are `port`, 30 are `merge`, and two are
+`simplify`. The other 63 are `skip`. The two override conversion rows now map
+to native SPIR-V metadata, not a Tint port. The remaining Tint program and
+WGSL-only contracts remain omitted. The input words still reach Vulkan unchanged.
 
 **The row this milestone exists for.** `vulkan/ShaderModuleVk.cpp:500`-`:501`
 points `codeSize` and `pCode` at `compilation->spirv`, which is what
@@ -5119,55 +5393,55 @@ so each row is a `merge` at most and most are `skip`.
 | `src/dawn/native/ShaderModule.cpp:345` | `TintCompositionTypeToInterStageComponentCount` | — | — | skip | With the row above: a component count for a variable the port does not reflect. |
 | `src/dawn/native/ShaderModule.cpp:362` | `TintInterpolationTypeToInterpolationType` | — | — | skip | M11. |
 | `src/dawn/native/ShaderModule.cpp:377` | `TintInterpolationSamplingToInterpolationSamplingType` | — | — | skip | M11. |
-| `src/dawn/native/ShaderModule.cpp:398` | `FromTintOverrideId` | — | — | skip | A pipeline-overridable constant. `AGENTS.md` §3.2 forbids the WGSL front end that declares one. |
-| `src/dawn/native/ShaderModule.cpp:402` | `FromTintOverrideType` | — | — | skip | With the row above. |
+| `src/dawn/native/ShaderModule.cpp:398` | `FromTintOverrideId` | `SpecializationConstant.spec_id`, `Tables.readSpecializationConstants` | `src/spirv/reflect.zig:68`, `src/spirv/reflect.zig:500` | simplify | Native adaptation, not a Tint conversion port. The reflector reads the external `SpecId` from caller words. See `docs/02-dawn-design.md` §4.9. |
+| `src/dawn/native/ShaderModule.cpp:402` | `FromTintOverrideType` | `ScalarType`, `Tables.readDeclarations` | `src/spirv/reflect.zig:59`, `src/spirv/reflect.zig:310` | simplify | Native adaptation reads SPIR-V scalar types. The codec accepts bool, integer widths 8/16/32/64, and float widths 16/32/64. This is not a WGSL type converter. |
 | `src/dawn/native/ShaderModule.cpp:418` | `FromTintLevelSampleInfo` | — | — | skip | The `textureNumLevels` and `textureNumSamples` query records. `src/spirv/reflect.zig` reads decorations, not query instructions, and nothing at M13 asks for a query. |
 | `src/dawn/native/ShaderModule.cpp:438` | `FromTintPixelLocalMemberType` | — | — | skip | Subgroup-local storage. M13 reflects descriptors; M14 owns the subgroup negotiation. |
 | `src/dawn/native/ShaderModule.cpp:455` | `ParseWGSL` | — | — | skip | `AGENTS.md` §3.2: the port parses no WGSL. `Descriptor` (`src/pipeline/shader_module.zig:43`) has no source-text field, and `docs/02-dawn-design.md` §4.9 fixes the input at SPIR-V bytes. |
-| `src/dawn/native/ShaderModule.cpp:486` | `ParseSPIRV` | `validateAndCreate` | `src/pipeline/shader_module.zig:289` | merge | Dawn runs the caller's words through SPIRV-Tools and then through Tint's reader to get a `tint::Program`. The port validates (`src/spirv/root.zig:55`) and reflects (`src/spirv/root.zig:54`) the same words and keeps them. `allowNonUniformDerivatives` reaches only Tint's derivative rule, so `ErrorModuleDescriptor` (`:59`) has no field for it. |
+| `src/dawn/native/ShaderModule.cpp:486` | `ParseSPIRV` | `validateAndCreate` | `src/pipeline/shader_module.zig:295` | merge | Dawn runs the caller's words through SPIRV-Tools and then through Tint's reader to get a `tint::Program`. The port validates (`src/spirv/root.zig:56`) and reflects (`src/spirv/root.zig:55`) the same words and keeps them. `allowNonUniformDerivatives` reaches only Tint's derivative rule, so `ErrorModuleDescriptor` (`:59`) has no field for it. |
 | `src/dawn/native/ShaderModule.cpp:525` | `GetBindGroupMinBufferSizes` | — | — | skip | Dawn derives a minimum binding size from Tint's type widths. The port has no type: M12's layout carries the size a caller declared. |
 | `src/dawn/native/ShaderModule.cpp:561` | `IsShaderCompatibleWithPipelineLayoutOnStorageTextureAccess` | — | — | skip | M14, with `ValidateCompatibilityWithPipelineLayout`. |
 | `src/dawn/native/ShaderModule.cpp:569` | `GetShaderBindingType` | `shader_reflect.bindingOf` | `src/pipeline/shader_reflect.zig:120` | merge | Dawn folds a seven-way variant into one `BindingInfoType`. The port's `Binding.kind` already names the case, so the fold is the field. |
 | `src/dawn/native/ShaderModule.cpp:580` | `ValidateCompatibilityOfSingleBindingWithLayout` | — | — | skip | M14. A shader is not checked against a layout until a pipeline layout exists. |
 | `src/dawn/native/ShaderModule.cpp:778` | `ValidateCompatibilityWithBindGroupLayout` | — | — | skip | M14, with the row above. |
-| `src/dawn/native/ShaderModule.cpp:795` | `ReflectEntryPointUsingTint` | `readEntryPoints`, `shader_reflect.layoutFromResources` | `src/pipeline/shader_module.zig:327`, `src/pipeline/shader_reflect.zig:101` | merge | One `EntryPoint` per entry point, in declaration order, which is what `readEntryPoints` builds. Dawn's 500-line body reads Tint's inspector; the port's reads `spirv.EntryPoint.resources` (`src/spirv/root.zig:40`) and copies, sorts and owns them. `EntryPointMetadata.bindings` (`ShaderModule.h:277`) is `EntryPoint.layout`; `EntryPointMetadata.stage` (`:297`) is `EntryPoint.execution_model`. |
-| `src/dawn/native/ShaderModule.cpp:1314` | `ReflectShaderUsingTint` | `validateAndCreate` | `src/pipeline/shader_module.zig:289` | merge | Dawn reflects only when `needReflection` is set, because reflection is the expensive half of a cache miss. The port always reflects: a module with no entry-point layout is of no use to M14, and the shard asserts the layout came back. |
-| `src/dawn/native/ShaderModule.cpp:1355` | `ValidateComputeStageWorkgroupSize` | — | — | skip | A compute entry point's `LocalSize` out of Tint's `WorkgroupInfo`. M5's reflector reads the execution model and the descriptors, not `OpExecutionModeId`, and M14 owns the compute pipeline. |
-| `src/dawn/native/ShaderModule.cpp:1436` | `CachedValidationError::CachedValidationError` | `shader_compilation_messages.Message.unanchored` | `src/pipeline/shader_compilation_messages.zig:60` | merge | Dawn caches a serialized `ValidationError` with its contexts so a cache hit can rebuild it. The port's message is one record built at the create pass and never serialized. |
-| `src/dawn/native/ShaderModule.cpp:1443` | `CachedValidationError::ToError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | merge | With the row above: there is nothing to rebuild, because nothing was cached. |
-| `src/dawn/native/ShaderModule.cpp:1450` | `ShaderModuleParseResult::HasTintProgram` | `ShaderModule.failed` | `src/pipeline/shader_module.zig:119` | merge | Dawn's parse result is a Tint program xor a validation error (`:1561`). The port's `failed` is that same pair in one field. |
-| `src/dawn/native/ShaderModule.cpp:1455` | `ShaderModuleParseResult::HasError` | `ShaderModule.failed` | `src/pipeline/shader_module.zig:119` | merge | The other half of the pair above. |
-| `src/dawn/native/ShaderModule.cpp:1461` | `ShaderModuleParseResult::ToError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | merge | A failed module carries the message instead of a handle, which is what the generated `createErrorShaderModule` (`src/api/objects.zig:398`) reports. |
-| `src/dawn/native/ShaderModule.cpp:1466` | `ShaderModuleParseResult::SetValidationError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | merge | With the row above. Dawn clears the Tint program when it stores the error; the port never had one. |
+| `src/dawn/native/ShaderModule.cpp:795` | `ReflectEntryPointUsingTint` | `readEntryPoints`, `shader_reflect.layoutFromResources`, `Tables.readSpecializationConstants` | `src/pipeline/shader_module.zig:337`, `src/pipeline/shader_reflect.zig:101`, `src/spirv/reflect.zig:500` | merge | Entry-point layouts remain owned. Specialization metadata covers module-scope scalar IDs, including unused declarations, rather than Tint entry-point initialization state. `validateAndCreate` transfers the owned metadata array without a copy. Names borrow shader words. See `docs/02-dawn-design.md` §4.9 for the upstream contract. |
+| `src/dawn/native/ShaderModule.cpp:1314` | `ReflectShaderUsingTint` | `validateAndCreate` | `src/pipeline/shader_module.zig:295` | merge | Dawn reflects only when `needReflection` is set, because reflection is the expensive half of a cache miss. The port always reflects: a module with no entry-point layout is of no use to M14, and the shard asserts the layout came back. |
+| `src/dawn/native/ShaderModule.cpp:1355` | `ValidateComputeStageWorkgroupSize` | `prepareCompute` | `src/pipeline/pipeline.zig` | simplify | Phase-1 source contract: M14 resolves M5 metadata against normalized constants, then checks nonzero dimensions, selected-device dimension limits, and a checked invocation product before lookup/native creation. Workgroup storage and subgroup checks remain open. The new SPIR-V decoder/evaluator is not a port of this Tint-based function. Parent verification is pending. |
+| `src/dawn/native/ShaderModule.cpp:1436` | `CachedValidationError::CachedValidationError` | `shader_compilation_messages.Message.unanchored` | `src/pipeline/shader_compilation_messages.zig:61` | merge | Dawn caches a serialized `ValidationError` with its contexts so a cache hit can rebuild it. The port's message is one record built at the create pass and never serialized. |
+| `src/dawn/native/ShaderModule.cpp:1443` | `CachedValidationError::ToError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:213` | merge | With the row above: there is nothing to rebuild, because nothing was cached. |
+| `src/dawn/native/ShaderModule.cpp:1450` | `ShaderModuleParseResult::HasTintProgram` | `ShaderModule.failed` | `src/pipeline/shader_module.zig:121` | merge | Dawn's parse result is a Tint program xor a validation error (`:1561`). The port's `failed` is that same pair in one field. |
+| `src/dawn/native/ShaderModule.cpp:1455` | `ShaderModuleParseResult::HasError` | `ShaderModule.failed` | `src/pipeline/shader_module.zig:121` | merge | The other half of the pair above. |
+| `src/dawn/native/ShaderModule.cpp:1461` | `ShaderModuleParseResult::ToError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:213` | merge | A failed module carries the message instead of a handle, which is what the generated `createErrorShaderModule` (`src/api/objects.zig:398`) reports. |
+| `src/dawn/native/ShaderModule.cpp:1466` | `ShaderModuleParseResult::SetValidationError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:213` | merge | With the row above. Dawn clears the Tint program when it stores the error; the port never had one. |
 | `src/dawn/native/ShaderModule.cpp:1475` | `DumpShaderFromDescriptor` | — | — | skip | A dump under `Toggle::DumpShaders`. The port has no toggle and no log sink; M4 owns the sink. |
-| `src/dawn/native/ShaderModule.cpp:1506` | `ParseShaderModule` | `validateAndCreate` | `src/pipeline/shader_module.zig:289` | port | The order the port keeps and the order `docs/10-architecture.md` "Shaders" fixes: validate (`:281`), reflect (`:283`), then create. Dawn validates at `:1522`-`:1524`, parses at `:1530`-`:1534` and reflects last at `:1554`-`:1556`, which is the same order. |
+| `src/dawn/native/ShaderModule.cpp:1506` | `ParseShaderModule` | `validateAndCreate` | `src/pipeline/shader_module.zig:295` | port | The order the port keeps and the order `docs/10-architecture.md` "Shaders" fixes: validate (`src/pipeline/shader_module.zig:303`), reflect (`:305`), then create. Dawn validates at `:1522`-`:1524`, parses at `:1530`-`:1534` and reflects last at `:1554`-`:1556`, which is the same order. |
 | `src/dawn/native/ShaderModule.cpp:1565` | `ComputeRequiredBufferSizesForLayout` | — | — | skip | M14, with the pipeline layout. It needs `GetBindGroupMinBufferSizes`, which the port does not have. |
 | `src/dawn/native/ShaderModule.cpp:1576` | `ValidateCompatibilityWithPipelineLayout` | — | — | skip | M14. This is the consumer of what this milestone reflects: `Pipeline.cpp:135` calls it, and the port's reflected `EntryPoint.layout` is the input it will take. |
 | `src/dawn/native/ShaderModule.cpp:1710` | `ValidateSubgroupMatrixConfiguration` | — | — | skip | Cooperative matrices. `DeviceExt::CooperativeMatrix` is M14's negotiation and no M13 row reads it. |
 | `src/dawn/native/ShaderModule.cpp:1798` | `ToSpirvSpan` | — | — | skip | Dawn builds a span over the caller's `code` because `mOriginalSpirv` is a copy. The port borrows the caller's slice (`Descriptor.words`, `src/pipeline/shader_module.zig:48`), so there is no span and no `codeSize` to trust: one of the copies `AGENTS.md` §3.2 says the port does without. |
-| `src/dawn/native/ShaderModule.cpp:1804` | `ShaderModuleBase::ShaderModuleBase` (device, descriptor, extensions, tag) | `createShaderModule`, `contentHash` | `src/pipeline/shader_module.zig:191`, `:264` | merge | The constructor copies the words (`:1821`) and hashes the source, the source's length and every flag around it (`:1839`-`:1857`). The port's descriptor is a label and the words, so the hash is over the words alone, which is what `contentHash` (`:264`) does. |
+| `src/dawn/native/ShaderModule.cpp:1804` | `ShaderModuleBase::ShaderModuleBase` (device, descriptor, extensions, tag) | `createShaderModule`, `contentHash` | `src/pipeline/shader_module.zig:197`, `src/pipeline/shader_module.zig:282` | merge | The constructor copies the words (`:1821`) and hashes the source, the source's length and every flag around it (`:1839`-`:1857`). The port's descriptor is a label and the words, so the hash is over the words alone, which is what `contentHash` (`:282`) does. |
 | `src/dawn/native/ShaderModule.cpp:1860` | `ShaderModuleBase::ShaderModuleBase` (device, descriptor, extensions) | — | — | skip | The second constructor only adds `GetObjectTrackingList()->Track(this)` (`:1864`). `AGENTS.md` §3.1 forbids the object-tracking list, and a module's lifetime belongs to whoever created it. |
-| `src/dawn/native/ShaderModule.cpp:1867` | `ShaderModuleBase::ShaderModuleBase` (device, error tag, label, messages) | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | merge | The error-tag constructor. Dawn fills no `mHash` here (`:1872`-`:1873` fill only the messages), so the port's is the zero digest and not the hash of an empty word stream. |
-| `src/dawn/native/ShaderModule.cpp:1876` | `ShaderModuleBase::~ShaderModuleBase` | `ShaderModule.destroy` | `src/pipeline/shader_module.zig:165` | port | Dawn's is defaulted because the handle belongs to a pipeline; the port's handle belongs to the module, so the module's owner calls destroy and reads the answer. |
-| `src/dawn/native/ShaderModule.cpp:1878` | `ShaderModuleBase::DestroyImpl` | `ShaderModule.destroy` | `src/pipeline/shader_module.zig:165` | merge | Dawn's uncaches the blob. The port has no blob, so the Vulkan handle, the entry-point layouts and the messages are the whole of it. |
-| `src/dawn/native/ShaderModule.cpp:1883` | `ShaderModuleBase::MakeError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | port | No device and no handle: the module records the message and every use of it fails. |
-| `src/dawn/native/ShaderModule.cpp:1890` | `ShaderModuleBase::Initialize` | `createShaderModule` | `src/pipeline/shader_module.zig:191` | merge | Dawn's initializer posts a worker task and the module is usable before it finishes. The port's create hands back an `std.Io.Future`, which is the same deferral with no thread of its own; an `Io` that cannot go concurrent answers `error.ConcurrencyUnavailable` instead of quietly validating on the calling thread. |
-| `src/dawn/native/ShaderModule.cpp:1971` | `ShaderModuleBase::GetInitializationError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:207` | merge | A refused create is an error the caller already holds; there is no second, later error to fetch. |
+| `src/dawn/native/ShaderModule.cpp:1867` | `ShaderModuleBase::ShaderModuleBase` (device, error tag, label, messages) | `createErrorShaderModule` | `src/pipeline/shader_module.zig:214` | merge | The error-tag constructor copies diagnostic text with `shader_compilation_messages.snapshot`. The module owns that copy until destruction. The optional label still borrows caller storage. Dawn fills no `mHash` here, so the port uses the zero digest. |
+| `src/dawn/native/ShaderModule.cpp:1876` | `ShaderModuleBase::~ShaderModuleBase` | `ShaderModule.destroy` | `src/pipeline/shader_module.zig:167` | port | Dawn's is defaulted because the handle belongs to a pipeline; the port's handle belongs to the module, so the module's owner calls destroy and reads the answer. |
+| `src/dawn/native/ShaderModule.cpp:1878` | `ShaderModuleBase::DestroyImpl` | `ShaderModule.destroy` | `src/pipeline/shader_module.zig:167` | merge | Dawn's uncaches the blob. The port has no blob, so the Vulkan handle, the entry-point layouts and the messages are the whole of it. |
+| `src/dawn/native/ShaderModule.cpp:1883` | `ShaderModuleBase::MakeError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:214` | port | No device and no handle. The module owns a copy of the caller's diagnostic text, and every use of the failed module fails. |
+| `src/dawn/native/ShaderModule.cpp:1890` | `ShaderModuleBase::Initialize` | `createShaderModule` | `src/pipeline/shader_module.zig:197` | merge | Dawn's initializer posts a worker task and the module is usable before it finishes. The port's create hands back an `std.Io.Future`, which is the same deferral with no thread of its own; an `Io` that cannot go concurrent answers `error.ConcurrencyUnavailable` instead of quietly validating on the calling thread. |
+| `src/dawn/native/ShaderModule.cpp:1971` | `ShaderModuleBase::GetInitializationError` | `createErrorShaderModule` | `src/pipeline/shader_module.zig:213` | merge | A refused create is an error the caller already holds; there is no second, later error to fetch. |
 | `src/dawn/native/ShaderModule.cpp:1976` | `ShaderModuleBase::GetType` | — | — | skip | `src/core/handle.zig:25` has no `shader_module` kind byte, and the arena that would own one is the device layer's (`core.Device.create`, `src/core/device.zig:61`). A module is a value, not an object. |
-| `src/dawn/native/ShaderModule.cpp:1980` | `ShaderModuleBase::HasEntryPoint` | `ShaderModule.findEntryPoint` | `src/pipeline/shader_module.zig:124` | merge | One lookup answers both questions, and it answers null where Dawn asserts the name is there. |
+| `src/dawn/native/ShaderModule.cpp:1980` | `ShaderModuleBase::HasEntryPoint` | `ShaderModule.findEntryPoint` | `src/pipeline/shader_module.zig:126` | merge | One lookup answers both questions, and it answers null where Dawn asserts the name is there. |
 | `src/dawn/native/ShaderModule.cpp:1984` | `ShaderModuleBase::ReifyEntryPointName` | — | — | skip | Dawn rewrites the caller's name into the isolated one Tint generated (`Device.cpp:2752`). The port reads the name out of the caller's own `OpEntryPoint`, so there is nothing to reify. |
 | `src/dawn/native/ShaderModule.cpp:1997` | `ShaderModuleBase::GetStrictMath` | — | — | skip | There is no WGSL front end (`AGENTS.md` §3.2), so there is no compiler whose arithmetic could be strict. `Descriptor` has no field for it. |
-| `src/dawn/native/ShaderModule.cpp:2001` | `ShaderModuleBase::GetEntryPoint` | `ShaderModule.findEntryPoint` | `src/pipeline/shader_module.zig:124` | merge | With the `HasEntryPoint` row: Dawn has a predicate and a lookup, the port has one lookup that answers null. |
-| `src/dawn/native/ShaderModule.cpp:2006` | `ShaderModuleBase::ComputeContentHash` | `contentHash` | `src/pipeline/shader_module.zig:276` | merge | Dawn records `mHash` into an `ObjectContentHasher` and returns the result. The port's hash is the SHA3-256 of the words, which is what `ShaderModule.eql` (`:151`) compares, so there is no second pass. |
-| `src/dawn/native/ShaderModule.cpp:2013` | `ShaderModuleBase::EqualityFunc::operator()` | `ShaderModule.eql` | `src/pipeline/shader_module.zig:151` | port | Dawn compares the members and asserts the hash agrees with them (`:2018`). The port compares the hash and the words and asserts nothing, because it holds no third copy that could disagree. |
-| `src/dawn/native/ShaderModule.cpp:2022` | `ShaderModuleBase::GetHash` | `ShaderModule.hash` | `src/pipeline/shader_module.zig:109` | merge | A public field rather than an accessor; the value is the same digest. |
+| `src/dawn/native/ShaderModule.cpp:2001` | `ShaderModuleBase::GetEntryPoint` | `ShaderModule.findEntryPoint` | `src/pipeline/shader_module.zig:126` | merge | With the `HasEntryPoint` row: Dawn has a predicate and a lookup, the port has one lookup that answers null. |
+| `src/dawn/native/ShaderModule.cpp:2006` | `ShaderModuleBase::ComputeContentHash` | `contentHash` | `src/pipeline/shader_module.zig:282` | merge | Dawn records `mHash` into an `ObjectContentHasher` and returns the result. The port's hash is the SHA3-256 of the words, which is what `ShaderModule.eql` (`:153`) compares, so there is no second pass. |
+| `src/dawn/native/ShaderModule.cpp:2013` | `ShaderModuleBase::EqualityFunc::operator()` | `ShaderModule.eql` | `src/pipeline/shader_module.zig:153` | port | Dawn compares the members and asserts the hash agrees with them (`:2018`). The port compares the hash and the words and asserts nothing, because it holds no third copy that could disagree. |
+| `src/dawn/native/ShaderModule.cpp:2022` | `ShaderModuleBase::GetHash` | `ShaderModule.hash` | `src/pipeline/shader_module.zig:111` | merge | A public field rather than an accessor; the value is the same digest. |
 | `src/dawn/native/ShaderModule.cpp:2026` | `ShaderModuleBase::UseTintProgram` | — | — | skip | There is no Tint program to hold a scoped reference to. |
 | `src/dawn/native/ShaderModule.cpp:2033` | `ShaderModuleBase::GetTintProgram` | — | — | skip | With the row above. Dawn regenerates the program on demand here (`:2036`); the port has the words already. |
 | `src/dawn/native/ShaderModule.cpp:2060` | `ShaderModuleBase::GetNullableTintProgramForTesting` | — | — | skip | With the rows above. |
 | `src/dawn/native/ShaderModule.cpp:2064` | `ShaderModuleBase::GetTintProgramRecreateCountForTesting` | — | — | skip | With the rows above. There is nothing to regenerate. |
-| `src/dawn/native/ShaderModule.cpp:2069` | `ShaderModuleBase::APIGetCompilationInfo` | `getCompilationInfo` | `src/pipeline/shader_module.zig:238` | port | Dawn's returns a `Future` and hands out a pointer chain of generated structs. The port's answer is a slice, and `api.CompilationInfoChain` (`src/api/descriptors.zig:494`) is the device layer's projection of it, because `pipeline` imports no API surface. |
-| `src/dawn/native/ShaderModule.cpp:2108` | `ShaderModuleBase::GetCompilationMessages` | `ShaderModule.messages` | `src/pipeline/shader_module.zig:108` | merge | A public field rather than an accessor over a `unique_ptr`. |
-| `src/dawn/native/ShaderModule.cpp:2112` | `ShaderModuleBase::GetCompilationLog` | `getCompilationLog` | `src/pipeline/shader_module.zig:247` | port | The empty answer for a module with no warning and no error (`:2114`-`:2116`), the `Compilation log for %s:\n` header and one message per line. `test/shader_module.zig` asserts the empty half on both fixtures. |
+| `src/dawn/native/ShaderModule.cpp:2069` | `ShaderModuleBase::APIGetCompilationInfo` | `getCompilationInfo`, `getCompilationInfoAsync` | `src/engine/native_async_scope_info.zig:203,235` | split | The callback bridge returns a registry Future. The separate typed observer returns an owned snapshot through std.Io.Future. Both copy diagnostics before acceptance, so source alias release does not invalidate completion. Callback views borrow through callback return. Typed results require deinit. BG210 exercised the real source-release oracle in Debug and ReleaseSafe. |
+| `src/dawn/native/ShaderModule.cpp:2108` | `ShaderModuleBase::GetCompilationMessages` | `ShaderModule.messages` | `src/pipeline/shader_module.zig:110` | merge | A public field rather than an accessor over a `unique_ptr`. |
+| `src/dawn/native/ShaderModule.cpp:2112` | `ShaderModuleBase::GetCompilationLog` | `getCompilationLog` | `src/pipeline/shader_module.zig:253` | port | The empty answer for a module with no warning and no error (`:2114`-`:2116`), the `Compilation log for %s:\n` header and one message per line. `test/shader_module.zig` asserts the empty half on both fixtures. |
 | `src/dawn/native/ShaderModule.cpp:2128` | `ShaderModuleBase::SetCompilationMessagesForTesting` | — | — | skip | The record is immutable from construction (`src/pipeline/shader_compilation_messages.zig:17`-`:22`), which is the property that lets a reader take it with no lock. A setter would give that up. |
 | `src/dawn/native/ShaderModule.cpp:2133` | `ShaderModuleBase::WillDropLastExternalRef` | — | — | skip | Dawn frees the parsed program when the last external reference drops. The port has no refcount: the owner calls `ShaderModule.destroy`. |
 | `src/dawn/native/ShaderModule.cpp:2140` | `ShaderModuleBase::GenerateShaderModuleParseRequest` | — | — | skip | The parse request is the cache key for a parse that never happens. The port reads the caller's words once and keeps them. |
@@ -5185,7 +5459,7 @@ one flat slice.
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/ShaderModule.h:114` | `TintProgram::TintProgram` | — | — | skip | The record that owns a `tint::Program` and its source file (`ShaderModule.h:113`-`:118`). The port has no compiler to produce either, and every reflection row upstream reads this program. |
 | `src/dawn/native/ShaderModule.h:125` | `CachedValidationError() = default;` | — | — | merge | A defaulted constructor for a cache slot. `Messages` (`src/pipeline/shader_compilation_messages.zig:68`) has two states and no uninitialized one, so there is nothing to default-construct. |
-| `src/dawn/native/ShaderModule.h:386` | `ShaderModuleBase::GetEntryPointCount` | `ShaderModule.countEntryPoints` | `src/pipeline/shader_module.zig:135` | port | Dawn counts out of a `PerStage<size_t>` the parse filled. The port walks the reflected slice, which is the same question with no table to keep. M14 asks it once per pipeline stage. |
+| `src/dawn/native/ShaderModule.h:386` | `ShaderModuleBase::GetEntryPointCount` | `ShaderModule.countEntryPoints` | `src/pipeline/shader_module.zig:137` | port | Dawn counts out of a `PerStage<size_t>` the parse filled. The port walks the reflected slice, which is the same question with no table to keep. M14 asks it once per pipeline stage. |
 
 ### `src/dawn/native/ShaderModuleParseRequest.cpp` — 3 rows
 
@@ -5205,18 +5479,18 @@ one flat slice.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CompilationMessages.cpp:43` | `TintSeverityToMessageType` | `shader_compilation_messages.MessageType` | `src/pipeline/shader_compilation_messages.zig:30` | merge | The three values are the same, and the spelling of the error member follows the generated enum (`src/api/enums.zig:237`), which spells it `error_` because `error` is a Zig keyword. |
+| `src/dawn/native/CompilationMessages.cpp:43` | `TintSeverityToMessageType` | `shader_compilation_messages.MessageType` | `src/pipeline/shader_compilation_messages.zig:31` | merge | The three values are the same, and the spelling of the error member follows the generated enum (`src/api/enums.zig:237`), which spells it `error_` because `error` is a Zig keyword. |
 | `src/dawn/native/CompilationMessages.cpp:56` | `CountUTF16CodeUnitsFromUTF8String` | — | — | skip | Counts UTF-16 code units for a message position. Every port message is unanchored (`src/pipeline/shader_compilation_messages.zig:10`-`:17`), so there is no position to count and the six counters stay zero. |
-| `src/dawn/native/CompilationMessages.cpp:88` | `ParsedCompilationMessages::AddUnanchoredMessage` | `shader_compilation_messages.Message.unanchored` | `src/pipeline/shader_compilation_messages.zig:60` | port | The only producer the port has. Dawn writes seven zero counters; the port's `Message` defaults them, which is the same record. |
+| `src/dawn/native/CompilationMessages.cpp:88` | `ParsedCompilationMessages::AddUnanchoredMessage` | `shader_compilation_messages.Message.unanchored` | `src/pipeline/shader_compilation_messages.zig:61` | port | The only producer the port has. Dawn writes seven zero counters; the port's `Message` defaults them, which is the same record. |
 | `src/dawn/native/CompilationMessages.cpp:96` | `ParsedCompilationMessages::AddMessageForTesting` | — | — | skip | A test-only setter that puts the same value in the UTF-8 and the UTF-16 counters. The record is immutable from construction, so the port has no path that would use it. |
 | `src/dawn/native/CompilationMessages.cpp:116` | `ParsedCompilationMessages::AddMessage` (`tint::diag::Diagnostic`) | — | — | skip | Recomputes all six positions from the WGSL file content. The port anchors to nothing, so with the row at `:88` this is the whole body. |
-| `src/dawn/native/CompilationMessages.cpp:180` | `ParsedCompilationMessages::AddMessage` (`CompilationMessageContent&&`) | `shader_compilation_messages.one` | `src/pipeline/shader_compilation_messages.zig:110` | merge | Dawn appends to a vector; the port holds one record in a one-element slice, because there is one producer and one consumer and a list that grows is the only difference. |
+| `src/dawn/native/CompilationMessages.cpp:180` | `ParsedCompilationMessages::AddMessage` (`CompilationMessageContent&&`) | `shader_compilation_messages.one` | `src/pipeline/shader_compilation_messages.zig:117` | merge | Dawn appends to a vector. The port's lower-level builder owns a one-item array but borrows text. The error-module constructor instead uses `snapshot` to own caller-supplied text. |
 | `src/dawn/native/CompilationMessages.cpp:184` | `ParsedCompilationMessages::AddMessages` | — | — | skip | Walks a `tint::diag::List`. The port's create pass names the rule that failed, which is one message (`ErrorModuleDescriptor.message`, `src/pipeline/shader_module.zig:65`). |
-| `src/dawn/native/CompilationMessages.cpp:192` | `ParsedCompilationMessages::AddFormattedTintMessages` | `shader_compilation_messages.formattedLog` | `src/pipeline/shader_compilation_messages.zig:127` | port | The `"(s)"` spelling survives because a caller printing a build log matches on it, and the empty answer for no error and no warning (`:216`-`:218`) is what `getCompilationLog` (`src/pipeline/shader_module.zig:240`) turns into `""`. |
-| `src/dawn/native/CompilationMessages.cpp:236` | `OwnedCompilationMessages::OwnedCompilationMessages` | `shader_compilation_messages.empty`, `.one` | `src/pipeline/shader_compilation_messages.zig:99`, `:110` | merge | Dawn's constructor builds the pointer chain of generated structs (`:236`-`:268`). The port's two record values are the empty one and the one-message one, and the device layer projects them. A module that compiled clean allocates nothing, which is the common case in a build. |
-| `src/dawn/native/CompilationMessages.cpp:271` | `OwnedCompilationMessages::GetCompilationInfo` | `getCompilationInfo` | `src/pipeline/shader_module.zig:238` | port | Dawn hands out a `const CompilationInfo*`; the port hands back the slice and the device layer projects the chain. |
+| `src/dawn/native/CompilationMessages.cpp:192` | `ParsedCompilationMessages::AddFormattedTintMessages` | `shader_compilation_messages.formattedLog` | `src/pipeline/shader_compilation_messages.zig:128` | port | The `"(s)"` spelling survives because a caller printing a build log matches on it, and the empty answer for no error and no warning (`:216`-`:218`) is what `getCompilationLog` (`src/pipeline/shader_module.zig:253`) turns into `""`. |
+| `src/dawn/native/CompilationMessages.cpp:236` | `OwnedCompilationMessages::OwnedCompilationMessages` | `shader_compilation_messages.empty`, `.one`, `.snapshot` | `src/pipeline/shader_compilation_messages.zig:111,117,135` | merge | Dawn builds the generated pointer chain. The port stores immutable records. `empty` allocates nothing. `one` owns its array but borrows text. The error constructor uses `snapshot` to own both. Snapshots preserve all metadata and use at most one contiguous text allocation. `Messages.clone` and `snapshotCompilationInfo` are original Dusk glue, not new Dawn rows. |
+| `src/dawn/native/CompilationMessages.cpp:271` | `OwnedCompilationMessages::GetCompilationInfo` | `getCompilationInfo` | `src/pipeline/shader_module.zig:248` | port | Dawn returns a const pointer. The pipeline accessor returns a borrowed `Messages` view until module destruction, not an owner or async completion. Use `snapshotCompilationInfo` for independent storage and release that result once with `deinit`. |
 | `src/dawn/native/CompilationMessages.cpp:275` | `OwnedCompilationMessages::GetFormattedTintMessages` | — | — | merge | `formattedLog` (`src/pipeline/shader_compilation_messages.zig:127`) reads `Messages.items` directly, so the accessor has no reader once the two forms are one. |
-| `src/dawn/native/CompilationMessages.cpp:279` | `OwnedCompilationMessages::HasWarningsOrErrors` | `shader_compilation_messages.Messages.hasWarningsOrErrors` | `src/pipeline/shader_compilation_messages.zig:92` | port | The two counts the same way. `test/shader_module.zig` asserts it false on both fixtures, with the two counts beside it. |
+| `src/dawn/native/CompilationMessages.cpp:279` | `OwnedCompilationMessages::HasWarningsOrErrors` | `shader_compilation_messages.Messages.hasWarningsOrErrors` | `src/pipeline/shader_compilation_messages.zig:93` | port | The two counts the same way. `test/shader_module.zig` asserts it false on both fixtures, with the two counts beside it. |
 
 ### `src/dawn/native/CompilationMessages.h` — 1 row
 
@@ -5266,10 +5540,10 @@ what the caller handed it.
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/vulkan/ShaderModuleVk.cpp:82` | `CompiledSpirv::FromValidatedBlob` | — | — | skip | Rebuilds a cached `CompiledSpirv` from a blob. The port has no cache: the caller's words are the blob. |
-| `src/dawn/native/vulkan/ShaderModuleVk.cpp:93` | `ShaderModule::Create` | `createShaderModule` | `src/pipeline/shader_module.zig:191` | merge | Dawn's `Create` constructs and then calls `Initialize` (`:97`-`:98`). The port's one call does the three steps and hands back a future, which is the same deferral without the second call. |
+| `src/dawn/native/vulkan/ShaderModuleVk.cpp:93` | `ShaderModule::Create` | `createShaderModule` | `src/pipeline/shader_module.zig:198` | merge | Dusk validates and reflects caller SPIR-V, then synchronously creates a module. No future or Tint regeneration is involved in this path. |
 | `src/dawn/native/vulkan/ShaderModuleVk.cpp:102` | `ShaderModule::ShaderModule` | — | — | merge | The constructor delegates to `ShaderModuleBase`'s. The port has one `Descriptor` (`src/pipeline/shader_module.zig:43`) and one create pass, so there is no second layer to delegate to. |
-| `src/dawn/native/vulkan/ShaderModuleVk.cpp:107` | `ShaderModule::~ShaderModule` | `shader_module_vk.destroy` | `src/pipeline/shader_module_vk.zig:120` | port | Dawn's is defaulted because the handle belongs to a pipeline and lives in `DeviceVk.cpp`'s teardown. The port's handle belongs to the module, so the module's owner calls destroy and reads the answer. |
-| `src/dawn/native/vulkan/ShaderModuleVk.cpp:130` | `ShaderModule::GetHandleAndSpirv` | `shader_module_vk.create` | `src/pipeline/shader_module_vk.zig:95` | port | 400 lines collapse to the tail at `:496`-`:528`: `codeSize` is the word count times four (`:500`), `pCode` is the words (`:501`), and the null-handle assert is Dawn's (`:519`). Everything before it is Tint options, binding remapping and a blob-cache lookup, and there is no Tint. The `#else` at `:529`-`:530` is the row `docs/02-dawn-design.md` §4.9 names. |
+| `src/dawn/native/vulkan/ShaderModuleVk.cpp:107` | `ShaderModule::~ShaderModule` | `shader_module_vk.destroy` | `src/pipeline/shader_module_vk.zig:147` | port | Dawn's is defaulted because the handle belongs to a pipeline and lives in `DeviceVk.cpp`'s teardown. The port's handle belongs to the module, so the module's owner calls destroy and reads the answer. |
+| `src/dawn/native/vulkan/ShaderModuleVk.cpp:130` | `ShaderModule::GetHandleAndSpirv` | `shader_module_vk.create` | `src/pipeline/shader_module_vk.zig:121` | merge | Matches native module creation at `:496-511`, but uses caller words. Dawn's Tint regeneration, binding remap, and blob-cache policy is not ported. See `docs/02-dawn-design.md` §4.16.4. |
 
 ### `src/dawn/native/vulkan/ShaderModuleVk.h` — 0 rows
 
@@ -5291,73 +5565,295 @@ for word. The third test asserts the seam's own failure, which is the only
 create error reachable with no device.
 
 #### M14 — pipelines and the cache
-341 rows is the budget in §1. The tables below carry **63 rows**, and the
-difference is not a shortfall of effort: it is the set of upstream files that
-have not landed. §1's module list names 47 files and 9,157 lines; six Zig files
-exist on disk for M14, and every function definition in those six has a row.
-The last table names each unlanded file with its census count, so the budget is
-accounted for rather than quietly dropped.
+The source census budget remains **341 rows**. The implementation tables below
+carry **66 mapping rows**, including two numeric helper contracts. These counts measure different things.
+A mapping row can merge definitions, replace a helper, or transfer a contract.
+An unmapped census row does not, by itself, prove missing implementation.
+The classified ledger below records each disputed group and its owner.
+It does not close the 341-row budget. Complete source-row accounting remains
+required before any arithmetic reconciliation or full M14 completion claim.
+**Current traditional-pass contract, 2026-10-07.**
+`RenderPipelineDescriptor.compatible_render_pass` (`src/pipeline/pipeline.zig:374`)
+is REQUIRED. The caller supplies a real compatible traditional render pass.
+It must match attachment formats and sample count at subpass zero.
+`createRenderPipeline` rejects null before cache lookup. Cache identity excludes
+the raw render-pass handle. Compatibility still remains a caller obligation.
 
-**What landed.** Six Zig files and two shards: `src/pipeline/pipeline.zig`,
+`fillStages` (`src/pipeline/pipeline_render.zig:644`) fills caller-owned
+`Scratch.stages`. `fillScratch` (`src/pipeline/pipeline_render.zig:676`) prepares
+the create info. `createGraphicsPipeline` reads only backend and scratch.
+There is no `RenderingInfo`, `stencilFormat`, or old layout/descriptor argument.
+`LayoutInput.create` (`src/pipeline/pipeline.zig:252`) creates the native layout.
+`Pipeline.initLayout` (`src/pipeline/pipeline.zig:488`) copies replay metadata.
+`Scene.typedPipeline` (`test/triangle.zig:210`) passes the same compatible pass,
+layout groups, and shader stages through the production `PipelineStore` path.
+
+**Anchor refresh, 2026-10-07.** The changed memory, format, command, native
+resource, layout, pipeline, shader, and external-fd mapping rows now cite actual
+scoped declarations. Grouped functions list each declaration separately.
+Required contracts and selected omissions remain explicit. Historical counts
+are not new port claims. No build, test, formatter, or checker ran for this
+mapping-only refresh.
+
+**Native stage-constant contract, 2026-10-08.** `StageInput.constants` borrows
+`api.ConstantEntry` keys and f64 values. Empty constants require no normalization
+and send null `pSpecializationInfo`. Encoded defaults stay unchanged.
+Phase-1 `prepareCompute` decodes authoritative `content_bytes` even without constants.
+It reflects the workgroup source and checks the effective default size.
+Graphics stages use `prepareSpecialization` to decode and reflect nonempty constants.
+Both paths normalize supplied values once with `wordsFromBytes` as the byte decoder.
+The key and driver consume that same payload. Invalid input fails before lookup,
+even when the cache already holds a pipeline. Caller words are never rewritten.
+
+Keys use canonical decimal `SpecId` strings or unambiguous `OpName` aliases.
+Duplicate caller aliases for one ID fail. Unknown or ambiguous keys fail.
+Module metadata retains shared IDs, aliases, and each result's encoded default.
+The codec converts the requested f64 for every declaration sharing the resolved ID.
+It emits one map entry only when every conversion has the same encoded size and bits.
+Conflicting sizes or bits return `AmbiguousConstant`. Range and finite errors remain explicit.
+The canonical type tag and width use a deterministic minimum across the family.
+Aliases and metadata order cannot change that choice. Exact scalar kinds and defaults need not match.
+Distinct IDs sharing one name remain ambiguous.
+This is an API conversion policy, not a decoder restriction. See `docs/02-dawn-design.md` §4.9.
+Boolean values must be finite. Zero becomes false. Other values become true.
+Vulkan bool storage uses four-byte `VkBool32`. Integers support 8/16/32/64 bits.
+Raw bounds precede truncation toward zero. Floats support 16/32/64 bits.
+Finite range checks precede rounding. The 64-bit integer upper bound is exclusive.
+Unsupported widths, nonfinite values, and out-of-range values return named errors.
+
+Canonical keys sort by ID and encode type, width, size, and little-endian bits.
+Native payload bytes use native endianness and tightly packed map offsets.
+Payload storage remains valid through the native call. Three codec allocations
+cover sorted scratch, map entries, and one payload allocation with two byte views.
+Scratch is temporary. Two owned buffers require one `deinit`. Deinit invalidates the value and all its views.
+
+**Historical pre-phase-1 RED/GREEN and runtime scope.** BG93 exposed the compute-key collision:
+SpecId 7 values 2 and 3 produced the same key. `test-pipeline-cache` had 17/18
+passes and one failure at line 437. BG94 passed SPIR-V 14/14 and shader-module
+7/7. Its other three checks initially failed compilation on fixture DeviceOpts
+and binding-offset fields. Source owners corrected those fixture errors.
+BG95 passed all 10/10 named build steps and pipeline-cache 24/24.
+This includes the formerly red key, alias/order/scalar normalization, compute
+and both graphics-stage native ABI payloads, invalid cached-input rejection,
+unaligned byte/word-count validation, and fail-N key/factory rollback.
+
+Before the late review fixes, actual `test-compute-specialization` passed 3/3 in Debug and actual ReleaseSafe.
+Each historical mode contained one new compute scenario and two imported triangle tests.
+That scenario performed five actual compute encoder → command-buffer → Vulkan
+submit/wait/coherent-readback runs. Results are 113 (default), 25 (named),
+35 (numeric), then 25/35 with reversed alias/order cache hits.
+Unique pipeline counts are 1/2/3/3/3. This is not three new compute scenarios.
+Graphics proof covers the native-info seam, not a specialized graphics draw.
+
+**Historical focused parent proof, 2026-10-08 (before phase 1).** BG97 passed all 16/16 build steps:
+`test-spirv`, `test-shader-module`, `test-pipeline-cache`,
+`test-compute-specialization`, and `test-compute-specialization-release-safe`.
+The run used `-j2 --summary all`. Counts were SPIR-V 15/15, shader modules 7/7,
+pipeline cache 24/24, and GPU shards 4/4 in Debug and actual ReleaseSafe.
+Each GPU shard contains two new compute scenarios and two existing triangle tests.
+Each safety mode executed ten compute dispatch/readbacks through frontend recording,
+native replay, submission, wait, and coherent host readback.
+Results were 113/25/35/25/35 and 121/44/55/44/55.
+Each scenario's unique pipeline counts were 1/2/3/3/3.
+This is not four new compute scenarios or a specialized graphics draw.
+
+BG97 covers the explicit SHADER_WRITE → HOST_READ buffer barrier, shared module IDs,
+and codec family conversion. Reflection retains every result and encoded default.
+Codec regressions cover alias normalization, equal cross-kind encoded values,
+and conflicting sizes/bits. BG95 remains historical before these changes.
+BG102 below covers the final wrapping, deinit invalidation, and oversize-test corrections.
+
+**Earlier source-style parent proof.** BG101 passed exact, explicit 142-file
+ziglint and `zlint --deny-warnings` lists. Ziglint produced no diagnostics.
+Zlint reported zero errors and zero warnings in 208 ms.
+This preceded the final oversize-test syntax fix. BG104 below supplies latest-source style evidence.
+No supplemental analyzer ran.
+
+**Current full native parent proof.** BG102 passed formatter and all 73/73
+build steps in 312.62 seconds (`artifact://366`). Root tests passed 262/262
+in Debug and 262/262 in actual ReleaseSafe. All eleven contained codec unit
+tests executed, including ID families, oversized input, fail-N allocation, and rounding.
+The GPU shards passed 4/4 in Debug and 4/4 in actual ReleaseSafe again,
+with the ten compute dispatch/readbacks per mode described above.
+
+**Historical failed aggregate.** BG99 passed 68/73 build steps.
+Only Debug and ReleaseSafe root compilation failed. The new `TooManyConstants`
+test used invalid slice struct syntax. Production code did not cause those errors.
+The writer replaced it with a pointer slice and checked target byte-range representability.
+Targets that cannot represent that test slice skip that impossible test input.
+The oversized length rejects before any dereference. Named host/GPU shards passed.
+BG102 supersedes BG99's failed root compile, not the other open verification scopes.
+
+**Current executed cross-target proof.** BG103 passed all three executed rows
+in 94.71 seconds. Run `20261008-002745-1243037-21180` executed 262 root tests
+on each of `x86_64-linux`, `aarch64-linux`, and big-endian `powerpc64-linux`.
+It reported zero failures, zero build-only rows, and zero partial rows.
+These results prove root CPU execution, not foreign GPU execution.
+
+**Current final source-style proof.** BG104 passed exact, explicit 142-file
+ziglint and `zlint --deny-warnings` lists after the boundary-test repair.
+Ziglint produced zero diagnostics. Zlint reported zero errors and zero warnings
+in 295 ms. The whole style run completed in 8.52 seconds.
+
+**Current zero-layer GPU proof.** BG105 passed 7/7 build steps in 1.88 seconds
+(`artifact://371`). GPU tests passed 4/4 Debug and 4/4 actual ReleaseSafe.
+Each mode executed the ten compute dispatch/readbacks described above.
+The environment used `VK_INSTANCE_LAYERS=`, `VK_LOADER_LAYERS_DISABLE='*'`,
+and `VK_LOADER_DEBUG=layer`. All eight instance traces showed
+Application → Loader → Drivers. Device traces showed Loader → Device.
+The driver was llvmpipe LLVM 21.1.8 through `lvp.so`. No inserted layers appeared.
+The empty-environment loader warning named `""`, not an inserted layer.
+
+**Current installed legacy gate proof.** BG106 ran
+`devenv shell -- zig-gate --no-zbc` once and exited zero in 36.16 seconds.
+All five printed stages passed: format check, build, test, AST check, and zlint.
+The script printed `GATE PASSED`. ZBC was explicitly not run.
+The installed gate has no Zwanzig stage and disables coverage.
+BG103 executed cross-target tests and BG104 checked ziglint separately.
+This is selected installed-gate proof, not full ten-stage house verification.
+Root, cross-target, zero-layer GPU, and final source-style results above passed.
+The older 251-test, cross251, bg92 gate, and 107-warning snapshots below remain historical.
+No current supplemental-analyzer result is claimed. The full ten-stage house
+contract is outside this session's tool ownership and is not proved green.
+This selected native contract does not close M14, conformance, or the ledger.
+
+**Historical pre-specialization native parent proof, 2026-10-08.** Artifact 275 passed all 69 build
+steps and 251 root tests in both Debug and actual ReleaseSafe.
+The bundle allocation-failure/context-release regression passed as test 213/251
+in both modes. The native GPU shards passed. The parent formatter completed.
+Artifacts 116, 133, 202, and 211 remain earlier, dated snapshots.
+
+**Historical pre-specialization cross proof, 2026-10-08.** Cross run
+`20261007-223439-864143-20044` executed 251 root tests on each of
+`x86_64-linux`, `aarch64-linux`, and big-endian `powerpc64-linux`.
+It reported 3 passes, 0 failures, 0 build-only rows, and 0 partial rows.
+These CPU results do not claim foreign GPU execution.
+The earlier run `20261007-211754-709407-22206` remains historical 250-test evidence.
+
+**Historical pre-specialization zero-layer proof, 2026-10-08.** Artifact 278 passed
+triangle 2/2, query 16/16, buffer 4/4, and all 10 build steps.
+The loader settings were `VK_INSTANCE_LAYERS=`,
+`VK_LOADER_LAYERS_DISABLE='*'`, and `VK_LOADER_DEBUG=layer`.
+Loader evidence showed the application-to-loader-to-driver device chain with
+all layers disabled. Artifact 216 remains historical pre-fix evidence.
+**Historical pre-specialization source-style proof, 2026-10-08.** Parent run bg85 formatted the
+bundle source, then passed ziglint and `zlint --deny-warnings` on the exact
+139-file source lists. ziglint produced no diagnostics. zlint reported
+0 errors and 0 warnings. This includes the final Self alias and required
+fixture-constructor field. It does not establish the combined house gate.
+
+Artifact 273 remains dated pre-fix failure evidence: 250 tests passed and one
+crashed. Artifact 275 verifies the narrow failure fix, not successful reentrant
+encoding. The post-fix native, cross, and zero-layer GPU proofs above passed.
+The final mechanical bundle-fixture edits change no executable behavior.
+The parent retains native275, cross251, and GPU278 as selected behavior evidence.
+These source writers closed before specialization. The source-style proof above does not cover the new source.
+
+**Historical pre-specialization gate scope, 2026-10-08.** Parent run bg92 executed
+`devenv shell -- zig-gate --no-zbc` once and exited 0 after 211.13 seconds.
+The five printed stages passed: format check, build, test, AST check, and zlint.
+The script printed `GATE PASSED`. This proves only that reduced installed gate.
+Legacy ziglint is commented out in that script; Zwanzig and cross-target execution
+are not stages in that run, and coverage is disabled. ZBC was explicitly skipped
+under the user's report-only instruction. Separate historical evidence covers
+source ziglint/zlint, actual cross-target execution, and native zero-layer GPU work.
+**Historical full-house status: NOT GREEN.** The pre-specialization default
+Zwanzig run below reported 107 unknown optional-unwrap states.
+The temporary CLI control fixtures were removed.
+
+**Historical pre-specialization Zwanzig contract proof, 2026-10-08.** Parent run bg89 passed
+976/976 tests: 924 unit tests and 52 fixture classes, across all 6 test steps.
+The ReleaseFast install passed 4/4 steps. The actual default run, artifact 303,
+processed all 139 source files, 21 rules, and 4,981 engine runs without
+exclusions or analysis budgets. It exited 1 with 107 optional-unwrap warnings.
+It reported no store errors or other diagnostic classes. This is not a clean
+source result. The remaining warnings are model limits, not proved-safe unwraps.
+
+The exact diagnostic-tuple comparison added no diagnostics. It removed 38
+optional-unwrap and 2 style diagnostics. The remaining 107 are a subset of the
+earlier exhaustive 145-warning triage.
+The actual CLI retained all six expected unsafe controls: resource leak,
+double free, directory leak, double close, nullable argument, and trapping assert.
+The safe managed-directory and guarded controls produced no diagnostics.
+These controls verify the historical analyzer contract. They do not make that
+pre-specialization 107-warning source result green.
+zbc is report-only by user direction. Its earlier snapshot analyzed 95 files,
+aborted 44 on cleanup depth, and reported 53 findings. That snapshot is not green.
+The zbc repository belongs solely to the separate stabilization session.
+The supplemental checkers are separate repositories, not dUSK source implementations.
+
+
+**What landed.** The pipeline implementation includes `src/pipeline/pipeline.zig`,
 `src/pipeline/pipeline_render.zig`, `src/pipeline/pipeline_compute.zig`,
 `src/pipeline/pipeline_backend.zig`, `src/pipeline/cache.zig`,
-`src/pipeline/cache_key.zig`, and `test/render_pipeline.zig` plus
-`test/pipeline_cache.zig`.
+`src/pipeline/cache_key.zig`, `src/pipeline/specialization.zig`, and `test/render_pipeline.zig` plus
+`test/pipeline_cache.zig` and `test/compute_specialization.zig`.
 
-**The claim this milestone exists for.** Dawn's order is
-`GetCachedRenderPipeline` then build then `AddOrGetCachedRenderPipeline`
-(`Device.cpp:2216`-`:2219`, `:2239`). The port runs the same three steps in
-`createRenderPipeline` (`src/pipeline/pipeline.zig:346`-`:350`), and a second
-identical descriptor must reach the same `VkPipeline` without the driver being
-called again. "The same pipeline with a different layout is a different key" is
-not a rule the port invents: it is what `PipelineLayout::Initialize` streams
-into `mCacheKey` (`vulkan/PipelineLayoutVk.cpp:127`) already does, and the key
-records the layout first (`Pipeline.cpp:385`) and compares it first
-(`Pipeline.cpp:400`).
+**The claim this milestone exists for.** Dawn performs lookup, build, then
+insertion (`Device.cpp:2216-2219,2239`). `createRenderPipeline`
+(`src/pipeline/pipeline.zig:617`) keeps that order. An identical descriptor
+reuses the same `VkPipeline` without another driver creation call.
+The key records layout content, not its raw native handle. Dawn's layout
+initialization streams its content into `mCacheKey`
+(`vulkan/PipelineLayoutVk.cpp:127`). The port includes ordered group definitions
+and immediate ranges. A compatible non-null traditional pass remains REQUIRED
+before lookup, even when an equivalent pipeline already exists.
 
 ### `src/dawn/native/Pipeline.h` — 3 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Pipeline.h:59` | `ProgrammableStage` | `StageInput` | `src/pipeline/pipeline.zig:103` | port | Four members upstream (`:60`-`:66`): the module, the entry point, the metadata and the override constants. The port drops the constants, because one descriptor is one specialization (`src/pipeline/pipeline.zig:11`-`:14`), and replaces the metadata with the two things the key and the compatibility rules read: `content_bytes` and `usage`. |
-| `src/dawn/native/Pipeline.h:71` | `PipelineBase` | `Pipeline` | `src/pipeline/pipeline.zig:267` | port | Dawn has two leaves on one base (`RenderPipeline.h:88`, `ComputePipeline.h:46`) and a `CachedObject` second base. The port has one arena object with a tag, because the two differ in what they are asked and not in how they live. |
-| `src/dawn/native/Pipeline.h:87` | `PipelineBase::GetStageMask` | `stageMask` | `src/pipeline/pipeline.zig:733` | port | A getter upstream and a computation here: the mask is derived from the stages the descriptor carries, so nothing stores it. |
+| `src/dawn/native/Pipeline.h:59` | `ProgrammableStage` | `StageInput` | `src/pipeline/pipeline.zig:110` | simplify | Borrowed `api.ConstantEntry` values now apply to compute, vertex, and fragment stages. Empty constants preserve encoded defaults. Nonempty constants use the native SPIR-V contract below. Internal Vulkan variant caches remain separate and open. |
+| `src/dawn/native/Pipeline.h:71` | `PipelineBase` | `Pipeline` | `src/pipeline/pipeline.zig:440` | port | Dawn has two leaves on one base (`RenderPipeline.h:88`, `ComputePipeline.h:46`) and a `CachedObject` second base. The port has one arena object with a tag, because the two differ in what they are asked and not in how they live. |
+| `src/dawn/native/Pipeline.h:87` | `PipelineBase::GetStageMask` | `stageMask` | `src/pipeline/pipeline.zig:1054` | port | A getter upstream and a computation here: the mask is derived from the stages the descriptor carries, so nothing stores it. |
 
-### `src/dawn/native/Pipeline.cpp` — 7 rows
+### `src/dawn/native/Pipeline.cpp` — 8 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Pipeline.cpp:56` | `ComputeNumTextureSamplerCombinations` | `StageUsage.texture_sampler_combination_count` | `src/pipeline/pipeline.zig:94` | simplify | Upstream walks `EntryPointMetadata::samplerAndNonSamplerTexturePairs` into a count and compares it against a device limit at `:153`. The port reads no program, so reflection fills the count and `StageValidationOptions.max_texture_sampler_combinations` (`src/pipeline/pipeline.zig:619`) carries the cap. The rule then runs with no device at all, which is what `test/compatibility.zig` needs. |
-| `src/dawn/native/Pipeline.cpp:92` | `ValidateProgrammableStage` | `validateStage` | `src/pipeline/pipeline.zig:771` | port | Every rule upstream reads `EntryPointMetadata`; the port reads `StageUsage`, which is what reflection reported. The first rule is the same one, so a caller names the error Dawn would have raised. |
-| `src/dawn/native/Pipeline.cpp:138` | the `textureLoad` on a depth texture rule | `StageUsage.texture_load_with_depth_texture` | `src/pipeline/pipeline.zig:87` | port | The rule's only input is the reflected metadata field, so it is one `bool`. Restriction 3 of the §M16 re-gate. |
-| `src/dawn/native/Pipeline.cpp:144` | the depth texture with a non-comparison sampler rule | `StageUsage.depth_texture_with_non_comparison_sampler` | `src/pipeline/pipeline.zig:89` | port | As the row above. Restriction 3. |
-| `src/dawn/native/Pipeline.cpp:149` | the fine derivative rule | `StageUsage.fine_derivative_builtin` | `src/pipeline/pipeline.zig:91` | port | As the row above. Restriction 4. |
-| `src/dawn/native/Pipeline.cpp:383` | `PipelineBase::ComputeContentHash` | `appendBaseKey` | `src/pipeline/pipeline.zig:694` | port | The layout first (`:385`), then the stage mask (`:387`), then per stage the module hash, the entry point and the constants (`:389`-`:391`). The port writes that order with `appendBytes` and `appendWord` and has no constants to write. |
-| `src/dawn/native/Pipeline.cpp:398` | `PipelineBase::EqualForCache` | `Cache.find`, `CacheKey.eql` | `src/pipeline/cache.zig:94`, `src/pipeline/cache_key.zig:103` | merge | Upstream compares the layout by pointer (`:400`) because the layout is deduplicated. The port compares the layout's bytes, because those bytes are what `vulkan/PipelineLayoutVk.cpp:127` streams into the key. The same rule, one encoding, no second dedup. |
+| `src/dawn/native/Pipeline.cpp:56` | `ComputeNumTextureSamplerCombinations` | `StageUsage.texture_sampler_combination_count` | `src/pipeline/pipeline.zig:101` | simplify | Upstream walks `EntryPointMetadata::samplerAndNonSamplerTexturePairs` into a count and compares it against a device limit at `:153`. The port reads no program, so reflection fills the count and `StageValidationOptions.max_texture_sampler_combinations` (`src/pipeline/pipeline.zig:1082`) carries the cap. The rule then runs with no device at all, which is what `test/compatibility.zig` needs. |
+| `src/dawn/native/Pipeline.cpp:92` | `ValidateProgrammableStage` | `validateStage`, `prepareSpecialization`, `Specialization.init` | `src/pipeline/pipeline.zig:1092`, `src/pipeline/pipeline.zig:131`, `src/pipeline/specialization.zig:63` | simplify | Compatibility rules remain in validateStage. Native specialization validates authoritative bytes, resolves IDs, rejects invalid values and duplicate caller assignments, and converts scalars before cache lookup or native creation. This maps the constant-validation contract documented in `docs/02-dawn-design.md` §4.9, not WGSL uninitialized-override validation. |
+| `src/dawn/native/Pipeline.cpp:138` | the `textureLoad` on a depth texture rule | `StageUsage.texture_load_with_depth_texture` | `src/pipeline/pipeline.zig:94` | port | The rule's only input is the reflected metadata field, so it is one `bool`. Restriction 3 of the §M16 re-gate. |
+| `src/dawn/native/Pipeline.cpp:144` | the depth texture with a non-comparison sampler rule | `StageUsage.depth_texture_with_non_comparison_sampler` | `src/pipeline/pipeline.zig:96` | port | As the row above. Restriction 3. |
+| `src/dawn/native/Pipeline.cpp:149` | the fine derivative rule | `StageUsage.fine_derivative_builtin` | `src/pipeline/pipeline.zig:98` | port | As the row above. Restriction 4. |
+| `src/dawn/native/Pipeline.cpp:260` | `PipelineBase::PipelineBase` (device, layout, label, stages) | `createRenderPipeline`, `createComputePipeline`, `Specialization.init` | `src/pipeline/pipeline.zig:617`, `src/pipeline/pipeline.zig:719`, `src/pipeline/specialization.zig:63` | simplify | The stage-constant storage contract maps to temporary normalized payloads and retained canonical key bytes, not a second persistent f64 map. Stage masks and layout/replay metadata remain in Pipeline. Buffer minimum-size aggregation is not closed by this row. See `docs/02-dawn-design.md` §4.9. |
+| `src/dawn/native/Pipeline.cpp:383` | `PipelineBase::ComputeContentHash` | `appendBaseKey`, `appendStageKey` | `src/pipeline/pipeline.zig:992`, `src/pipeline/pipeline.zig:1025` | simplify | Layout, stage mask, module bytes, entry point, and normalized constants define identity. Sorted SpecId/type/width/size/little-endian bits exclude ABI padding. Equivalent aliases, input order, and converted scalar bits share a pipeline. Omission may differ from an explicit default. See `docs/02-dawn-design.md` §4.9. |
+| `src/dawn/native/Pipeline.cpp:398` | `PipelineBase::EqualForCache` | `Cache.find`, `CacheKey.eql` | `src/pipeline/cache.zig:96`, `src/pipeline/cache_key.zig:114` | merge | Cache equality compares the same canonical bytes used for identity, including converted specialization values. It does not compare borrowed constant-entry addresses or raw f64 values. Layout identity remains structural. See `docs/02-dawn-design.md` §4.9. |
+
+
+### Pinned numeric validation helpers — 2 contract rows
+
+The first-party evidence is in `docs/02-dawn-design.md` §4.9. These helpers
+belong to `src/utils/numeric.h`, not `src/dawn/common/Numeric.h`.
+
+| `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
+| --- | --- | --- | --- | --- | --- |
+| `src/utils/numeric.h:104` | `IsDoubleValueRepresentable` | `convert`, `convertInteger`, `convertFloat` | `src/pipeline/specialization.zig:214`, `src/pipeline/specialization.zig:247`, `src/pipeline/specialization.zig:270` | simplify | Checks the raw f64 range before conversion. Native SPIR-V extends the scalar widths. The 64-bit upper bound uses an exclusive overflow limit. This is not a blanket WGSL conversion port. |
+| `src/utils/numeric.h:117` | `IsDoubleValueRepresentableAsF16` | `convertFloat` | `src/pipeline/specialization.zig:270` | merge | The f16 branch checks the finite 65504 limit before rounding. It shares the generic float converter. |
 
 ### `src/dawn/native/RenderPipeline.h` and `.cpp` — 20 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/RenderPipeline.h:88` | `RenderPipelineBase` | `RenderState` | `src/pipeline/pipeline.zig:221` | merge | Upstream is a class over the unpacked descriptor plus the attachment state. The port is the plain record the replay path and the key both read, plus the union tag in `State` (`src/pipeline/pipeline.zig:224`). |
+| `src/dawn/native/RenderPipeline.h:88` | `RenderPipelineBase` | `RenderState` | `src/pipeline/pipeline.zig:394` | merge | Upstream is a class over the unpacked descriptor plus the attachment state. The port is the plain record the replay path and the key both read, plus the union tag in `State` (`src/pipeline/pipeline.zig:410`). |
 | `src/dawn/native/RenderPipeline.cpp:51` | `sVertexFormatTable` | `vertexFormatInfo` | `src/pipeline/pipeline_render.zig:89` | port | 43 rows in a constexpr array upstream; one exhaustive `switch` here, so a member added to `VertexFormat` without a row is a compile error and not a zeroed answer. |
-| `src/dawn/native/RenderPipeline.cpp:105` | `GetVertexFormatInfo` | merged with the row above | `src/pipeline/pipeline_render.zig:89` | merge | The accessor is the table. |
-| `src/dawn/native/RenderPipeline.cpp:113` | `ValidateVertexAttribute` | `validateVertexAttributes` | `src/pipeline/pipeline_render.zig:365` | port | Upstream reads `device->GetLimits().v1.maxVertexAttributes` at `:121`. The port uses the compile-time ceiling at `src/pipeline/pipeline_render.zig:496`, because a WebGPU limit is a table row and not a device query. |
-| `src/dawn/native/RenderPipeline.cpp:170` | `ValidateVertexBufferLayout` | `validateVertexBuffers` | `src/pipeline/pipeline_render.zig:376` | merge | Fused with the row above: both answer "does this slot exist and does this attribute fit in it". |
-| `src/dawn/native/RenderPipeline.cpp:271` | `ValidatePrimitiveState` | `validatePrimitiveState` | `src/pipeline/pipeline_render.zig:389` | port | Only the strip rule is ported (`:284`-`:288`). The four enumerations it validates above that are closed enumerations in the port's descriptors. |
-| `src/dawn/native/RenderPipeline.cpp:294` | `ValidateStencilFaceUnused` | `validateStencilFace` | `src/pipeline/pipeline_render.zig:433` | port | Fused with the stencil-operation rule, because both read the same face state. |
-| `src/dawn/native/RenderPipeline.cpp:314` | `ValidateDepthStencilState` | `validateDepthStencil` | `src/pipeline/pipeline_render.zig:409` | port | Including the compatibility clamp at `:345`, which is restriction 5 of the §M16 re-gate. |
-| `src/dawn/native/RenderPipeline.cpp:411` | `ValidateMultisampleState` | `validateMultisampleState` | `src/pipeline/pipeline_render.zig:447` | port | Dawn accepts 1, 2, 4 and 8 through `IsValidSampleCount`; the port accepts every count the `VK_SAMPLE_COUNT_*` bits name (`src/pipeline/pipeline_render.zig:454`). The four rules around the count are the same. |
-| `src/dawn/native/RenderPipeline.cpp:423` | `ValidateBlendComponent` | `validateBlendComponent` | `src/pipeline/pipeline_render.zig:482` | port | The dual-source-blending feature check at `:425` has no port: the port's `BlendFactor` has no `src1` member. |
-| `src/dawn/native/RenderPipeline.cpp:495` | `ValidateColorTargetState` | `validateColorTargets` | `src/pipeline/pipeline_render.zig:460` | port | The descriptor set and blend splits Dawn does per target become one pass over the slice. |
-| `src/dawn/native/RenderPipeline.cpp:879` | `IsStripPrimitiveTopology` | `isStripTopology` | `src/pipeline/pipeline_render.zig:400` | port | |
-| `src/dawn/native/RenderPipeline.cpp:884` | `ValidateRenderPipelineDescriptor` | `validateRenderPipelineDescriptor` | `src/pipeline/pipeline_render.zig:347` | port | The same order, vertex then primitive then depth-stencil then multisample then colour targets (`:902`-`:911`), so the error a caller sees is the error Dawn raises. |
-| `src/dawn/native/RenderPipeline.cpp:938` | `GetRenderStagesAndSetPlaceholderShader` | `fillStages` | `src/pipeline/pipeline_render.zig:638` | simplify | Upstream substitutes a placeholder module for a stage the descriptor omits. The port has no placeholder: a descriptor with no fragment stage is legal and Vulkan takes the stage count it is given. |
-| `src/dawn/native/RenderPipeline.cpp:960` | `RenderPipelineBase::RenderPipelineBase` | `buildRenderState` | `src/pipeline/pipeline_render.zig:573` | port | The member-init list becomes the copies the replay path reads. |
-| `src/dawn/native/RenderPipeline.cpp:1186` | `RenderPipelineBase::UsesStencil` | `usesStencil` | `src/pipeline/pipeline_render.zig:820` | port | |
+| `src/dawn/native/RenderPipeline.cpp:105` | `GetVertexFormatInfo` | `vertexFormatInfo` | `src/pipeline/pipeline_render.zig:89` | merge | The accessor is the table. |
+| `src/dawn/native/RenderPipeline.cpp:113` | `ValidateVertexAttribute` | `validateVertexAttributes` | `src/pipeline/pipeline_render.zig:366` | port | Upstream reads `device->GetLimits().v1.maxVertexAttributes` at `:121`. The port uses the compile-time ceiling at `src/pipeline/pipeline_render.zig:496`, because a WebGPU limit is a table row and not a device query. |
+| `src/dawn/native/RenderPipeline.cpp:170` | `ValidateVertexBufferLayout` | `validateVertexBuffers` | `src/pipeline/pipeline_render.zig:377` | merge | Fused with the row above: both answer "does this slot exist and does this attribute fit in it". |
+| `src/dawn/native/RenderPipeline.cpp:271` | `ValidatePrimitiveState` | `validatePrimitiveState` | `src/pipeline/pipeline_render.zig:390` | port | Only the strip rule is ported (`:284`-`:288`). The four enumerations it validates above that are closed enumerations in the port's descriptors. |
+| `src/dawn/native/RenderPipeline.cpp:294` | `ValidateStencilFaceUnused` | `validateStencilFace` | `src/pipeline/pipeline_render.zig:434` | port | Fused with the stencil-operation rule, because both read the same face state. |
+| `src/dawn/native/RenderPipeline.cpp:314` | `ValidateDepthStencilState` | `validateDepthStencil` | `src/pipeline/pipeline_render.zig:410` | port | Including the compatibility clamp at `:345`, which is restriction 5 of the §M16 re-gate. |
+| `src/dawn/native/RenderPipeline.cpp:411` | `ValidateMultisampleState` | `validateMultisampleState` | `src/pipeline/pipeline_render.zig:448` | port | Dawn accepts 1, 2, 4 and 8 through `IsValidSampleCount`; the port accepts every count the `VK_SAMPLE_COUNT_*` bits name (`src/pipeline/pipeline_render.zig:454`). The four rules around the count are the same. |
+| `src/dawn/native/RenderPipeline.cpp:423` | `ValidateBlendComponent` | `validateBlendComponent` | `src/pipeline/pipeline_render.zig:484` | port | The dual-source-blending feature check at `:425` has no port: the port's `BlendFactor` has no `src1` member. |
+| `src/dawn/native/RenderPipeline.cpp:495` | `ValidateColorTargetState` | `validateColorTargetStates` | `src/pipeline/pipeline_render.zig:469` | port | The descriptor set and blend splits Dawn does per target become one pass over the slice. |
+| `src/dawn/native/RenderPipeline.cpp:879` | `IsStripPrimitiveTopology` | `isStripTopology` | `src/pipeline/pipeline_render.zig:401` | port | |
+| `src/dawn/native/RenderPipeline.cpp:884` | `ValidateRenderPipelineDescriptor` | `validateRenderPipelineDescriptor` | `src/pipeline/pipeline_render.zig:348` | port | The same order, vertex then primitive then depth-stencil then multisample then colour targets (`:902`-`:911`), so the error a caller sees is the error Dawn raises. |
+| `src/dawn/native/RenderPipeline.cpp:938` | `GetRenderStagesAndSetPlaceholderShader` | `fillStages` | `src/pipeline/pipeline_render.zig:644` | simplify | Upstream substitutes a placeholder module for a stage the descriptor omits. The port has no placeholder: a descriptor with no fragment stage is legal and Vulkan takes the stage count it is given. |
+| `src/dawn/native/RenderPipeline.cpp:960` | `RenderPipelineBase::RenderPipelineBase` | `buildRenderState` | `src/pipeline/pipeline_render.zig:579` | port | The member-init list becomes the copies the replay path reads. |
+| `src/dawn/native/RenderPipeline.cpp:1186` | `RenderPipelineBase::UsesStencil` | `usesStencil` | `src/pipeline/pipeline_render.zig:818` | port | |
 | `src/dawn/native/RenderPipeline.cpp:1217` | `RenderPipelineBase::IsDepthBiasEnabled` | `isDepthBiasEnabled` | `src/pipeline/pipeline_render.zig:830` | port | One addition: the port also tests `depthBiasClamp`, because the Vulkan create info carries it (`src/pipeline/pipeline_render.zig:687`) and enabling the bias block without it would drop a value the caller set. |
-| `src/dawn/native/RenderPipeline.cpp:1329` | `RenderPipelineBase::ComputeContentHash` | `buildRenderPipelineKey` | `src/pipeline/pipeline.zig:614` | port | The base hash, then the attachment state, then the vertex buffers and attributes, then the primitive tuple and multisample (`:1330`-`:1360`). |
-| `src/dawn/native/RenderPipeline.cpp:1352` | the depth-stencil block of the content hash | `appendDepthStencilKey` | `src/pipeline/pipeline_render.zig:539` | port | Nine words in that order, including the three bias floats. |
+| `src/dawn/native/RenderPipeline.cpp:1329` | `RenderPipelineBase::ComputeContentHash` | `buildRenderPipelineKey` | `src/pipeline/pipeline.zig:872` | port | The base hash, then the attachment state, then the vertex buffers and attributes, then the primitive tuple and multisample (`:1330`-`:1360`). |
+| `src/dawn/native/RenderPipeline.cpp:1352` | the depth-stencil block of the content hash | `appendDepthStencilKey` | `src/pipeline/pipeline_render.zig:545` | port | Nine words in that order, including the three bias floats. |
 | `src/dawn/native/RenderPipeline.cpp:51` | the table's byte sizes | `vertexFormatByteSize` | `src/pipeline/pipeline_render.zig:136` | port | The field reads at `:1007` become a product of the same two members. |
 
 ### `src/dawn/native/ComputePipeline.cpp` — 5 rows
@@ -5365,38 +5861,42 @@ records the layout first (`Pipeline.cpp:385`) and compares it first
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/ComputePipeline.cpp:37` | `ValidateComputePipelineDescriptor` | `validateComputePipelineDescriptor` | `src/pipeline/pipeline_compute.zig:28` | port | A compute descriptor has one stage, so the stage check is the whole of it. The layout validation at `:39` is M12's. |
-| `src/dawn/native/ComputePipeline.cpp:56` | `ComputePipelineBase::ComputePipelineBase` | `createComputePipeline` | `src/pipeline/pipeline.zig:482` | port | |
-| `src/dawn/native/ComputePipeline.cpp:90` | `ComputePipelineBase::GetWorkgroupSize` | — | — | skip | It returns an `Extent3D` read out of the Tint program (`:92`). M5's reflector reads no `OpExecutionMode LocalSize`, and `VkComputePipelineCreateInfo` carries no workgroup size field, so nothing on the create path needs it. |
-| `src/dawn/native/ComputePipeline.cpp:119` | `ComputePipelineBase::GetType` | `queryKind` | `src/pipeline/pipeline.zig:574` | port | |
-| `src/dawn/native/ComputePipeline.cpp:123` | `ComputePipelineBase::EqualityFunc::operator()` | `buildComputePipelineKey` | `src/pipeline/pipeline.zig:680` | port | The base key is the whole key: a compute pipeline has no attachment state, no vertex input and no blend. This forwards to `PipelineBase::EqualForCache` at `:125`, and Dawn defines no `ComputePipelineBase::EqualForCache` of its own. |
+| `src/dawn/native/ComputePipeline.cpp:56` | `ComputePipelineBase::ComputePipelineBase` | `createComputePipeline` | `src/pipeline/pipeline.zig:719` | port | |
+| `src/dawn/native/ComputePipeline.cpp:90` | `ComputePipelineBase::GetWorkgroupSize` | — | — | skip | Public getter remains unimplemented. M5 now supplies native workgroup metadata and evaluation. M14 consumes the effective size for required pre-create dimension/invocation validation. The lack of a `VkComputePipelineCreateInfo` size field does not justify omitting validation. The decoder/evaluator is new code, not this accessor's port. |
+| `src/dawn/native/ComputePipeline.cpp:119` | `ComputePipelineBase::GetType` | `queryKind` | `src/pipeline/pipeline.zig:829` | port | |
+| `src/dawn/native/ComputePipeline.cpp:123` | `ComputePipelineBase::EqualityFunc::operator()` | `buildComputePipelineKey` | `src/pipeline/pipeline.zig:960` | port | The base key is the whole key: a compute pipeline has no attachment state, no vertex input and no blend. This forwards to `PipelineBase::EqualForCache` at `:125`, and Dawn defines no `ComputePipelineBase::EqualForCache` of its own. |
 
 ### `src/dawn/native/Device.cpp` — 3 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Device.cpp:102` | `DeviceBase::Caches` | `PipelineStore` | `src/pipeline/pipeline.zig:342` | simplify | Nine caches upstream (`:103`-`:109`); two here, plus the `VkPipelineCache` map. The other seven are M11's and M12's. |
-| `src/dawn/native/Device.cpp:1094` | `DeviceBase::GetCachedRenderPipeline` | `Cache.find` | `src/pipeline/cache.zig:94` | merge | |
-| `src/dawn/native/Device.cpp:1105` | `DeviceBase::AddOrGetCachedRenderPipeline` | `Cache.insert` | `src/pipeline/cache.zig:144` | merge | The lookup-then-build order upstream (`:2216`-`:2219`) is the order `createRenderPipeline` runs, and it is what §M14's acceptance asserts. |
+| `src/dawn/native/Device.cpp:102` | `DeviceBase::Caches` | `ResourceStore`, `PipelineStore` | `src/engine/native_resource_store.zig:12`, `src/pipeline/pipeline.zig:663` | split | ResourceStore owns weak BGL, PL, sampler, shader, and attachment indices under the original ObjectGuard. PipelineStore owns guarded weak compute/render pipeline dedup. Live object caches do not implement actual VkPipelineCache persistence. |
+| `src/dawn/native/Device.cpp:1094` | `DeviceBase::GetCachedRenderPipeline` | `GuardedCache.find` | `src/pipeline/cache.zig:178` | merge | Borrows a live weak pipeline member under the original ObjectGuard. The factory acquires a user alias. |
+| `src/dawn/native/Device.cpp:1105` | `DeviceBase::AddOrGetCachedRenderPipeline` | `GuardedCache.insert` | `src/pipeline/cache.zig:184` | simplify | Transfers key bytes on success without retaining an object reference. Lookup and creation share the guard. |
 
-### `src/dawn/native/vulkan/` — 9 rows
+### `src/dawn/native/vulkan/` — native pipeline rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/DeviceVk.cpp:275` | `Device::GetOrCreatePipelineCacheImpl` | `PipelineStore.pipeline_caches` | `src/pipeline/pipeline.zig:352` | simplify | Upstream creates one `VkPipelineCache` per pipeline key and never bounds the set (`:294`). The port bounds it at `pipeline_cache_capacity` (`src/pipeline/pipeline.zig:332`), because each entry is a driver allocation and not an arena object. The bound is there and nothing has reached it: `test/pipeline_cache.zig:482` asserts the capacity and that the map is still empty after a render pipeline, because the render path never asks for a pipeline cache (`src/pipeline/pipeline_render.zig:926`). The eviction path is unexercised today, so this row claims the bound and not an eviction.
+| `src/dawn/native/vulkan/DeviceVk.cpp:275` | `Device::GetOrCreatePipelineCacheImpl` | — | — | skip | The declared bounded LRU map has teardown code but no create/get/put caller. Both pipeline create paths pass a null driver cache. This is not implemented driver caching. M14 omits this optional optimization under the selected no-persistent-artifact-cache scope. |
 | `src/dawn/native/vulkan/RenderPipelineVk.cpp:64` | `VulkanVertexFormat` | `vertexFormatToVk` | `src/pipeline/pipeline_render.zig:143` | port | The same 43 rows as the WebGPU table, mapped a second time. |
-| `src/dawn/native/vulkan/RenderPipelineVk.cpp:173` | `ShouldEnablePrimitiveRestart` | `shouldEnablePrimitiveRestart` | `src/pipeline/pipeline_render.zig:881` | port | |
-| `src/dawn/native/vulkan/RenderPipelineVk.cpp:398` | `RenderPipeline::InitializeImpl` | `createGraphicsPipeline` | `src/pipeline/pipeline_render.zig:959` | simplify | Upstream builds the specialization, streams the layout's cache key in (`:925`) and calls `vkCreateGraphicsPipelines` at `:933`. The port has no specialization, so the call is the whole function. |
-| `src/dawn/native/vulkan/RenderPipelineVk.cpp:800` | the dynamic-rendering branch of `InitializeSpecialization` | `Scratch.rendering` | `src/pipeline/pipeline_render.zig:328` | port | Upstream picks between three render-pass types (`DeviceVk.h:58`-`:65`). The port chains the rendering struct unconditionally, so a descriptor carries attachment formats and nothing else (`src/pipeline/pipeline_render.zig:9`-`:16`). |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:173` | `ShouldEnablePrimitiveRestart` | `shouldEnablePrimitiveRestart` | `src/pipeline/pipeline_render.zig:871` | port | |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:392` | `RenderPipeline::CreateUninitialized` | `pipeline.createRenderPipeline` | `src/pipeline/pipeline.zig:681` | merge | Dusk combines wrapper construction with synchronous initialization. Async creation and driver caching remain separate future rows. |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:398` | `RenderPipeline::InitializeImpl` | `createGraphicsPipeline` | `src/pipeline/pipeline_render.zig:951` | merge | Uses backend and prepared scratch for a traditional compatible render pass. Native graphics creation corresponds to `InitializeSpecialization` and `vkCreateGraphicsPipelines` at `:933-940`. It does not port Dawn's complete specialization policy. |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:800` | the dynamic-rendering branch of `InitializeSpecialization` | `fillScratch` | `src/pipeline/pipeline_render.zig:676` | merge | Merged decision: the selected backend uses a traditional render pass. `RenderPipelineDescriptor.compatible_render_pass` is REQUIRED. It must match attachment formats and sample count at subpass zero. `fillScratch` stores that handle in `Scratch.create_info.renderPass`. No dynamic-rendering scratch field remains. |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:470` | `RenderPipeline::InitializeSpecialization` | `createGraphicsPipeline` | `src/pipeline/pipeline_render.zig:951` | merge | Native creation corresponds to `vkCreateGraphicsPipelines` at `:933-940`. Dusk prepares traditional-render-pass scratch rather than porting the complete Dawn specialization policy. |
 | `src/dawn/native/vulkan/RenderPipelineVk.cpp:961` | `RenderPipeline::ApplyDynamicState` | — | — | skip | Owned by M18's table. M18 states that replay reads the immutable values M14 stores and issues the calls itself, so the `vkCmdSet*` burst lives in `src/engine/command_buffer.zig` and carries no row of its own. |
-| `src/dawn/native/vulkan/RenderPipelineVk.cpp:1111` | `RenderPipeline::GetHandle` | `vkPipeline` | `src/pipeline/pipeline.zig:560` | port | |
-| `src/dawn/native/vulkan/RenderPipelineVk.cpp:1116` | `RenderPipeline::GetVkLayout` | `vkLayout` | `src/pipeline/pipeline.zig:567` | port | |
-| `src/dawn/native/vulkan/ComputePipelineVk.cpp:54` | `ComputePipeline::InitializeImpl`, `:128`, `:252` | `createComputePipeline`, `makeCreateInfo` | `src/pipeline/pipeline_compute.zig:52`, `:37` | port | Three definitions in one row because the port's body is the create-info fill and the one call; the handle accessor merges with the row above. |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:1111` | `RenderPipeline::GetHandle` | `vkPipeline` | `src/pipeline/pipeline.zig:815` | port | |
+| `src/dawn/native/vulkan/RenderPipelineVk.cpp:1116` | `RenderPipeline::GetVkLayout` | `vkLayout` | `src/pipeline/pipeline.zig:822` | port | |
+| `src/dawn/native/vulkan/ComputePipelineVk.cpp:48` | `ComputePipeline::CreateUninitialized` | `pipeline.createComputePipeline` | `src/pipeline/pipeline.zig:789` | merge | Dusk combines wrapper construction with synchronous initialization through its store. The typed wrapper adopts an owned low-pipeline reference. |
+| `src/dawn/native/vulkan/ComputePipelineVk.cpp:54` | `ComputePipeline::InitializeImpl` | `createComputePipeline` | `src/pipeline/pipeline_compute.zig:67` | merge | Creates synchronously through `vkCreateComputePipelines`. Effective limits and maintenance4 govern Dusk's LocalSizeId adaptation. Dawn's complete specialization and cache policy is not ported. |
+| `src/dawn/native/vulkan/ComputePipelineVk.cpp:113` | `ComputePipeline::InitializeSpecialization` | `createComputePipeline` | `src/pipeline/pipeline_compute.zig:67` | merge | Matches native creation at `:206-213`. Dusk's SPIR-V specialization adaptation and null driver-cache policy differ from Dawn. |
 
 ### `src/dawn/native/PipelineLayoutVk.cpp` — 1 row
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/PipelineLayoutVk.cpp:127` | `PipelineLayout::Initialize`'s `StreamIn(&mCacheKey, ...)` | `LayoutInput.content_bytes` | `src/pipeline/pipeline.zig:125` | port | The bytes are the descriptor set layouts, the resource-table flag and the immediate-data range. Upstream has no `PipelineLayout::GetCacheKey`; this function writes `mCacheKey` directly, and `cachedObjects` is filled from `GetBindGroupLayoutsMask()` at `:120`. So "the same pipeline with a different layout is a different key" is what the layout's own bytes do, and `test/render_pipeline.zig` asserts it end to end. |
+| `src/dawn/native/vulkan/PipelineLayoutVk.cpp:127` | `PipelineLayout::Initialize`'s `StreamIn(&mCacheKey, ...)` | `LayoutInput.content_bytes` | `src/pipeline/pipeline.zig:243` | port | The bytes are the descriptor set layouts, the resource-table flag and the immediate-data range. Upstream has no `PipelineLayout::GetCacheKey`; this function writes `mCacheKey` directly, and `cachedObjects` is filled from `GetBindGroupLayoutsMask()` at `:120`. So "the same pipeline with a different layout is a different key" is what the layout's own bytes do, and `test/render_pipeline.zig` asserts it end to end. |
 
 ### The cache and the key — 15 rows
 
@@ -5404,19 +5904,19 @@ records the layout first (`Pipeline.cpp:385`) and compares it first
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/CacheKey.h:38` | `CacheKey` | `CacheKey` | `src/pipeline/cache_key.zig:30` | port | Dawn's `CacheKey` is a `ByteVectorSink`, so the key *is* the accumulated bytes. |
 | `src/dawn/native/CacheKey.h:42` | `CacheKey::Type` | `Kind` | `src/pipeline/cache_key.zig:24` | port | Three members upstream (`Shader` included); two here. The shader key is a blob-cache key and the port has no blob cache, so the third member is not invented to fill a gap. |
-| `src/dawn/native/CacheKey.cpp:33` | `Stream<CacheKey>::Write` | `CacheKey.eql` | `src/pipeline/cache_key.zig:114` | merge | Upstream flattens a nested key with no length prefix of its own (`:34`). The port compares the bytes the sink accumulated, which is the same rule with no flattening step. |
+| `src/dawn/native/CacheKey.cpp:33` | `Stream<CacheKey>::Write` | `CacheKey.bytes`, byte-sink append behavior | `src/pipeline/cache_key.zig:31` | simplify | Upstream streams the accumulated `ByteVectorSink` bytes at `:34`. The port stores key bytes directly and appends fields to that sink. This row accounts for byte storage, not equality. `CacheKey.eql` separately compares the stored bytes. |
 | `src/dawn/native/stream/Stream.h:353` | `Stream<std::vector<T>>` | `CacheKey.appendBytes` | `src/pipeline/cache_key.zig:53` | port | Upstream streams the size (`:356`) and then each element. The port does the same, which is what stops `["ab", "c"]` and `["a", "bc"]` from producing one key. |
-| `src/dawn/native/ObjectContentHasher.h:42` | `ObjectContentHasher` | `CacheKey.contentHash` | `src/pipeline/cache_key.zig:109` | simplify | Dawn folds values with `HashCombine` (`common/HashUtils.h:69`) over `std::hash`, and neither publishes a seed, so a digest computed here would not equal one computed there and claiming it would be false. The port hashes the whole key once with a fixed-seed Wyhash and decides on the bytes. A collision costs one byte comparison and nothing else. |
-| `src/dawn/common/ContentLessObjectCache.h:87` | `ContentLessObjectCacheKeyFuncs::EqualityFunc` | `CacheKey.eql` | `src/pipeline/cache_key.zig:114` | merge | Upstream has a hash and a comparator that have to agree. The port keys on the bytes the hash is computed from, so there is one encoding and not two. |
-| `src/dawn/common/ContentLessObjectCache.h:134` | `ContentLessObjectCache` | `Cache` | `src/pipeline/cache.zig:34` | port | |
-| `src/dawn/common/ContentLessObjectCache.h:155` | `ContentLessObjectCache::Insert` | `Cache.insert` | `src/pipeline/cache.zig:144` | port | Upstream returns the pair and promotes a dead `WeakRef` at `:164`. The port moves the key in and skips a dead entry on lookup, because the arena owns the object until `Device.deinit`. The move is by pointer: `insert` takes `*CacheKey` and empties `key.bytes` on the success path and on the `errdefer` path, so exactly one owner names the buffer. A by-value `insert` copies the unmanaged `std.ArrayList` and leaves the caller's `defer key.deinit` to free bytes the entry still reads.
-| `src/dawn/common/ContentLessObjectCache.h:179` | `ContentLessObjectCache::Find` | `Cache.find` | `src/pipeline/cache.zig:94` | port | |
-| `src/dawn/common/ContentLessObjectCache.h:192` | `ContentLessObjectCache::Erase` | `Cache.remove`, `Cache.prune` | `src/pipeline/cache.zig:176`, `src/pipeline/cache.zig:115` | port | Upstream erases from the destructor, through `ContentLessObjectCacheable::Uncache` (`common/ContentLessObjectCacheable.h:55`). `destroy` has no `io` to take the cache lock with, so the port defers the sweep to the create call, which is the only place that already holds it. |
-| `src/dawn/common/ContentLessObjectCacheable.h:55` | `Uncache` | merged with the row above | `src/pipeline/cache.zig:115` | merge | The destructor is the only caller, so it has no row of its own. |
-| `src/dawn/common/LRUCache.h:89` | `LRUCache` | `LruCache` | `src/pipeline/cache.zig:227` | port | |
-| `src/dawn/common/LRUCache.h:95` | `LRUCache::GetOrCreate` | `LruCache.get`, `LruCache.put` | `src/pipeline/cache.zig:305`, `src/pipeline/cache.zig:314` | simplify | Upstream calls the create function on a miss, and a capacity of zero means no caching at all (`:97`). The port hands the miss back and the caller creates, so `put` returns the eviction the caller must destroy. |
-| `src/dawn/common/LRUCache.h:142` | `LRUCache::Clear` | `LruCache.deinit`, `PipelineStore.deinit` | `src/pipeline/cache.zig:296`, `src/pipeline/pipeline.zig:347` | split | Dawn answers with one virtual: `Clear` calls `EvictedFromCache` (`:154`) on every cached value at `:145`, then clears the map at `:147` and the list at `:148`, so eviction and clearing share a single destruction path. The port splits that one answer in two. `LruCache.deinit` frees the two containers and nothing else (`src/pipeline/cache.zig:296`), and the values are destroyed by whoever owns them: `PipelineStore.deinit` walks `pipeline_caches.entries.items` and calls `entry.value.destroy()` (`src/pipeline/pipeline.zig:347`-`:354`), and `FramebufferCache` does the same through the `destroy_when_unused` hook its caller hands to `put` (`src/engine/framebuffer_cache.zig:237`-`:238`). **A defect on this path is fixed toward the split, never toward an `EvictedFromCache` hook.** `LruCache.remove` returns the removed value to its caller, and that return is what replaced the virtual: it is why `PipelineStore.deinit` can destroy a value directly, and why the `zig_symbol` row for `LruCache.get`, `.put`, `.remove`, `.queryEntryCount` names a removal that `LRUCache.h` never had. `remove` has no upstream counterpart, so it stays under the convention stated above the `zig_symbol` table below with no upstream row of its own; the header exposes only the constructor `:91`, `GetOrCreate` `:95`, `Clear` `:142` and `EvictedFromCache` `:154`. |
-| `src/dawn/common/LRUCache.h:118` | the eviction splice | `evictOldest`, `reindexAfterSwap` | `src/pipeline/cache.zig:375`, `src/pipeline/cache.zig:393` | simplify | A linear scan over a few hundred entries, touched once per pipeline creation, against Dawn's list splice. `docs/30-port-design.md` §7.3 records this as the deliberate difference. |
+| `src/dawn/native/ObjectContentHasher.h:42` | `ObjectContentHasher` | `CacheKey.contentHash`, `shaderHash`, `bindGroupLayoutHash`, `pipelineLayoutHash` | `src/pipeline/cache_key.zig:109`, `src/engine/native_resource_store.zig:51,62,83` | simplify | Type-specific hashes select buckets. Full semantic equality decides identity. Shader modules also retain their existing SHA3-256 digest. |
+| `src/dawn/common/ContentLessObjectCache.h:87` | `ContentLessObjectCacheKeyFuncs::EqualityFunc` | `CacheKey.eql`, `WeakIndex.find` | `src/pipeline/cache_key.zig:114`, `src/engine/native_weak_index.zig:27` | split | Pipeline keys compare bytes. Weak device indices call the exact per-type comparator for each colliding member. |
+| `src/dawn/common/ContentLessObjectCache.h:134` | `ContentLessObjectCache` | `GuardedCache`, `WeakIndex` | `src/pipeline/cache.zig:156`, `src/engine/native_weak_index.zig:6` | split | Pipeline dedup and intrusive device-object indices both use weak membership under the original ObjectGuard. Count this upstream header once. |
+| `src/dawn/common/ContentLessObjectCache.h:155` | `ContentLessObjectCache::Insert` | `GuardedCache.insert`, `WeakIndex.insert` | `src/pipeline/cache.zig:184`, `src/engine/native_weak_index.zig:52` | split | Weak insertion publishes membership and its removal hook only after the final fallible bucket allocation. Factories serialize lookup and creation under ObjectGuard. Pipeline insertion transfers owned key bytes on success. |
+| `src/dawn/common/ContentLessObjectCache.h:179` | `ContentLessObjectCache::Find` | `GuardedCache.find`, `WeakIndex.find` | `src/pipeline/cache.zig:178`, `src/engine/native_weak_index.zig:27` | split | Lookup borrows a live member under ObjectGuard. Its factory acquires a user alias, including from a lease-only object. |
+| `src/dawn/common/ContentLessObjectCache.h:192` | `ContentLessObjectCache::Erase` | `GuardedCache.remove`, `WeakIndex.remove` | `src/pipeline/cache.zig:196`, `src/engine/native_weak_index.zig:73` | split | Core retirement invokes removal before payload destruction, under the existing guard. Pipeline removal also frees owned key bytes. |
+| `src/dawn/common/ContentLessObjectCacheable.h:55` | `Uncache` | `Object.retirePayloadLocked` | `src/core/object.zig:241` | simplify | Clears the hook, removes weak membership, then destroys the payload. Final release and explicit retirement run this once. |
+| `src/dawn/common/LRUCache.h:89` | `LRUCache` | `LruCache` | `src/pipeline/cache.zig:238` | port | |
+| `src/dawn/common/LRUCache.h:95` | `LRUCache::GetOrCreate` | `LruCache.get`, `LruCache.put` | `src/pipeline/cache.zig:316,331` | simplify | The caller creates on a miss and destroys the returned eviction. A declared LRU does not prove native driver-cache production or persistence. |
+| `src/dawn/common/LRUCache.h:142` | `LRUCache::Clear` | `LruCache.deinit`, `PipelineStore.deinit` | `src/pipeline/cache.zig:307`, `src/pipeline/pipeline.zig:688` | split | The generic LRU frees its containers. PipelineStore destroys any stored driver-cache entries at `src/pipeline/pipeline.zig:694-703`. FramebufferCache owns active entries and fenced destruction. The pipeline driver-cache map remains dormant. |
+| `src/dawn/common/LRUCache.h:118` | the eviction splice | `evictOldest`, `reindexAfterSwap` | `src/pipeline/cache.zig:378`, `src/pipeline/cache.zig:402` | simplify | The port uses a linear oldest-entry scan instead of a list splice. `src/engine/framebuffer_cache.zig:155,231-249` is the active caller and owns fenced destruction. The pipeline driver-cache map is dormant. |
 
 **The new Zig symbols.** No upstream row for any of them, because upstream has
 no counterpart to point at. `zig_path` is the definition site, `path:line`, so a
@@ -5424,56 +5924,70 @@ row names the place a reviewer opens rather than the file to search.
 
 | `zig_symbol` | `zig_path` | `note` |
 | --- | --- | --- |
-| `Backend` | `src/pipeline/pipeline_backend.zig:44` | The six entry points M14 calls, injected. A caller never reaches past it. |
-| `MissingEntryPoint` | `src/pipeline/pipeline_backend.zig:21` | One member per entry point the loader did not fill, so a call site names which one it hit instead of writing a bare `.?`. |
-| `BackendError` | `src/pipeline/pipeline_backend.zig:34` | `MissingEntryPoint \|\| vk.Error`. `AGENTS.md` §3.1 keeps the driver-code mapping in `src/vk/dispatch.zig` and nowhere else, so this union declares no Vulkan code. |
-| `Backend.fromDeviceProcs` | `src/pipeline/pipeline_backend.zig:56` | The procs and the handle come from one loader tier, so they cannot disagree. |
-| `PipelineError` | `src/pipeline/pipeline.zig:131` | 40 members, one per `DAWN_INVALID_IF` site, so a caller matches on the rule and not on the message text. |
-| `CreateError` | `src/pipeline/pipeline.zig:192` | The create boundary: a rule, an allocation, a cancelled lock, a call the seam could not make, or the device gone. |
-| `Stage` | `src/pipeline/pipeline.zig:69` | Three members. A fourth is a compile error in the mask block at `src/pipeline/pipeline.zig:601`, which is what keeps a new stage from colliding in the mask. |
-| `StageUsage` | `src/pipeline/pipeline.zig:85` | What the reflected entry point uses, as plain values with defaults. The port reads no shader here, so M13 fills it. |
-| `StageInput` | `src/pipeline/pipeline.zig:103` | |
-| `LayoutInput` | `src/pipeline/pipeline.zig:123` | The handle and the bytes that put it in a key. |
-| `RenderPipelineDescriptor` | `src/pipeline/pipeline.zig:201` | |
-| `ComputePipelineDescriptor` | `src/pipeline/pipeline.zig:214` | |
-| `RenderState` | `src/pipeline/pipeline.zig:221` | The immutable state the replay path and the key both read, kept after creation so M18 reads it without a copy. |
-| `ComputeState` | `src/pipeline/pipeline.zig:233` | |
-| `State` | `src/pipeline/pipeline.zig:237` | The render/compute tag, so one object answers `GetType` for both leaves. |
-| `Pipeline.isAlive` | `src/pipeline/pipeline.zig:298` | What makes a dead entry safe to leave in the map: `Cache.find` skips an entry whose object no longer answers true. |
-| `Pipeline.queryKind` | `src/pipeline/pipeline.zig:302` | |
-| `Pipeline.destroy` | `src/pipeline/pipeline.zig:312` | Releases the Vulkan object and the slices the object owns, through the allocator it copied at creation. The arena block stays, so a handle taken before this reads a destroyed object and not freed memory. |
-| `PipelineStore.pipeline_cache_capacity` | `src/pipeline/pipeline.zig:347` | 32. |
-| `PipelineStore.init` | `src/pipeline/pipeline.zig:355` | |
-| `PipelineStore.deinit` | `src/pipeline/pipeline.zig:369` | |
-| `PipelineStore.queryPipelineCount` | `src/pipeline/pipeline.zig:382` | The observable that a duplicate did not become a second object. |
-| `createRenderPipeline` | `src/pipeline/pipeline.zig:395` | Validate, build the key, prune, find, build, insert. The order is Dawn's. |
-| `createComputePipeline` | `src/pipeline/pipeline.zig:482` | The same five steps. |
-| `handleFor` | `src/pipeline/pipeline.zig:554` | The kind byte is the one the arena recorded, so a handle never names one object as another. |
-| `buildRenderPipelineKey` | `src/pipeline/pipeline.zig:614` | |
-| `buildComputePipelineKey` | `src/pipeline/pipeline.zig:680` | |
-| `appendBaseKey` | `src/pipeline/pipeline.zig:694` | The layout first, matching `Pipeline.cpp:385` and `:400`. |
-| `appendStageKey` | `src/pipeline/pipeline.zig:707` | Stage ordinal, entry point, module bytes. |
-| `appendBlendKey` | `src/pipeline/pipeline.zig:717` | |
-| `stageMask` | `src/pipeline/pipeline.zig:733` | |
-| `StageValidationOptions` | `src/pipeline/pipeline.zig:757` | The compatibility flag and the cap `Pipeline.cpp:153` reads off the device. The cap is a value so the rule runs with no device. |
-| `Scratch` | `src/pipeline/pipeline_render.zig:303` | The Vulkan temporaries the create info points at. The caller owns it, so no function returns a pointer into its own frame. |
+| `Backend` | `src/pipeline/pipeline_backend.zig:45` | The six entry points M14 calls, injected. A caller never reaches past it. |
+| `MissingEntryPoint` | `src/pipeline/pipeline_backend.zig:22` | One member per entry point the loader did not fill, so a call site names which one it hit instead of writing a bare `.?`. |
+| `BackendError` | `src/pipeline/pipeline_backend.zig:35` | `MissingEntryPoint \|\| vk.Error`. `AGENTS.md` §3.1 keeps the driver-code mapping in `src/vk/dispatch.zig` and nowhere else, so this union declares no Vulkan code. |
+| `Backend.fromDeviceProcs` | `src/pipeline/pipeline_backend.zig:57` | The procs and the handle come from one loader tier, so they cannot disagree. |
+| `PipelineError` | `src/pipeline/pipeline.zig:297` | Named descriptor errors. Specialization failures enter the create boundary through KeyError. |
+| `CreateError` | `src/pipeline/pipeline.zig:362` | The create boundary: a rule, an allocation, a cancelled lock, a call the seam could not make, or the device gone. |
+| `Stage` | `src/pipeline/pipeline.zig:76` | Three members. A fourth is a compile error in the mask block at `src/pipeline/pipeline.zig:1064`, which is what keeps a new stage from colliding in the mask. |
+| `StageUsage` | `src/pipeline/pipeline.zig:92` | What the reflected entry point uses, as plain values with defaults. The port reads no shader here, so M13 fills it. |
+| `StageInput` | `src/pipeline/pipeline.zig:110` | Borrowed constants default empty. Nonempty constants require authoritative SPIR-V content_bytes. |
+| `LayoutInput` | `src/pipeline/pipeline.zig:241` | The handle and the bytes that put it in a key. |
+| `RenderPipelineDescriptor` | `src/pipeline/pipeline.zig:371` | |
+| `ComputePipelineDescriptor` | `src/pipeline/pipeline.zig:387` | |
+| `RenderState` | `src/pipeline/pipeline.zig:394` | The immutable state the replay path and the key both read, kept after creation so M18 reads it without a copy. |
+| `ComputeState` | `src/pipeline/pipeline.zig:406` | |
+| `State` | `src/pipeline/pipeline.zig:410` | The render/compute tag, so one object answers `GetType` for both leaves. |
+| `Pipeline.isAlive` | `src/pipeline/pipeline.zig:514` | What makes a dead entry safe to leave in the map: `Cache.find` skips an entry whose object no longer answers true. |
+| `Pipeline.queryKind` | `src/pipeline/pipeline.zig:518` | |
+| `Pipeline.destroy` | `src/pipeline/pipeline.zig:528` | Releases the Vulkan object and the slices the object owns, through the allocator it copied at creation. The arena block stays, so a handle taken before this reads a destroyed object and not freed memory. |
+| `PipelineStore.pipeline_cache_capacity` | `src/pipeline/pipeline.zig:569` | 32. |
+| `PipelineStore.init` | `src/pipeline/pipeline.zig:577` | |
+| `PipelineStore.deinit` | `src/pipeline/pipeline.zig:591` | |
+| `PipelineStore.queryPipelineCount` | `src/pipeline/pipeline.zig:604` | The observable that a duplicate did not become a second object. |
+| `createRenderPipeline` | `src/pipeline/pipeline.zig:617` | Validate, build the key, prune, find, build, insert. The order is Dawn's. |
+| `createComputePipeline` | `src/pipeline/pipeline.zig:719` | The same five steps. |
+| `handleFor` | `src/pipeline/pipeline.zig:809` | The kind byte is the one the arena recorded, so a handle never names one object as another. |
+| `buildRenderPipelineKey` | `src/pipeline/pipeline.zig:872` | |
+| `buildComputePipelineKey` | `src/pipeline/pipeline.zig:960` | |
+| `appendBaseKey` | `src/pipeline/pipeline.zig:992` | The layout first, matching `Pipeline.cpp:385` and `:400`. |
+| `appendStageKey` | `src/pipeline/pipeline.zig:1025` | Stage ordinal, entry point, module bytes, and canonical specialization bytes. |
+| `appendBlendKey` | `src/pipeline/pipeline.zig:1037` | |
+| `stageMask` | `src/pipeline/pipeline.zig:1054` | |
+| `StageValidationOptions` | `src/pipeline/pipeline.zig:1078` | The compatibility flag and the cap `Pipeline.cpp:153` reads off the device. The cap is a value so the rule runs with no device. |
+| `Scratch` | `src/pipeline/pipeline_render.zig:305` | The Vulkan temporaries the create info points at. The caller owns it, so no function returns a pointer into its own frame. |
 | `VertexFormat` | `src/pipeline/pipeline_render.zig:32` | 43 members, positional against the WebGPU table. |
-| `VertexFormatBaseType`, `VertexFormatInfo` | `src/pipeline/pipeline_render.zig:77`, `:79` | The three facts each row carries. |
+| `VertexFormatBaseType`, `VertexFormatInfo` | `src/pipeline/pipeline_render.zig:77`, `src/pipeline/pipeline_render.zig:79` | The three facts each row carries. |
 | `vertexFormatByteSize` | `src/pipeline/pipeline_render.zig:136` | |
-| `stepModeToVk`, `topologyToVk`, `frontFaceToVk`, `cullModeToVk`, `compareFunctionToVk`, `stencilOperationToVk`, `blendFactorToVk`, `blendOperationToVk` | `src/pipeline/pipeline_render.zig:862`-`:908` | Eight exhaustive `switch`es with no `else`, so a member added to an enumeration without a Vulkan value is a compile error. |
-| `depthBias`, `depthBiasSlopeScale`, `depthBiasClamp` | `src/pipeline/pipeline_render.zig:837`-`:806` | |
-| `usesStencil`, `isDepthBiasEnabled` | `src/pipeline/pipeline_render.zig:820`, `:786` | |
-| `createGraphicsPipeline` | `src/pipeline/pipeline_render.zig:959` | |
+| `stepModeToVk`, `topologyToVk`, `frontFaceToVk`, `cullModeToVk`, `compareFunctionToVk`, `stencilOperationToVk`, `blendFactorToVk`, `blendOperationToVk` | `src/pipeline/pipeline_render.zig:852`, `src/pipeline/pipeline_render.zig:859`, `src/pipeline/pipeline_render.zig:875`, `src/pipeline/pipeline_render.zig:882`, `src/pipeline/pipeline_render.zig:890`, `src/pipeline/pipeline_render.zig:903`, `src/pipeline/pipeline_render.zig:916`, `src/pipeline/pipeline_render.zig:936` | Eight exhaustive `switch`es with no `else`, so a member added to an enumeration without a Vulkan value is a compile error. |
+| `depthBias`, `depthBiasSlopeScale`, `depthBiasClamp` | `src/pipeline/pipeline_render.zig:837`, `src/pipeline/pipeline_render.zig:842`, `src/pipeline/pipeline_render.zig:847` | |
+| `usesStencil`, `isDepthBiasEnabled` | `src/pipeline/pipeline_render.zig:818`, `src/pipeline/pipeline_render.zig:830` | |
+| `createGraphicsPipeline` | `src/pipeline/pipeline_render.zig:951` | |
 | `makeCreateInfo` | `src/pipeline/pipeline_compute.zig:36` | |
-| `createComputePipeline` | `src/pipeline/pipeline_compute.zig:52` | |
-| `Cache` | `src/pipeline/cache.zig:34` | Generic over the cached type. A `comptime` block at `:64` refuses a type that cannot answer `isAlive`, so a type that cannot be cached safely is a compile error. |
-| `Cache.find`, `.insert`, `.remove`, `.prune`, `.queryEntryCount`, `.queryKeyByteCount` | `src/pipeline/cache.zig:94`-`:207` | |
-| `LruCache` | `src/pipeline/cache.zig:227` | Generic over key, value and capacity. |
-| `LruCache.get`, `.put`, `.remove`, `.queryEntryCount` | `src/pipeline/cache.zig:305`-`:359` | |
-| `evictOldest`, `findOldestSlot`, `reindexAfterSwap` | `src/pipeline/cache.zig:375`-`:402` | |
+| `createComputePipeline` | `src/pipeline/pipeline_compute.zig:55` | |
+| `Cache` | `src/pipeline/cache.zig:36` | Generic over the cached type. A `comptime` block at `:64` refuses a type that cannot answer `isAlive`, so a type that cannot be cached safely is a compile error. |
+| `Cache.find`, `.insert`, `.remove`, `.prune`, `.queryEntryCount`, `.queryKeyByteCount` | `src/pipeline/cache.zig:96`, `src/pipeline/cache.zig:147`, `src/pipeline/cache.zig:179`, `src/pipeline/cache.zig:118`, `src/pipeline/cache.zig:198`, `src/pipeline/cache.zig:203` | |
+| `LruCache` | `src/pipeline/cache.zig:230` | Generic over key, value and capacity. |
+| `LruCache.get`, `.put`, `.remove`, `.queryEntryCount` | `src/pipeline/cache.zig:308`, `src/pipeline/cache.zig:323`, `src/pipeline/cache.zig:354`, `src/pipeline/cache.zig:366` | |
+| `evictOldest`, `findOldestSlot`, `reindexAfterSwap` | `src/pipeline/cache.zig:378`, `src/pipeline/cache.zig:391`, `src/pipeline/cache.zig:402` | |
 | `CacheKey` | `src/pipeline/cache_key.zig:30` | |
-| `CacheKey.appendBytes`, `.appendWord`, `.appendEnum`, `.appendKind` | `src/pipeline/cache_key.zig:53`-`:94` | Every write names its allocator, because every write can grow the buffer. |
-| `CacheKey.contentHash`, `.eql`, `.byteCount` | `src/pipeline/cache_key.zig:109`-`:109` | |
+| `CacheKey.appendBytes`, `.appendWord`, `.appendEnum`, `.appendKind` | `src/pipeline/cache_key.zig:53`, `src/pipeline/cache_key.zig:65`, `src/pipeline/cache_key.zig:85`, `src/pipeline/cache_key.zig:99` | Every write names its allocator, because every write can grow the buffer. |
+| `CacheKey.contentHash`, `.eql`, `.byteCount` | `src/pipeline/cache_key.zig:109`, `src/pipeline/cache_key.zig:114`, `src/pipeline/cache_key.zig:118` | |
+
+**Native adaptation helpers, not additional upstream function ports.**
+These helpers implement binary input, canonical identity, and Vulkan storage.
+They have no direct Dawn function counterpart because Dusk does not regenerate SPIR-V.
+
+| Native helper group | Current declaration sites | Why this group exists |
+| --- | --- | --- |
+| `prepareSpecialization`, `buildPreparedRenderKey`, `buildPreparedComputeKey` | `src/pipeline/pipeline.zig:131`, `src/pipeline/pipeline.zig:883`, `src/pipeline/pipeline.zig:969` | Decode/reflection/normalization runs once. Prepared key builders reuse the driver payload instead of converting a second time. |
+| `Specialization.init`, `.deinit`, `.info` | `src/pipeline/specialization.zig:63`, `src/pipeline/specialization.zig:127`, `src/pipeline/specialization.zig:135` | Own map entries and shared payload bytes. The returned VkSpecializationInfo points to stable owned slices, not a temporary struct. |
+| `resolve`, `canonicalId`, `Converted.lessThan` | `src/pipeline/specialization.zig:145`, `src/pipeline/specialization.zig:199`, `src/pipeline/specialization.zig:31` | Resolve aliases and canonical numeric IDs. Reject ambiguity/duplicates and sort normalized external IDs. |
+| `convertFamily` | `src/pipeline/specialization.zig:167` | Converts the requested value for every declaration sharing the resolved ID. Equal encoded sizes/bits permit one native map entry. Conflicting sizes/bits fail. A deterministic minimum type tag/width makes identity independent of aliases and metadata order. Encoded defaults remain independent. |
+| `convert`, `convertInteger`, `convertFloat` | `src/pipeline/specialization.zig:214`, `src/pipeline/specialization.zig:247`, `src/pipeline/specialization.zig:270` | Apply finite/range/conversion rules. The existing validation and numeric-helper rows map the upstream contract once per function. |
+| `writeBits` | `src/pipeline/specialization.zig:284` | Writes native-endian driver bytes and little-endian key bytes without ABI padding. |
+| `KeyError`, `specialization` module export | `src/pipeline/pipeline.zig:129`, `src/pipeline/root.zig:57` | Expose explicit specialization failures and the existing native module boundary. |
 
 **What the test asserts.** `docs/40-plan.md` §1 M14 fixes three sentences and
 `test/render_pipeline.zig` asserts all three against a real device, with the two
@@ -5511,51 +6025,58 @@ first shard cannot see from the outside:
    pruned rather than handed back, and the render path creates no
    `VkPipelineCache` at all.
 
-**What does not land here, and why.**
+**Classified M14 ledger.** Source counts below are census counts, not remaining
+implementation totals. Citations refer to Dawn revision
+`32f77c02294310054a660c393feded4bcb3f203c`.
+Each group appears once. The selected scope accepts SPIR-V input without WGSL
+and omits persistent artifact caching. Generated API types do not prove runtime
+support for async methods or explicit cache callbacks. Native stage-constant support has the separate observed proof above.
 
-| Item | Lands in | Why |
-| --- | --- | --- |
-| `native/Blob.{h,cpp}`, `native/BlobCache.{h,cpp}`, `native/CachedObject.{h,cpp}`, `native/InternalPipelineStore.{h,cpp}` | — for now | 15, 10, 5, 2 census rows. Dawn's blob cache is a persistent, on-disk `GetCachingInterface`, and `DawnPlatform.cpp:86` returns `nullptr` at `:87`, so there is nothing to persist. `CachedObject` and `InternalPipelineStore` exist to hold that cache; with no blob they have no reader. `AGENTS.md` §6 deletes a member nothing calls. |
-| `common/Sha3.{h,cpp}`, `native/Sha3.{h,cpp}` | — | 9 rows, twice. The key's hash is a bucket index and not the decision (`src/pipeline/cache_key.zig:96`-`:105`), and `docs/20-dependencies.md` "Containers, hashing, sorting" gives hashing to the standard library. A hand-rolled SHA-3 would be a dependency entry with no reader. |
-| `native/Serializable.h` | — | 12 rows. It is the `DAWN_SERIALIZABLE` macro layer that generates a `Stream` writer per field. The port writes the key with four explicit appends, so the layer would be a macro that hides a branch (`AGENTS.md` §2). |
-| `native/CacheRequest.{h,cpp}`, `native/CacheResult.h` | — for now | 3 and 7 census rows. They wrap a `WeakRef` and a `CreatePipelineAsyncEvent` across the async boundary. The port's create is synchronous and its object lives in the arena, so both files have no caller. |
-| `native/CreatePipelineAsyncEvent.{h,cpp}` | M18 | 9 rows. The event is a `std::future` and a callback queue; `docs/30-port-design.md` §4 gives futures to M4, and the pipeline create call that awaits one lands with the command path that needs it. |
-| `native/ObjectContentHasher.{h,cpp}` | `simplify`, one row above | 8 census rows, one table row. A type-dispatched `Record` overload set over C++ types is a `switch` the port does not need, because the key's bytes are already the value being compared. |
-| `native/PipelineCache.{h,cpp}`, `vulkan/PipelineCacheVk.{h,cpp}` | — for now | 6 and 7 census rows. `PipelineCache` is the `VkPipelineCache` the render path never asks for (`src/pipeline/pipeline_render.zig:926`) and the compute path does not reach yet. The `LruCache` that would hold them is ported and bounded, so the rows land with the first caller rather than ahead of it. |
-| `native/stream/Stream.h`, `vulkan/StreamImplVk.cpp` | M14 one row, M18 the rest | 55 census rows, one here. The port's key writer is four `append` calls. The 32 `Write` instantiations belong to M18's table, which owns the generic and the `RenderPassCacheQuery` instantiation. |
-| `native/BindingInfo.{h,cpp}` | M12, M14 | 18 census rows. The counting fold and the limits are `src/pipeline/pipeline_binding_info.zig`, and they landed with M12 because the bind group layout needs them first. M14 adds the pipeline-layout total, which is the row above's `UniformBuffersPerPipelineLayoutAboveLimit`. |
-| `native/Pipeline.h`, `native/RenderPipeline.h`, `native/ComputePipeline.h`, `vulkan/PipelineVk.h` | the first rows of each table above | 8 census rows, four rows. The headers are the class declarations the three `.cpp` rows above already name. |
-| `GetWorkgroupSize` | — | Named with its row above. Nothing on the create path reads a workgroup size. |
-| `ApplyDynamicState` | M18 | Named with its row above. |
+| Source group | Census rows | Classified status | Reason and contract owner |
+| --- | ---: | --- | --- |
+| `src/dawn/common/ContentLessObjectCache.h` | 16, counted once | Pipeline and device-object contracts implemented | `pipeline/cache.zig` implements guarded weak pipeline lookup, insertion, and removal. `engine/native_weak_index.zig` serves device-owned BGL, PL, sampler, shader, and attachment indices. Full equality, owned hit aliases, lease-only hits, and pre-destruction removal have exercised regressions. This is not full accounting for all 16 upstream definitions or driver persistence. |
+| `src/dawn/common/ContentLessObjectCacheable.h` | Included in the retained source budget | Core removal-hook replacement | `Object.retirePayloadLocked` removes weak membership before native payload destruction under the original ObjectGuard. |
+| `src/dawn/common/LRUCache.h` | 5 | Implemented, merged into four mapping rows | `src/dawn/common/LRUCache.h:89,95,118,142` maps to get/put, eviction, and teardown in `pipeline/cache.zig`. FramebufferCache is an active caller. There is no five-row remainder. The declared driver-cache map has no producer or consumer. |
+| `src/dawn/native/Blob.{h,cpp}` | 15 | Selected-scope omission | Blob byte ownership serves artifact consumers. Dusk has no persistent artifact reader/writer. M14's optional persistent-cache feature owns a future `pipeline` blob implementation, not public async creation. |
+| `src/dawn/native/BlobCache.{h,cpp}` | 10 | Selected-scope omission | `src/dawn/native/BlobCache.cpp:46-50` validates stored data. `src/dawn/native/BlobCache.h:70-74` exposes storage. M14's optional persistent-cache feature owns load/store and explicit Device cache callbacks. Generated `DawnCacheDeviceDescriptor` types do not implement those callbacks. A null default at `src/dawn/platform/DawnPlatform.cpp:86-87` does not rule out explicit providers. |
+| `src/dawn/native/CachedObject.{h,cpp}` | 5 | Type-specific replacement | Pipeline-owned key bytes retain their role. `native_resource_store.zig:51-112` supplies full per-type device-object identity. This does not add persistent artifact ownership or account for all upstream definitions. |
+| `src/dawn/native/InternalPipelineStore.{h,cpp}` | 2 | Transferred utility-state contract, unimplemented | `src/dawn/native/InternalPipelineStore.h:47-79,86-117` stores utility pipelines, shader modules, scratch buffers, and helper caches. M17 owns clear/blit/browser-copy state in `command`/`engine`. M19 owns timestamp helper state in `engine/query_set.zig`. M15/M18 own indirect-validation helper state in command recording/replay. M14 owns optional placeholder-fragment state (`src/dawn/native/RenderPipeline.cpp:947-951`). Shared device-owned storage belongs in `engine/device.zig`. It is not BlobCache. Metal-only state at `:81-84` is outside the Vulkan scope. |
+| `src/dawn/native/Serializable.h` | 12 | Selected-scope omission | Persistent consumers include `src/dawn/native/ShaderModule.h:124,141` and `src/dawn/native/vulkan/ShaderModuleVk.cpp:81`. M14's optional persistent-cache feature owns general artifact serialization. Explicit pipeline-key appends and M18's Vulkan stream writer do not implement this format. |
+| `src/dawn/common/Sha3.{h,cpp}` | 9 | Standard-library replacement plus selected-scope omission | `pipeline/shader_module.zig:282-291` uses std SHA3-256 for shader words. Wyhash in `pipeline/cache_key.zig:109-114` only selects map buckets. SHA3-224 blob validation (`src/dawn/native/BlobCache.cpp:46-50`) and the device cache-key path (`src/dawn/native/Device.cpp:389-392`) remain omitted with M14 persistence. There is one common source pair and no second native source pair at the pin. |
+| `src/dawn/native/CacheRequest.{h,cpp}` | 3 | Selected-scope omission | `src/dawn/native/CacheRequest.h:72-75,102-165` builds request/device keys, loads blobs, and runs hit/miss handlers. M14's optional persistent-cache feature owns request-keyed load/run/store. This is not an async-event or WeakRef wrapper. |
+| `src/dawn/native/CacheResult.h` | 7 | Selected-scope omission | `src/dawn/native/CacheResult.h:11-52` records the key, value, and hit/miss state. M14's optional persistent-cache feature owns it with CacheRequest. Shader parse/compile consumers exist at `src/dawn/native/ShaderModule.cpp:1900-1906` and `src/dawn/native/vulkan/ShaderModuleVk.cpp:396-399,521`. |
+| `src/dawn/native/CreatePipelineAsyncEvent.{h,cpp}` | 9 | Native runtime replacement implemented | `src/dawn/native/CreatePipelineAsyncEvent.h:35-76` owns initialization and callback completion. `engine/native_async_pipeline.zig:311-320` exposes generated callback bridges and separate typed observers. Owned descriptor preparation, registry cells, and late-result disposal replace the event class. BG210 exercised compute/render async readbacks in Debug and ReleaseSafe. This group is not full accounting for all nine definitions. |
+| `src/dawn/native/vulkan/ComputePipelineVk.cpp` | 9 | Base creation plus native constant adaptation. Internal variants remain partial | Public compute-stage constants validate, affect cache identity, and reach the driver. BG97 passed both corrected compute scenarios in Debug and actual ReleaseSafe, including barrier/shared-ID acceptance. This does not implement the separate external-texture/Y′CbCr or immediate-data internal variant cache. Their M11/M14/M18 owners remain unchanged. See `docs/02-dawn-design.md` §4.9 for the constant contract. |
+| `src/dawn/native/PipelineCache.{h,cpp}` | 6 | Selected-scope optional optimization omission | `src/dawn/native/PipelineCache.h:11-54` adapts BlobCache. M14's optional persistent-cache feature owns driver-cache load/store and create-path integration. It is separate from active pipeline-object deduplication. |
+| `src/dawn/native/vulkan/PipelineCacheVk.{h,cpp}` | 7 | Selected-scope optional optimization omission | `src/dawn/native/vulkan/PipelineCacheVk.cpp:76-120,123-148` serializes driver data and initializes a cache from persisted bytes. `PipelineStore.pipeline_caches` is declared but unpopulated. Both Vulkan pipeline create paths pass null caches. M14's optional persistent-cache feature owns a real provider and create/get/put callers before claiming driver-cache support. |
+| `src/dawn/native/ObjectContentHasher.h` and `.cpp` | 7 + 1 | Per-type simplification | Pipeline key bytes, unchanged shader words, packed logical layouts, sampler keys, and canonical attachment tuples have separate hashes and full equality. Upstream consumers include `src/dawn/native/BindGroupLayoutInternal.cpp:835-881`, `src/dawn/native/PipelineLayout.cpp:730-750`, `src/dawn/native/Sampler.cpp:171-189`, and `src/dawn/native/ShaderModule.cpp:2006-2011`. Hashing does not implement driver persistence. |
+| `src/dawn/native/CacheKey.cpp` | 1 | Implemented byte-sink representation | `src/dawn/native/CacheKey.cpp:33-34` streams accumulated bytes, not equality. `pipeline/cache_key.zig:30,53` stores/appends key bytes. `CacheKey.eql` separately supplies comparison. |
+| `src/dawn/native/stream/Stream.h` | 47 | One explicit M14 contract mapped, full census accounting open | `src/dawn/native/stream/Stream.h:353-356` length-prefixes vectors. `CacheKey.appendBytes` maps that contract. Generic stream helpers need per-row merge/omission accounting under M14 `pipeline/cache_key.zig`. One mapping row does not account for all 47 definitions. Persistent readers remain outside the selected scope. |
+| `src/dawn/native/vulkan/StreamImplVk.cpp` | 36 | Transferred to M18 | M18's existing source table owns four pNext helpers and 32 `Write` specializations. `engine/stream.zig` merges the helpers and writes 31 Vulkan types. `engine/render_pass_cache.zig:219` writes `RenderPassCacheQuery`, the 32nd specialization. Replay caller integration is separate. |
+| `src/dawn/native/BindingInfo.{h,cpp}` | 18 | Merged in M12/M14 | `pipeline/pipeline_binding_info.zig` owns the counting fold and limits. M14 adds pipeline-layout totals. These are not generic unlanded cache rows. |
+| `src/dawn/native/Pipeline.h`, `RenderPipeline.h`, `ComputePipeline.h`, `vulkan/PipelineVk.h` | 8 | Class declarations merged into implementation rows | The records map to state and accessors. Native SPIR-V stage constants now have validation, identity, and driver payloads. Public async creation remains open. This does not close the full class or source census. |
+| `GetWorkgroupSize` | Included in compute source census | Public getter open. Validation source contract verified in Phase 1 | M5 owns SPIR-V metadata and the bounded evaluator. M14 `prepareCompute` requires effective-size validation before keys, lookup, and native creation. No public accessor implementation is claimed. `docs/50-verification.md` records the bounded Phase 1 proof. |
+| `ApplyDynamicState` | Included in render backend census | Transferred to M18 | `src/dawn/native/vulkan/RenderPipelineVk.cpp:961` belongs to replay in `engine/command_buffer.zig`, which applies the immutable M14 state. This transfer has no relation to public async creation. |
 
-**The rows this milestone still owes.** Every file below is in §1's M14 module
-list and has no row yet, because it has not landed. The census count is
-Appendix A2's.
+**Stream ownership.** M14 retains the one explicit vector length-prefix mapping
+from the independent 47-row `Stream.h` census. M18 owns **36**
+`StreamImplVk.cpp` source rows: four merged helpers and 32 writes.
+Neither count supports a combined “55 rows, one here” allocation.
+The ledger makes no corrected grand total until complete source accounting exists.
 
-| Upstream file | Census rows | Why it has not landed |
-| --- | ---: | --- |
-| `src/dawn/common/ContentLessObjectCache.h` | 16 | A second copy of the header the `common/` rows above already map. The two paths are the same class; the rows are not doubled. |
-| `src/dawn/common/LRUCache.h` | 5 | The remaining members of a class three rows above already cover. |
-| `src/dawn/native/Blob.cpp` | 15 | No blob cache: `DawnPlatform.cpp:86` returns `nullptr` at `:87`. |
-| `src/dawn/native/Serializable.h` | 12 | No macro layer; the key has four explicit appends. |
-| `src/dawn/native/BlobCache.cpp` | 10 | No blob cache. |
-| `src/dawn/native/Sha3.cpp`, `src/dawn/common/Sha3.cpp` | 9 each | The standard library hashes; `docs/20-dependencies.md` owns that decision. |
-| `src/dawn/native/CreatePipelineAsyncEvent.cpp` | 9 | M18 owns the async create. |
-| `src/dawn/native/vulkan/ComputePipelineVk.cpp` | 9 | One row above; the remaining definitions are the specialization map. |
-| `src/dawn/native/CacheResult.h` | 7 | No caller until the async create lands. |
-| `src/dawn/native/ObjectContentHasher.h` | 7 | One row above. |
-| `src/dawn/native/vulkan/PipelineCacheVk.cpp` | 7 | No caller until a create path asks for a cache. |
-| `src/dawn/native/PipelineCache.cpp` | 6 | With the row above. |
-| `src/dawn/native/CachedObject.cpp` | 5 | With the blob cache. |
-| `src/dawn/native/InternalPipelineStore.cpp` | 2 | With the blob cache. |
-| `src/dawn/native/CacheRequest.cpp` | 1 | With the async create. |
-| `src/dawn/native/CacheKey.cpp` | 1 | One row above. |
-| `src/dawn/native/ObjectContentHasher.cpp` | 1 | One row above. |
-
-**The 17 rows that are M18's, not M14's.** `vulkan/StreamImplVk.cpp` contributes
-32 `Write` instantiations and M18's table owns them; §M18 records that split.
-M14 keeps one row, the `Stream<std::vector<T>>` length-prefix rule, because the
-cache key depends on it.
+**Current native source scope.** Device-owned non-pipeline weak caches and native async pipeline completion now have implementations.
+All eight generated callback-future starts have callback bridges and separate typed observer routes.
+The reserved device-loss Future accessor is not a ninth start.
+BG210 exercised the six resource-operation families in Debug and actual ReleaseSafe.
+BG219 subsequently exercised typed and generated-callback Adapter/Device requests and reserved loss notification in both actual modes.
+Native stage constants apply to all three stages and enter cache identity.
+Internal Vulkan variants and utility pipeline state still require their named feature owners' source and execution evidence.
+No complete C dispatch table, wire implementation, browser forwarder, or utility GPU proof follows from these native routes.
+Blob formats, explicit persistent-cache callbacks, SHA3-224 cache paths, and
+driver-cache persistence remain explicit selected-scope omissions, not completed API support.
+Phase-1 workgroup changes do not close async creation, non-pipeline object caches,
+utility state, platform external-image execution, or persistent-cache groups.
+Workgroup storage accounting, subgroup rules, and the public size getter remain open.
 
 #### M15 — the command stream and the encoders
 
@@ -5581,9 +6102,11 @@ rather than raising through an error sink, because `command` does not import
 239 lines of inline WGSL are compiled at run time through Tint
 (`IndirectDrawValidationEncoder.cpp:101-339`), and `AGENTS.md` §3.2 forbids a
 WGSL front end in this repository. The batches it built are `skip`, and the
-metadata that survives is the draw list M18 reads back. `RenderBundle.{h,cpp}`,
-`RenderBundleEncoder.{h,cpp}` and `RenderPassWorkaroundsHelper.{h,cpp}` are
-`skip` for the same structural reason and the rows say so.
+metadata that survives is the draw list M18 reads back.
+`RenderBundle.{h,cpp}` and `RenderBundleEncoder.{h,cpp}` now have selected
+stream-ownership replacements in `src/command/render_bundle.zig`.
+Their census rows are transferred contracts, not Tint-related skips.
+`RenderPassWorkaroundsHelper.{h,cpp}` remains an explicit selected-scope omission.
 
 ### `src/dawn/common/Constants.h` — 17 rows
 
@@ -5594,20 +6117,20 @@ read a device (`docs/10-architecture.md`, "Module boundaries").
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/common/Constants.h:36` | `kMaxBindGroups` | `max_bind_groups` | `src/command/constants.zig` | port | `:20`. |
-| `src/dawn/common/Constants.h:39` | `kMaxVertexBuffers` | `max_vertex_buffers` | `src/command/constants.zig` | port | `:24`. Bounds `SetVertexBufferOptions.slot`. |
-| `src/dawn/common/Constants.h:43` | `kMaxColorAttachments` | `max_color_attachments` | `src/command/constants.zig` | port | `:28`. Sizes `BeginRenderPassCmd.color_attachments`. |
-| `src/dawn/common/Constants.h:44` | `kTextureBytesPerRowAlignment` | `texture_bytes_per_row_alignment` | `src/command/constants.zig` | port | `:32`. §M17 reads it. |
-| `src/dawn/common/Constants.h:45` | `kQueryResolveAlignment` | `query_resolve_alignment` | `src/command/constants.zig` | port | `:35`, and re-exported by `query.zig:51`. |
-| `src/dawn/common/Constants.h:51` | `kImmediateElementByteSize` | `immediate_element_byte_size` | `src/command/constants.zig` | port | `:62`. |
-| `src/dawn/common/Constants.h:58` | `kMaxImmediateDataBytes` | `max_immediate_data_bytes` | `src/command/constants.zig` | port | `:66`. Sizes the tracker's immediate array. |
-| `src/dawn/common/Constants.h:76` | `kDispatchIndirectSize` | `dispatch_indirect_size` | `src/command/constants.zig` | port | `:79`. |
-| `src/dawn/common/Constants.h:77` | `kDrawIndirectSize` | `draw_indirect_size` | `src/command/constants.zig` | port | `:70`. |
-| `src/dawn/common/Constants.h:78` | `kDrawIndexedIndirectSize` | `draw_indexed_indirect_size` | `src/command/constants.zig` | port | `:74`. |
-| `src/dawn/common/Constants.h:94` | `kMaxQueryCount` | `max_query_count`, `max_tracked_query_count` | `src/command/query.zig`, `src/command/usage.zig` | port | `query.zig:47`; `usage.zig:537` bounds the per-query availability list. |
-| `src/dawn/common/Constants.h:103` | `kPLSSlotByteSize` | `pls_slot_byte_size` | `src/command/constants.zig` | port | `:83`. |
-| `src/dawn/common/Constants.h:107` | `kWireBufferAlignment` | `max_alignment` | `src/command/constants.zig` | port | `:52`. Dawn's is a wire constant; the port's is the payload alignment the framing requires, and it equals Dawn's `kMaxAllocatedCommandAlignment`. |
-| `src/dawn/common/Constants.h:37` | `kMaxBindingsPerBindGroup` | `constants.Limits` | `src/command/constants.zig` | skip | A descriptor bound, so `pipeline` reads it at layout creation. |
+| `src/dawn/common/Constants.h:36` | `kMaxBindGroups` | `max_bind_groups` | `src/command/constants.zig:20` | port | `:20`. |
+| `src/dawn/common/Constants.h:39` | `kMaxVertexBuffers` | `max_vertex_buffers` | `src/command/constants.zig:24` | port | `:24`. Bounds `SetVertexBufferOptions.slot`. |
+| `src/dawn/common/Constants.h:43` | `kMaxColorAttachments` | `max_color_attachments` | `src/command/constants.zig:28` | port | `:28`. Sizes `BeginRenderPassCmd.color_attachments`. |
+| `src/dawn/common/Constants.h:44` | `kTextureBytesPerRowAlignment` | `texture_bytes_per_row_alignment` | `src/command/constants.zig:32` | port | `:32`. §M17 reads it. |
+| `src/dawn/common/Constants.h:45` | `kQueryResolveAlignment` | `query_resolve_alignment` | `src/command/constants.zig:36` | port | `:35`, and re-exported by `query.zig:51`. |
+| `src/dawn/common/Constants.h:51` | `kImmediateElementByteSize` | `immediate_element_byte_size` | `src/command/constants.zig:62` | port | `:62`. |
+| `src/dawn/common/Constants.h:58` | `kMaxImmediateDataBytes` | `max_immediate_data_bytes` | `src/command/constants.zig:66` | port | `:66`. Sizes the tracker's immediate array. |
+| `src/dawn/common/Constants.h:76` | `kDispatchIndirectSize` | `dispatch_indirect_size` | `src/command/constants.zig:79` | port | `:79`. |
+| `src/dawn/common/Constants.h:77` | `kDrawIndirectSize` | `draw_indirect_size` | `src/command/constants.zig:70` | port | `:70`. |
+| `src/dawn/common/Constants.h:78` | `kDrawIndexedIndirectSize` | `draw_indexed_indirect_size` | `src/command/constants.zig:74` | port | `:74`. |
+| `src/dawn/common/Constants.h:94` | `kMaxQueryCount` | `max_query_count`, `max_tracked_query_count` | `src/command/query.zig:54`, `src/command/usage.zig:602` | port | `query.zig:47`; `usage.zig:537` bounds the per-query availability list. |
+| `src/dawn/common/Constants.h:103` | `kPLSSlotByteSize` | `pls_slot_byte_size` | `src/command/constants.zig:83` | port | `:83`. |
+| `src/dawn/common/Constants.h:107` | `kWireBufferAlignment` | `max_alignment` | `src/command/constants.zig:52` | port | `:52`. Dawn's is a wire constant; the port's is the payload alignment the framing requires, and it equals Dawn's `kMaxAllocatedCommandAlignment`. |
+| `src/dawn/common/Constants.h:37` | `kMaxBindingsPerBindGroup` | `constants.Limits` | `src/command/constants.zig:93` | skip | A descriptor bound, so `pipeline` reads it at layout creation. |
 | `src/dawn/common/Constants.h:38` | `kMaxVertexAttributes` | — | — | skip | A descriptor bound, so `pipeline`. |
 | `src/dawn/common/Constants.h:40` | `kMaxVertexBufferArrayStride` | — | — | skip | Checked when a vertex buffer layout is created, which is `pipeline`. |
 | `src/dawn/common/Constants.h:86` | `kCopyBufferToBufferOffsetAlignment` | — | — | skip | A copy rule, and the one copy this milestone records is `copyTextureToBuffer`, whose rules are at `CommandEncoder.cpp:412` and `CommandValidation.cpp:322`. The buffer-to-buffer encoder lands with M18. |
@@ -5616,17 +6139,17 @@ read a device (`docs/10-architecture.md`, "Module boundaries").
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/Commands.h:55` | `enum class Command : uint32_t` | `Tag` | `src/command/commands.zig` | port | `:90`. Dawn's 38 values, in Dawn's order, so the wire numbers agree. `tag_count` (`:134`) is the number this milestone's budget was written against and `test/command_stream.zig` asserts it. The 38 payload structs at `:96`–`:471` are the field sets of `commands.zig:147`–`:444` and are not rows: a struct is not a function. |
+| `src/dawn/native/Commands.h:55` | `enum class Command : uint32_t` | `Tag` | `src/command/commands.zig:87` | port | `:90`. Dawn's 38 values, in Dawn's order, so the wire numbers agree. `tag_count` (`:134`) is the number this milestone's budget was written against and `test/command_stream.zig` asserts it. The 38 payload structs at `:96`–`:471` are the field sets of `commands.zig:147`–`:444` and are not rows: a struct is not a function. |
 
 ### `src/dawn/native/Commands.cpp` — 5 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/Commands.cpp:43` | `FreeCommands` | — | — | skip | Releases every `Ref<T>` in the stream. A port payload holds a pointer and no refcount (`commands.zig:18-24`), and the arena owns every object until the device is destroyed, so there is nothing to free. `Allocator.deinit` (`allocator.zig:73`) is the whole epilogue. |
-| `src/dawn/native/Commands.cpp:259` | `SkipCommand` | `skip` | `src/command/commands.zig` | port | `:515`. Dawn asserts because only Dawn writes the stream; the port's stream is input at M18, so a walk that runs off the end returns `error.CommandStreamTruncated`. No caller today: `test/command_stream.zig` decodes per tag because it asserts fields inside the payloads, which `skip` does not read, so the row records the shape rather than a reachable path. |
-| `src/dawn/native/Commands.cpp:433` | `AddNullTerminatedString` | `addNullTerminatedString` | `src/command/commands.zig` | port | `:546`. The length written is the byte count including the terminator, so a reader never searches for one. |
-| `src/dawn/native/Commands.cpp:450` | `NextNullTerminatedString` | `nextNullTerminatedString` | `src/command/commands.zig` | port | `:565`. Dawn asserts the terminator is where it wrote it; the port refuses the stream, because a length that does not match its bytes is the one corruption this framing can detect. No caller today: the replay that reads a pushed label back is M18's, so the row records the shape rather than a reachable path. |
-| `src/dawn/native/Commands.cpp:474` | `ResolveRect::HasValue` | `ResolveRect.hasValue` | `src/command/commands.zig` | port | `:197`. Both extents non-zero, so a defaulted rect asks for the whole attachment. |
+| `src/dawn/native/Commands.cpp:259` | `SkipCommand` | `skip` | `src/command/commands.zig:527` | port | `:515`. Dawn asserts because only Dawn writes the stream; the port's stream is input at M18, so a walk that runs off the end returns `error.CommandStreamTruncated`. No caller today: `test/command_stream.zig` decodes per tag because it asserts fields inside the payloads, which `skip` does not read, so the row records the shape rather than a reachable path. |
+| `src/dawn/native/Commands.cpp:433` | `AddNullTerminatedString` | `addNullTerminatedString` | `src/command/commands.zig:554` | port | `:546`. The length written is the byte count including the terminator, so a reader never searches for one. |
+| `src/dawn/native/Commands.cpp:450` | `NextNullTerminatedString` | `nextNullTerminatedString` | `src/command/commands.zig:573` | port | `:565`. Dawn asserts the terminator is where it wrote it; the port refuses the stream, because a length that does not match its bytes is the one corruption this framing can detect. No caller today: the replay that reads a pushed label back is M18's, so the row records the shape rather than a reachable path. |
+| `src/dawn/native/Commands.cpp:474` | `ResolveRect::HasValue` | `ResolveRect.hasValue` | `src/command/commands.zig:197` | port | `:197`. Both extents non-zero, so a defaulted rect asks for the whole attachment. |
 
 **The two exhaustive switches the port adds.** Dawn has no equivalent of
 `commands.Payload` (`:447`) or `commands.DataElement` (`:497`), and the absence
@@ -5639,199 +6162,199 @@ from disagreeing about which tags carry data.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandAllocator.h:91` | `kEndOfBlock` | `end_of_block` | `src/command/constants.zig` | port | `:42`. |
-| `src/dawn/native/CommandAllocator.h:92` | `kAdditionalData` | `additional_data` | `src/command/constants.zig` | port | `:47`. One below the other, so neither can collide with a tag. |
-| `src/dawn/native/CommandAllocator.h:97` | `kMaxAllocatedCommandAlignment` | `max_alignment` | `src/command/constants.zig` | port | `:52`. |
-| `src/dawn/native/CommandAllocator.h:110` | `CommandIterator(CommandAllocator)` | `Iterator.init` | `src/command/allocator.zig` | port | `:223`. |
-| `src/dawn/native/CommandAllocator.h:116` | `NextCommandId<E>` | `Iterator.nextTag` | `src/command/allocator.zig` | port | `:260`. The typed form is the enum decode; an id that is neither a tag nor a sentinel ends the walk rather than tripping an assert, because the port's stream is input at M18. |
-| `src/dawn/native/CommandAllocator.h:124` | `NextCommand<T>` | `Iterator.nextCommand` | `src/command/allocator.zig` | port | `:287`. The `requires` clause at `:123` becomes a `comptime std.debug.assert`. |
-| `src/dawn/native/CommandAllocator.h:131` | `NextData<T>` | `Iterator.nextData` | `src/command/allocator.zig` | port | `:295`. Dawn asserts the run follows its payload; the port refuses, and a decoder is where input is refused. |
+| `src/dawn/native/CommandAllocator.h:91` | `kEndOfBlock` | `end_of_block` | `src/command/constants.zig:42` | port | `:42`. |
+| `src/dawn/native/CommandAllocator.h:92` | `kAdditionalData` | `additional_data` | `src/command/constants.zig:47` | port | `:47`. One below the other, so neither can collide with a tag. |
+| `src/dawn/native/CommandAllocator.h:97` | `kMaxAllocatedCommandAlignment` | `max_alignment` | `src/command/constants.zig:52` | port | `:52`. |
+| `src/dawn/native/CommandAllocator.h:110` | `CommandIterator(CommandAllocator)` | `Iterator.init` | `src/command/allocator.zig:249` | port | `:223`. |
+| `src/dawn/native/CommandAllocator.h:116` | `NextCommandId<E>` | `Iterator.nextTag` | `src/command/allocator.zig:291` | port | `:260`. The typed form is the enum decode; an id that is neither a tag nor a sentinel ends the walk rather than tripping an assert, because the port's stream is input at M18. |
+| `src/dawn/native/CommandAllocator.h:124` | `NextCommand<T>` | `Iterator.nextCommand` | `src/command/allocator.zig:323` | port | `:287`. The `requires` clause at `:123` becomes a `comptime std.debug.assert`. |
+| `src/dawn/native/CommandAllocator.h:131` | `NextData<T>` | `Iterator.nextData` | `src/command/allocator.zig:333` | port | `:295`. Dawn asserts the run follows its payload; the port refuses, and a decoder is where input is refused. |
 
 ### `src/dawn/native/CommandAllocator.h` (the writing half) — 8 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandAllocator.h:146` | `Reset` | `Iterator.reset` | `src/command/allocator.zig` | port | `:247`. Back to the first block without emptying the list. |
-| `src/dawn/native/CommandAllocator.h:150` | `MakeEmptyAsDataWasDestroyed` | `Iterator.deinit` | `src/command/allocator.zig` | port | `:229`. Dawn returns the blocks to the pool after `FreeCommands` has released every `Ref`; the port has no refs to release, so freeing the blocks is the whole epilogue. |
-| `src/dawn/native/CommandAllocator.h:153` | `IsEmpty` | `Allocator.isEmpty`, `Iterator.byteCount` | `src/command/allocator.zig` | port | `:96` and `:327`. |
-| `src/dawn/native/CommandAllocator.h:155` | `NextCommandId()` (the out-of-line body) | `Iterator.nextRawTag` | `src/command/allocator.zig` | port | `:265`. |
-| `src/dawn/native/CommandAllocator.h:168` | `NextCommandIdInNewBlock` | `Iterator.nextRawTag` | `src/command/allocator.zig` | merge | The same Zig function, `:265-283`: the block hop is the tail of one loop rather than a second entry point, because a raw id that is neither a tag nor a sentinel must be able to end the walk from either half. |
-| `src/dawn/native/CommandAllocator.h:170` | `NextCommand(size_t)` | `Iterator.takeBytes` | `src/command/allocator.zig` | port | `:314`. Private, because only `nextCommand` and `nextData` may consume a payload. |
-| `src/dawn/native/CommandAllocator.h:177` | `NextData(size_t)` | `Iterator.nextRawTag` | `src/command/allocator.zig` | merge | The port reads the run's sentinel through `nextRawTag` rather than a separate reader, so the sentinel is decoded in one place. |
-| `src/dawn/native/CommandAllocator.h:215` | `Allocate<T, E>` | `Allocator.allocateCommand` | `src/command/allocator.zig` | port | `:120`. Dawn's template names the payload type; the port names it in one place, `commands.Payload`. |
+| `src/dawn/native/CommandAllocator.h:146` | `Reset` | `Iterator.reset` | `src/command/allocator.zig:281` | port | `:247`. Back to the first block without emptying the list. |
+| `src/dawn/native/CommandAllocator.h:150` | `MakeEmptyAsDataWasDestroyed` | `Iterator.deinit` | `src/command/allocator.zig:255` | port | `:229`. Dawn returns the blocks to the pool after `FreeCommands` has released every `Ref`; the port has no refs to release, so freeing the blocks is the whole epilogue. |
+| `src/dawn/native/CommandAllocator.h:153` | `IsEmpty` | `Allocator.isEmpty`, `Iterator.byteCount` | `src/command/allocator.zig:102`, `src/command/allocator.zig:374` | port | `:96` and `:327`. |
+| `src/dawn/native/CommandAllocator.h:155` | `NextCommandId()` (the out-of-line body) | `Iterator.nextRawTag` | `src/command/allocator.zig:296` | port | `:265`. |
+| `src/dawn/native/CommandAllocator.h:168` | `NextCommandIdInNewBlock` | `Iterator.nextRawTag` | `src/command/allocator.zig:296` | merge | The same Zig function, `:265-283`: the block hop is the tail of one loop rather than a second entry point, because a raw id that is neither a tag nor a sentinel must be able to end the walk from either half. |
+| `src/dawn/native/CommandAllocator.h:170` | `NextCommand(size_t)` | `Iterator.takeBytes` | `src/command/allocator.zig:353` | port | `:314`. Private, because only `nextCommand` and `nextData` may consume a payload. |
+| `src/dawn/native/CommandAllocator.h:177` | `NextData(size_t)` | `Iterator.nextRawTag` | `src/command/allocator.zig:296` | merge | The port reads the run's sentinel through `nextRawTag` rather than a separate reader, so the sentinel is decoded in one place. |
+| `src/dawn/native/CommandAllocator.h:215` | `Allocate<T, E>` | `Allocator.allocateCommand` | `src/command/allocator.zig:126` | port | `:120`. Dawn's template names the payload type; the port names it in one place, `commands.Payload`. |
 
 ### `src/dawn/native/CommandAllocator.h` (the arena) — 8 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandAllocator.h:227` | `AllocateData<T, Index>` | `Allocator.allocateData` | `src/command/allocator.zig` | port | `:132`. |
-| `src/dawn/native/CommandAllocator.h:253` | `kWorstCaseAdditionalSize` | `worst_case_additional_size` | `src/command/constants.zig` | port | `:58`. The tag slot, the padding after the payload and the end-of-block tag; `fitsInBlock` (`allocator.zig:177`) reserves it so the fast path never tests mid-computation. |
-| `src/dawn/native/CommandAllocator.h:261` | `Allocate(uint32_t, size_t)` | `Allocator.allocate` | `src/command/allocator.zig` | port | `:103`. |
-| `src/dawn/native/CommandAllocator.h:289` | `AllocateInNewBlock` | `Allocator.allocateInNewBlock` | `src/command/allocator.zig` | port | `:147`. |
-| `src/dawn/native/CommandAllocator.h:291` | `AllocateData(size_t)` | `Allocator.allocateData` | `src/command/allocator.zig` | merge | The port's one `allocateData` writes the sentinel itself; the two Dawn overloads are the typed and the raw form of the same write. |
-| `src/dawn/native/CommandAllocator.h:305` | `mPlaceholderSpace` | `current_index` | `src/command/allocator.zig` | simplify | Dawn keeps an aligned four-byte placeholder span so the first `Allocate` sees initialised memory. The port stores an index into the block list and uses an out-of-range value to mean "no block", which says the same thing without the pointer aliasing. |
-| `src/dawn/native/CommandAllocator.h:259` | `AcquireBlocks` | `Allocator.acquireBlocks` | `src/command/allocator.zig` | port | `:81`. The end-of-block tag goes into the tail of the last block and the list moves out, so the allocator is empty afterwards. |
-| `src/dawn/native/CommandAllocator.h:180` | the `DAWN_ASSERT` on the additional-data sentinel | `Iterator.nextData` | `src/command/allocator.zig` | port | `:301`. Assert becomes a refused stream; see the note under `Commands.cpp:450`. |
+| `src/dawn/native/CommandAllocator.h:227` | `AllocateData<T, Index>` | `Allocator.allocateData` | `src/command/allocator.zig:142` | port | `:132`. |
+| `src/dawn/native/CommandAllocator.h:253` | `kWorstCaseAdditionalSize` | `worst_case_additional_size` | `src/command/constants.zig:58` | port | `:58`. The tag slot, the padding after the payload and the end-of-block tag; `fitsInBlock` (`allocator.zig:177`) reserves it so the fast path never tests mid-computation. |
+| `src/dawn/native/CommandAllocator.h:261` | `Allocate(uint32_t, size_t)` | `Allocator.allocate` | `src/command/allocator.zig:109` | port | `:103`. |
+| `src/dawn/native/CommandAllocator.h:289` | `AllocateInNewBlock` | `Allocator.allocateInNewBlock` | `src/command/allocator.zig:159` | port | `:147`. |
+| `src/dawn/native/CommandAllocator.h:291` | `AllocateData(size_t)` | `Allocator.allocateData` | `src/command/allocator.zig:142` | merge | The port's one `allocateData` writes the sentinel itself; the two Dawn overloads are the typed and the raw form of the same write. |
+| `src/dawn/native/CommandAllocator.h:305` | `mPlaceholderSpace` | `current_index` | `src/command/allocator.zig:56` | simplify | Dawn keeps an aligned four-byte placeholder span so the first `Allocate` sees initialised memory. The port stores an index into the block list and uses an out-of-range value to mean "no block", which says the same thing without the pointer aliasing. |
+| `src/dawn/native/CommandAllocator.h:259` | `AcquireBlocks` | `Allocator.acquireBlocks` | `src/command/allocator.zig:87` | port | `:81`. The end-of-block tag goes into the tail of the last block and the list moves out, so the allocator is empty afterwards. |
+| `src/dawn/native/CommandAllocator.h:180` | the `DAWN_ASSERT` on the additional-data sentinel | `Iterator.nextData` | `src/command/allocator.zig:333` | port | `:301`. Assert becomes a refused stream; see the note under `Commands.cpp:450`. |
 
 ### `src/dawn/native/CommandAllocator.cpp` — 23 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandAllocator.cpp:43` | `CommandIterator()` | `Iterator.init` | `src/command/allocator.zig` | merge | The default constructor is the same initial state the port reaches through `reset`. |
-| `src/dawn/native/CommandAllocator.cpp:47` | `CommandIterator::~CommandIterator` | `Iterator.deinit` | `src/command/allocator.zig` | port | `:229`. |
-| `src/dawn/native/CommandAllocator.cpp:51` | `CommandIterator(CommandIterator&&)` | `Iterator` (by value) | `src/command/allocator.zig` | simplify | The port's `init` takes the block list by value, so a move is a copy of three words and a move constructor would be a second spelling of it. |
+| `src/dawn/native/CommandAllocator.cpp:43` | `CommandIterator()` | `Iterator.init` | `src/command/allocator.zig:249` | merge | The default constructor is the same initial state the port reaches through `reset`. |
+| `src/dawn/native/CommandAllocator.cpp:47` | `CommandIterator::~CommandIterator` | `Iterator.deinit` | `src/command/allocator.zig:255` | port | `:229`. |
+| `src/dawn/native/CommandAllocator.cpp:51` | `CommandIterator(CommandIterator&&)` | `Iterator` (by value) | `src/command/allocator.zig:242` | simplify | The port's `init` takes the block list by value, so a move is a copy of three words and a move constructor would be a second spelling of it. |
 | `src/dawn/native/CommandAllocator.cpp:60` | `operator=(CommandIterator&&)` | — | — | skip | The iterator is a stack value with one owner; there is no second move assignment for it to serve. |
-| `src/dawn/native/CommandAllocator.cpp:71` | `CommandIterator(CommandAllocator)` | `Iterator.init` | `src/command/allocator.zig` | port | `:223`. |
-| `src/dawn/native/CommandAllocator.cpp:76` | `AcquireCommandBlocks` | `Iterator.appendBlocks` | `src/command/allocator.zig` | port | `:239`. The order the list arrives in is the replay order, so appending is the whole rule. |
-| `src/dawn/native/CommandAllocator.cpp:100` | `NextCommandIdInNewBlock` | `Iterator.nextRawTag` | `src/command/allocator.zig` | merge | With `CommandAllocator.h:168`. |
-| `src/dawn/native/CommandAllocator.cpp:111` | `Reset` | `Iterator.reset` | `src/command/allocator.zig` | port | `:247`. |
-| `src/dawn/native/CommandAllocator.cpp:124` | `MakeEmptyAsDataWasDestroyed` | `Iterator.deinit` | `src/command/allocator.zig` | merge | With `CommandAllocator.h:150`. |
-| `src/dawn/native/CommandAllocator.cpp:134` | `IsEmpty` | `Allocator.isEmpty` | `src/command/allocator.zig` | port | `:96`. |
-| `src/dawn/native/CommandAllocator.cpp:146` | `CommandAllocator(MemoryBlockAllocator*)` | `Allocator.init` | `src/command/allocator.zig` | port | `:63`. Dawn asserts every payload's alignment is within the maximum; the port refuses a block too small for the widest payload at `init`, because a stream that cannot hold its own largest command is a defect there and not at a draw. |
-| `src/dawn/native/CommandAllocator.cpp:150` | `~CommandAllocator` | `Allocator.deinit` | `src/command/allocator.zig` | port | `:73`. |
-| `src/dawn/native/CommandAllocator.cpp:154` | `CommandAllocator(CommandAllocator&&)` | `Allocator.acquireBlocks` | `src/command/allocator.zig` | simplify | Dawn's move leaves a moved-from allocator usable; the port's `acquireBlocks` leaves it empty, which is the same state and is written once. |
+| `src/dawn/native/CommandAllocator.cpp:71` | `CommandIterator(CommandAllocator)` | `Iterator.init` | `src/command/allocator.zig:249` | port | `:223`. |
+| `src/dawn/native/CommandAllocator.cpp:76` | `AcquireCommandBlocks` | `Iterator.appendBlocks` | `src/command/allocator.zig:271` | port | `:239`. The order the list arrives in is the replay order, so appending is the whole rule. |
+| `src/dawn/native/CommandAllocator.cpp:100` | `NextCommandIdInNewBlock` | `Iterator.nextRawTag` | `src/command/allocator.zig:296` | merge | With `CommandAllocator.h:168`. |
+| `src/dawn/native/CommandAllocator.cpp:111` | `Reset` | `Iterator.reset` | `src/command/allocator.zig:281` | port | `:247`. |
+| `src/dawn/native/CommandAllocator.cpp:124` | `MakeEmptyAsDataWasDestroyed` | `Iterator.deinit` | `src/command/allocator.zig:255` | merge | With `CommandAllocator.h:150`. |
+| `src/dawn/native/CommandAllocator.cpp:134` | `IsEmpty` | `Allocator.isEmpty` | `src/command/allocator.zig:102` | port | `:96`. |
+| `src/dawn/native/CommandAllocator.cpp:146` | `CommandAllocator(MemoryBlockAllocator*)` | `Allocator.init` | `src/command/allocator.zig:63` | port | `:63`. Dawn asserts every payload's alignment is within the maximum; the port refuses a block too small for the widest payload at `init`, because a stream that cannot hold its own largest command is a defect there and not at a draw. |
+| `src/dawn/native/CommandAllocator.cpp:150` | `~CommandAllocator` | `Allocator.deinit` | `src/command/allocator.zig:73` | port | `:73`. |
+| `src/dawn/native/CommandAllocator.cpp:154` | `CommandAllocator(CommandAllocator&&)` | `Allocator.acquireBlocks` | `src/command/allocator.zig:87` | simplify | Dawn's move leaves a moved-from allocator usable; the port's `acquireBlocks` leaves it empty, which is the same state and is written once. |
 | `src/dawn/native/CommandAllocator.cpp:167` | `operator=(CommandAllocator&&)` | — | — | skip | The allocator is a stack value inside `EncodingContext.pending`; nothing assigns a second one over it. |
-| `src/dawn/native/CommandAllocator.cpp:178` | `Reset` | `Allocator.acquireBlocks` | `src/command/allocator.zig` | merge | Dawn's reset returns the blocks and re-points; the port's hands the list to the caller and resets its own cursor, which is the same two effects. |
+| `src/dawn/native/CommandAllocator.cpp:178` | `Reset` | `Allocator.acquireBlocks` | `src/command/allocator.zig:87` | merge | Dawn's reset returns the blocks and re-points; the port's hands the list to the caller and resets its own cursor, which is the same two effects. |
 | `src/dawn/native/CommandAllocator.cpp:181` | `mPool->Return(std::move(mBlocks))` inside `Reset` | — | — | skip | Dawn returns every block to `MemoryBlockAllocator`. The port has no pool: it takes a `std.mem.Allocator` and a block size, because `command` does not depend on `memory` and the caller chooses the granularity (`allocator.zig:9-15`). The pool's reuse policy is §M6's and `memory` can wrap this allocator later without a change here. |
-| `src/dawn/native/CommandAllocator.cpp:185` | `Destroy` | `Allocator.deinit` | `src/command/allocator.zig` | merge | `Destroy` and the destructor free the same list. |
-| `src/dawn/native/CommandAllocator.cpp:190` | `IsEmpty` | `Allocator.isEmpty` | `src/command/allocator.zig` | merge | With `CommandAllocator.cpp:134`; one function serves both types because neither has a second reader. |
+| `src/dawn/native/CommandAllocator.cpp:185` | `Destroy` | `Allocator.deinit` | `src/command/allocator.zig:73` | merge | `Destroy` and the destructor free the same list. |
+| `src/dawn/native/CommandAllocator.cpp:190` | `IsEmpty` | `Allocator.isEmpty` | `src/command/allocator.zig:102` | merge | With `CommandAllocator.cpp:134`; one function serves both types because neither has a second reader. |
 | `src/dawn/native/CommandAllocator.cpp:194` | `GetCommandBlocksCount` | — | — | skip | Dawn's replay asserts on the count. The port's `Iterator` walks the list and has no such invariant, because a block boundary is a frame in the walk and not a condition. |
-| `src/dawn/native/CommandAllocator.cpp:198` | `AcquireBlocks` | `Allocator.acquireBlocks` | `src/command/allocator.zig` | port | `:81`. |
-| `src/dawn/native/CommandAllocator.cpp:208` | `AllocateInNewBlock` | `Allocator.allocateInNewBlock` | `src/command/allocator.zig` | port | `:147`. The old block's tail gets the end-of-block tag and the new block is large enough for the payload plus the worst case. |
-| `src/dawn/native/CommandAllocator.cpp:226` | `AppendNewBlock` | `Allocator.appendNewBlock` | `src/command/allocator.zig` | port | `:166`. Dawn takes the larger of the request and the pool's block size; the port takes the larger of the request and the size `init` settled on. Dawn's blocks come from a `HeapArray` whose alignment the pool happens to provide; the port asks `alignedAlloc` explicitly, because a `[]u8` from a general allocator is only one-byte aligned and the eight-byte payload alignment is the framing. |
-| `src/dawn/native/CommandAllocator.cpp:235` | `ResetPointers` | `current_index` | `src/command/allocator.zig` | simplify | With `CommandAllocator.h:305`. |
+| `src/dawn/native/CommandAllocator.cpp:198` | `AcquireBlocks` | `Allocator.acquireBlocks` | `src/command/allocator.zig:87` | port | `:81`. |
+| `src/dawn/native/CommandAllocator.cpp:208` | `AllocateInNewBlock` | `Allocator.allocateInNewBlock` | `src/command/allocator.zig:159` | port | `:147`. The old block's tail gets the end-of-block tag and the new block is large enough for the payload plus the worst case. |
+| `src/dawn/native/CommandAllocator.cpp:226` | `AppendNewBlock` | `Allocator.appendNewBlock` | `src/command/allocator.zig:178` | port | `:166`. Dawn takes the larger of the request and the pool's block size; the port takes the larger of the request and the size `init` settled on. Dawn's blocks come from a `HeapArray` whose alignment the pool happens to provide; the port asks `alignedAlloc` explicitly, because a `[]u8` from a general allocator is only one-byte aligned and the eight-byte payload alignment is the framing. |
+| `src/dawn/native/CommandAllocator.cpp:235` | `ResetPointers` | `current_index` | `src/command/allocator.zig:56` | simplify | With `CommandAllocator.h:305`. |
 
 ### `src/dawn/native/EncodingContext.h` — 21 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/EncodingContext.h:56` | `EncodingContext(DeviceBase*, const ApiObjectBase*)` | `Context.open` | `src/command/encoding_context.zig` | port | `:119`. The context is created with its top-level encoder, which doubles as the "still open" flag. |
-| `src/dawn/native/EncodingContext.h:57` | `EncodingContext(DeviceBase*, ErrorMonad::ErrorTag)` | `Context.openFailed` | `src/command/encoding_context.zig` | port | `:128`. Both encoder pointers null, so nothing can record into it. |
-| `src/dawn/native/EncodingContext.h:62` | `Destroy` | `Context.deinit` | `src/command/encoding_context.zig` | port | `:97`. |
-| `src/dawn/native/EncodingContext.h:64` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig` | merge | The port returns the blocks, the usages, the metadata and the status from one call, so `finish` is the only door out and there is no second acquire. |
-| `src/dawn/native/EncodingContext.h:67` | `TryEncode(const ApiObjectBase*, EncodeFunction&&)` | `Context.encode` | `src/command/encoding_context.zig` | port | `:168`. The template is spelled out: check, then hand the pending allocator to the record function. The port returns the typed payload so the caller fills it in place, which is what Dawn's `Allocate<T>` gives it too. |
-| `src/dawn/native/EncodingContext.h:76` | `TryEncode(const ApiObjectBase*, ..., formatStr, args...)` | `Context.encodeTopLevel` | `src/command/encoding_context.zig` | port | `:180`. Same rules, different failure: a top-level command reports `PassLocked`, a pass command `PassEnded`. |
-| `src/dawn/native/EncodingContext.h:90` | `WillBeginRenderPass` | `Context.willBeginRenderPass` | `src/command/encoding_context.zig` | port | `:210`. |
-| `src/dawn/native/EncodingContext.h:93` | `EnterPass` | `Context.enterPass` | `src/command/encoding_context.zig` | port | `:215`. |
-| `src/dawn/native/EncodingContext.h:94` | `ExitRenderPass` | `Context.exitRenderPass` | `src/command/encoding_context.zig` | port | `:229`. Dawn splits the stream into three allocators here — before the pass, the validation commands it injects, the pass body. The port injects nothing, because the indirect-draw validation encoder is not ported, so two commits are the whole order. |
-| `src/dawn/native/EncodingContext.h:98` | `ExitComputePass` | `Context.exitComputePass` | `src/command/encoding_context.zig` | port | `:243`. |
-| `src/dawn/native/EncodingContext.h:99` | `Finish` | `Context.finish` | `src/command/encoding_context.zig` | port | `:274`. Dawn closes with `Finished` even when the finish failed, because a finished encoder cannot record again either way; the port does the same and returns the status with the blocks. |
-| `src/dawn/native/EncodingContext.h:103` | `EnsurePassExited` | `Context.ensurePassExited` | `src/command/encoding_context.zig` | port | `:257`. Dawn leaves the top-level encoder locked forever; the port reports it, which is what lets the shard assert the rule by name. |
-| `src/dawn/native/EncodingContext.h:107` | `AcquireRenderPassUsages` | `Context.finish` | `src/command/encoding_context.zig` | merge | `finish` moves the list out with the blocks, so there is no separate acquire that could be called twice. |
-| `src/dawn/native/EncodingContext.h:108` | `AcquireComputePassUsages` | `Context.finish` | `src/command/encoding_context.zig` | merge | With the row above. |
-| `src/dawn/native/EncodingContext.h:109` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig` | merge | With the row above. |
-| `src/dawn/native/EncodingContext.h:111` | `PushDebugGroupLabel` | `Context.pushDebugGroupLabel` | `src/command/encoding_context.zig` | port | `:303`. The labels are borrowed from the stream blocks, which is what Dawn's member comment says too. |
-| `src/dawn/native/EncodingContext.h:112` | `PopDebugGroupLabel` | `Context.popDebugGroupLabel` | `src/command/encoding_context.zig` | port | `:311`. Dawn asserts the stack is not empty; the port returns `error.DebugGroupUnbalanced`, because a pop with no push is a caller bug and the acceptance shard asserts the rule by name. |
-| `src/dawn/native/EncodingContext.h:150` | `ValidateCanEncodeOn` | `Context.validateCanEncodeOn` | `src/command/encoding_context.zig` | port | `:142`. Dawn compares `const ApiObjectBase*` pointers, null-doubled so one comparison covers both "is the wrong encoder" and "there is no current encoder". The port issues a monotonic `EncoderId`, because a pass encoder is a value here and has no address stable across the call that created it. The five statuses and the five rules are unchanged. |
-| `src/dawn/native/EncodingContext.h:189` | `enum class Status` | `Status` | `src/command/encoding_context.zig` | port | `:39`. Five values, in Dawn's order. |
-| `src/dawn/native/EncodingContext.h:206` | `mTopLevelEncoder` / `mCurrentEncoder` (the one-top-level-one-pass rule) | `top_level_id`, `current_id` | `src/command/encoding_context.zig` | port | `:62-63`. The two-level rule is Dawn's, not the port's invention; the comment that states it runs `:202`-`:205`. |
-| `src/dawn/native/EncodingContext.h:205` | the comment on `ValidateCanEncodeOn`'s ordering | `validateCanEncodeOn`'s `.open` arm | `src/command/encoding_context.zig` | port | `:160`. Dawn asks whether the caller is an error encoder, then whether the top level is locked, then falls through to "this pass has already ended". The port has no error encoders — a failed one is `error_at_creation`, which the switch above already caught — so the last two arms stand alone. |
+| `src/dawn/native/EncodingContext.h:56` | `EncodingContext(DeviceBase*, const ApiObjectBase*)` | `Context.open` | `src/command/encoding_context.zig:145` | port | `:119`. The context is created with its top-level encoder, which doubles as the "still open" flag. |
+| `src/dawn/native/EncodingContext.h:57` | `EncodingContext(DeviceBase*, ErrorMonad::ErrorTag)` | `Context.openFailed` | `src/command/encoding_context.zig:154` | port | `:128`. Both encoder pointers null, so nothing can record into it. |
+| `src/dawn/native/EncodingContext.h:62` | `Destroy` | `Context.deinit` | `src/command/encoding_context.zig:120` | port | `:97`. |
+| `src/dawn/native/EncodingContext.h:64` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | The port returns the blocks, the usages, the metadata and the status from one call, so `finish` is the only door out and there is no second acquire. |
+| `src/dawn/native/EncodingContext.h:67` | `TryEncode(const ApiObjectBase*, EncodeFunction&&)` | `Context.encode` | `src/command/encoding_context.zig:200` | port | `:168`. The template is spelled out: check, then hand the pending allocator to the record function. The port returns the typed payload so the caller fills it in place, which is what Dawn's `Allocate<T>` gives it too. |
+| `src/dawn/native/EncodingContext.h:76` | `TryEncode(const ApiObjectBase*, ..., formatStr, args...)` | `Context.encodeTopLevel` | `src/command/encoding_context.zig:215` | port | `:180`. Same rules, different failure: a top-level command reports `PassLocked`, a pass command `PassEnded`. |
+| `src/dawn/native/EncodingContext.h:90` | `WillBeginRenderPass` | `Context.willBeginRenderPass` | `src/command/encoding_context.zig:245` | port | `:210`. |
+| `src/dawn/native/EncodingContext.h:93` | `EnterPass` | `Context.enterPass` | `src/command/encoding_context.zig:250` | port | `:215`. |
+| `src/dawn/native/EncodingContext.h:94` | `ExitRenderPass` | `Context.exitRenderPass` | `src/command/encoding_context.zig:277` | port | `:229`. Dawn splits the stream into three allocators here — before the pass, the validation commands it injects, the pass body. The port injects nothing, because the indirect-draw validation encoder is not ported, so two commits are the whole order. |
+| `src/dawn/native/EncodingContext.h:98` | `ExitComputePass` | `Context.exitComputePass` | `src/command/encoding_context.zig:309` | port | `:243`. |
+| `src/dawn/native/EncodingContext.h:99` | `Finish` | `Context.finish` | `src/command/encoding_context.zig:352` | port | `:274`. Dawn closes with `Finished` even when the finish failed, because a finished encoder cannot record again either way; the port does the same and returns the status with the blocks. |
+| `src/dawn/native/EncodingContext.h:103` | `EnsurePassExited` | `Context.ensurePassExited` | `src/command/encoding_context.zig:329` | port | `:257`. Dawn leaves the top-level encoder locked forever; the port reports it, which is what lets the shard assert the rule by name. |
+| `src/dawn/native/EncodingContext.h:107` | `AcquireRenderPassUsages` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | `finish` moves the list out with the blocks, so there is no separate acquire that could be called twice. |
+| `src/dawn/native/EncodingContext.h:108` | `AcquireComputePassUsages` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With the row above. |
+| `src/dawn/native/EncodingContext.h:109` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With the row above. |
+| `src/dawn/native/EncodingContext.h:111` | `PushDebugGroupLabel` | `Context.pushDebugGroupLabel` | `src/command/encoding_context.zig:396` | port | `:303`. The labels are borrowed from the stream blocks, which is what Dawn's member comment says too. |
+| `src/dawn/native/EncodingContext.h:112` | `PopDebugGroupLabel` | `Context.popDebugGroupLabel` | `src/command/encoding_context.zig:405` | port | `:311`. Dawn asserts the stack is not empty; the port returns `error.DebugGroupUnbalanced`, because a pop with no push is a caller bug and the acceptance shard asserts the rule by name. |
+| `src/dawn/native/EncodingContext.h:150` | `ValidateCanEncodeOn` | `Context.validateCanEncodeOn` | `src/command/encoding_context.zig:168` | port | `:142`. Dawn compares `const ApiObjectBase*` pointers, null-doubled so one comparison covers both "is the wrong encoder" and "there is no current encoder". The port issues a monotonic `EncoderId`, because a pass encoder is a value here and has no address stable across the call that created it. The five statuses and the five rules are unchanged. |
+| `src/dawn/native/EncodingContext.h:189` | `enum class Status` | `Status` | `src/command/encoding_context.zig:39` | port | `:39`. Five values, in Dawn's order. |
+| `src/dawn/native/EncodingContext.h:206` | `mTopLevelEncoder` / `mCurrentEncoder` (the one-top-level-one-pass rule) | `top_level_id`, `current_id` | `src/command/encoding_context.zig:85`, `src/command/encoding_context.zig:86` | port | `:62-63`. The two-level rule is Dawn's, not the port's invention; the comment that states it runs `:202`-`:205`. |
+| `src/dawn/native/EncodingContext.h:205` | the comment on `ValidateCanEncodeOn`'s ordering | `EncodingContext.validateCanEncodeOn` | `src/command/encoding_context.zig:168` | port | `:160`. Dawn asks whether the caller is an error encoder, then whether the top level is locked, then falls through to "this pass has already ended". The port has no error encoders — a failed one is `error_at_creation`, which the switch above already caught — so the last two arms stand alone. |
 
 ### `src/dawn/native/EncodingContext.cpp` — 23 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/EncodingContext.cpp:60` | `Destroy` | `Context.deinit` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:62`; the body is the owned lists. |
-| `src/dawn/native/EncodingContext.cpp:83` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:64`. |
+| `src/dawn/native/EncodingContext.cpp:60` | `Destroy` | `Context.deinit` | `src/command/encoding_context.zig:120` | merge | With `EncodingContext.h:62`; the body is the owned lists. |
+| `src/dawn/native/EncodingContext.cpp:83` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:64`. |
 | `src/dawn/native/EncodingContext.cpp:94` | `HandleError(std::unique_ptr<UnrecoverableError>)` | — | — | skip | Dawn's error sink. `command` does not import `core`'s sink and the caller owns it, so every rule here returns a declared error instead. The rows for the rules the sink would have carried are the ones for `CommandValidation.cpp`. |
-| `src/dawn/native/EncodingContext.cpp:124` | `HandleError(std::unique_ptr<ValidationError>)` | `Status.error_in_recording` | `src/command/encoding_context.zig` | simplify | The port has one status rather than a sink and a per-encoder error list: a rule that fires fails the record call, and the caller's decision about what that means for the encoder is one line. |
-| `src/dawn/native/EncodingContext.cpp:154` | `WillBeginRenderPass` | `Context.willBeginRenderPass` | `src/command/encoding_context.zig` | port | `:210`. Commit the pending block so the pass body starts a fresh one. |
-| `src/dawn/native/EncodingContext.cpp:167` | `EnterPass` | `Context.enterPass` | `src/command/encoding_context.zig` | port | `:215`. |
-| `src/dawn/native/EncodingContext.cpp:175` | `ExitRenderPass` | `Context.exitRenderPass` | `src/command/encoding_context.zig` | port | `:229`. |
-| `src/dawn/native/EncodingContext.cpp:217` | `ExitComputePass` | `Context.exitComputePass` | `src/command/encoding_context.zig` | port | `:243`. |
-| `src/dawn/native/EncodingContext.cpp:226` | `EnsurePassExited` | `Context.ensurePassExited` | `src/command/encoding_context.zig` | port | `:257`. |
+| `src/dawn/native/EncodingContext.cpp:124` | `HandleError(std::unique_ptr<ValidationError>)` | `Status.error_in_recording` | `src/command/encoding_context.zig:43` | simplify | The port has one status rather than a sink and a per-encoder error list: a rule that fires fails the record call, and the caller's decision about what that means for the encoder is one line. |
+| `src/dawn/native/EncodingContext.cpp:154` | `WillBeginRenderPass` | `Context.willBeginRenderPass` | `src/command/encoding_context.zig:245` | port | `:210`. Commit the pending block so the pass body starts a fresh one. |
+| `src/dawn/native/EncodingContext.cpp:167` | `EnterPass` | `Context.enterPass` | `src/command/encoding_context.zig:250` | port | `:215`. |
+| `src/dawn/native/EncodingContext.cpp:175` | `ExitRenderPass` | `Context.exitRenderPass` | `src/command/encoding_context.zig:277` | port | `:229`. |
+| `src/dawn/native/EncodingContext.cpp:217` | `ExitComputePass` | `Context.exitComputePass` | `src/command/encoding_context.zig:309` | port | `:243`. |
+| `src/dawn/native/EncodingContext.cpp:226` | `EnsurePassExited` | `Context.ensurePassExited` | `src/command/encoding_context.zig:329` | port | `:257`. |
 | `src/dawn/native/EncodingContext.cpp:236` | `GetRenderPassUsages` | — | — | skip | Dawn's const reader. `finish` hands the list to the one caller that reads it, so there is no second reader for a const accessor to serve. |
-| `src/dawn/native/EncodingContext.cpp:241` | `AcquireRenderPassUsages` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:107`. |
+| `src/dawn/native/EncodingContext.cpp:241` | `AcquireRenderPassUsages` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:107`. |
 | `src/dawn/native/EncodingContext.cpp:247` | `GetComputePassUsages` | — | — | skip | With `GetRenderPassUsages`. |
-| `src/dawn/native/EncodingContext.cpp:252` | `AcquireComputePassUsages` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:108`. |
-| `src/dawn/native/EncodingContext.cpp:258` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:109`. |
-| `src/dawn/native/EncodingContext.cpp:264` | `PushDebugGroupLabel` | `Context.pushDebugGroupLabel` | `src/command/encoding_context.zig` | port | `:303`. |
-| `src/dawn/native/EncodingContext.cpp:268` | `PopDebugGroupLabel` | `Context.popDebugGroupLabel` | `src/command/encoding_context.zig` | port | `:311`. |
-| `src/dawn/native/EncodingContext.cpp:272` | `Finish` | `Context.finish` | `src/command/encoding_context.zig` | port | `:274`. |
-| `src/dawn/native/EncodingContext.cpp:300` | `CommitCommands` | `Context.commitCommands` | `src/command/encoding_context.zig` | port | `:263`. |
-| `src/dawn/native/EncodingContext.cpp:306` | `CloseWithStatus` | `Context.finish` | `src/command/encoding_context.zig` | merge | `finish` closes with `Status.finished` and assigns the field once, so a separate close step has nothing to do. |
-| `src/dawn/native/EncodingContext.cpp:40` | the first constructor (`Context.open`'s fields) | `Context.open` | `src/command/encoding_context.zig` | port | `:119`. |
-| `src/dawn/native/EncodingContext.cpp:49` | the second constructor (`Context.openFailed`'s fields) | `Context.openFailed` | `src/command/encoding_context.zig` | port | `:128`. |
-| `src/dawn/native/EncodingContext.cpp:154` | `WillBeginRenderPass` (the commit) | `Context.commitCommands` | `src/command/encoding_context.zig` | merge | The commit is one function with two callers here and in `exitRenderPass`; Dawn inlines it at one and calls it at the other, which is the same two effects. |
-| `src/dawn/native/EncodingContext.cpp:289` | the `Status::Finished` close inside `Finish` | `Context.finish`'s `.status` field | `src/command/encoding_context.zig` | port | `:290` and `:298`. |
+| `src/dawn/native/EncodingContext.cpp:252` | `AcquireComputePassUsages` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:108`. |
+| `src/dawn/native/EncodingContext.cpp:258` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:109`. |
+| `src/dawn/native/EncodingContext.cpp:264` | `PushDebugGroupLabel` | `Context.pushDebugGroupLabel` | `src/command/encoding_context.zig:396` | port | `:303`. |
+| `src/dawn/native/EncodingContext.cpp:268` | `PopDebugGroupLabel` | `Context.popDebugGroupLabel` | `src/command/encoding_context.zig:405` | port | `:311`. |
+| `src/dawn/native/EncodingContext.cpp:272` | `Finish` | `Context.finish` | `src/command/encoding_context.zig:352` | port | `:274`. |
+| `src/dawn/native/EncodingContext.cpp:300` | `CommitCommands` | `Context.commitCommands` | `src/command/encoding_context.zig:340` | port | `:263`. |
+| `src/dawn/native/EncodingContext.cpp:306` | `CloseWithStatus` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | `finish` closes with `Status.finished` and assigns the field once, so a separate close step has nothing to do. |
+| `src/dawn/native/EncodingContext.cpp:40` | the first constructor (`Context.open`'s fields) | `Context.open` | `src/command/encoding_context.zig:145` | port | `:119`. |
+| `src/dawn/native/EncodingContext.cpp:49` | the second constructor (`Context.openFailed`'s fields) | `Context.openFailed` | `src/command/encoding_context.zig:154` | port | `:128`. |
+| `src/dawn/native/EncodingContext.cpp:154` | `WillBeginRenderPass` (the commit) | `Context.commitCommands` | `src/command/encoding_context.zig:340` | merge | The commit is one function with two callers here and in `exitRenderPass`; Dawn inlines it at one and calls it at the other, which is the same two effects. |
+| `src/dawn/native/EncodingContext.cpp:289` | the `Status::Finished` close inside `Finish` | `Context.finish`'s `.status` field | `src/command/encoding_context.zig:352`, `src/command/encoding_context.zig:83` | port | `:290` and `:298`. |
 
 ### `src/dawn/native/CommandBufferStateTracker.h` — 14 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandBufferStateTracker.h:67` | `SetComputePipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig` | port | `:240`. |
-| `src/dawn/native/CommandBufferStateTracker.h:68` | `SetRenderPipeline` | `Tracker.setPipeline` | `src/command/state_tracker.zig` | port | `:225`. Dawn clears all five lazy bits here because every one is derived from the pipeline. |
-| `src/dawn/native/CommandBufferStateTracker.h:69` | `UnsetBindGroup` | `Tracker.unsetBindGroup` | `src/command/state_tracker.zig` | port | `:266`. |
-| `src/dawn/native/CommandBufferStateTracker.h:70` | `SetBindGroup` | `Tracker.setBindGroup` | `src/command/state_tracker.zig` | port | `:257`. |
-| `src/dawn/native/CommandBufferStateTracker.h:73` | `SetResourceTable` | `Tracker.setResourceTable` | `src/command/state_tracker.zig` | port | `:303`. |
-| `src/dawn/native/CommandBufferStateTracker.h:75` | `SetIndexBuffer` | `Tracker.setIndexBuffer` | `src/command/state_tracker.zig` | port | `:289`. |
-| `src/dawn/native/CommandBufferStateTracker.h:79` | `UnsetVertexBuffer` | `Tracker.unsetVertexBuffer` | `src/command/state_tracker.zig` | port | `:281`. |
-| `src/dawn/native/CommandBufferStateTracker.h:80` | `SetVertexBuffer` | `Tracker.setVertexBuffer` | `src/command/state_tracker.zig` | port | `:273`. |
-| `src/dawn/native/CommandBufferStateTracker.h:81` | `SetImmediateData` | `Tracker.setImmediateData` | `src/command/state_tracker.zig` | port | `:314`. Dawn clears no aspect here, because writing more data can only make the check pass; the port keeps that rule, which is the one place a "clears none" row is not a bug. |
-| `src/dawn/native/CommandBufferStateTracker.h:82` | `End` | `Tracker.end` | `src/command/state_tracker.zig` | port | `:329`. |
-| `src/dawn/native/CommandBufferStateTracker.h:84` | `kNumAspects` | `aspect_count`, `Aspect` | `src/command/state_tracker.zig` | port | `:30` and `:40`. Dawn's six bits are `ValidationAspect` (`CommandBufferStateTracker.cpp:313-323`), in the same order. |
-| `src/dawn/native/CommandBufferStateTracker.h:104` | `CheckMissingAspects` | `checkMissingAspects` | `src/command/state_tracker.zig` | port | `:412`. |
-| `src/dawn/native/CommandBufferStateTracker.h:106` | `SetPipelineCommon` | `Tracker.setPipeline` | `src/command/state_tracker.zig` | merge | Dawn's two pipeline setters share a common body; the port's do too, and the shared part is the six-bit update. |
+| `src/dawn/native/CommandBufferStateTracker.h:67` | `SetComputePipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig:242` | port | `:240`. |
+| `src/dawn/native/CommandBufferStateTracker.h:68` | `SetRenderPipeline` | `Tracker.setPipeline` | `src/command/state_tracker.zig:227` | port | `:225`. Dawn clears all five lazy bits here because every one is derived from the pipeline. |
+| `src/dawn/native/CommandBufferStateTracker.h:69` | `UnsetBindGroup` | `Tracker.unsetBindGroup` | `src/command/state_tracker.zig:268` | port | `:266`. |
+| `src/dawn/native/CommandBufferStateTracker.h:70` | `SetBindGroup` | `Tracker.setBindGroup` | `src/command/state_tracker.zig:259` | port | `:257`. |
+| `src/dawn/native/CommandBufferStateTracker.h:73` | `SetResourceTable` | `Tracker.setResourceTable` | `src/command/state_tracker.zig:305` | port | `:303`. |
+| `src/dawn/native/CommandBufferStateTracker.h:75` | `SetIndexBuffer` | `Tracker.setIndexBuffer` | `src/command/state_tracker.zig:291` | port | `:289`. |
+| `src/dawn/native/CommandBufferStateTracker.h:79` | `UnsetVertexBuffer` | `Tracker.unsetVertexBuffer` | `src/command/state_tracker.zig:283` | port | `:281`. |
+| `src/dawn/native/CommandBufferStateTracker.h:80` | `SetVertexBuffer` | `Tracker.setVertexBuffer` | `src/command/state_tracker.zig:275` | port | `:273`. |
+| `src/dawn/native/CommandBufferStateTracker.h:81` | `SetImmediateData` | `Tracker.setImmediateData` | `src/command/state_tracker.zig:316` | port | `:314`. Dawn clears no aspect here, because writing more data can only make the check pass; the port keeps that rule, which is the one place a "clears none" row is not a bug. |
+| `src/dawn/native/CommandBufferStateTracker.h:82` | `End` | `Tracker.end` | `src/command/state_tracker.zig:331` | port | `:329`. |
+| `src/dawn/native/CommandBufferStateTracker.h:84` | `kNumAspects` | `aspect_count`, `Aspect` | `src/command/state_tracker.zig:40`, `src/command/state_tracker.zig:30` | port | `:30` and `:40`. Dawn's six bits are `ValidationAspect` (`CommandBufferStateTracker.cpp:313-323`), in the same order. |
+| `src/dawn/native/CommandBufferStateTracker.h:104` | `CheckMissingAspects` | `checkMissingAspects` | `src/command/state_tracker.zig:414` | port | `:412`. |
+| `src/dawn/native/CommandBufferStateTracker.h:106` | `SetPipelineCommon` | `Tracker.setPipeline` | `src/command/state_tracker.zig:227` | merge | Dawn's two pipeline setters share a common body; the port's do too, and the shared part is the six-bit update. |
 | `src/dawn/native/CommandBufferStateTracker.h:74` | `SetRenderBundleHasResourceTable` | — | — | skip | Bundles are not ported (see the skip list above), so there is no caller. |
 
 ### `src/dawn/native/CommandBufferStateTracker.cpp` — 54 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandBufferStateTracker.cpp:313` | `enum ValidationAspect` | `Aspect` | `src/command/state_tracker.zig` | port | `:30`. Six values in Dawn's order, so the bit values agree. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:325` | `kDispatchAspects` | `dispatch_aspects` | `src/command/state_tracker.zig` | port | `:77`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:329` | `kDrawAspects` | `draw_aspects` | `src/command/state_tracker.zig` | port | `:80`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:334` | `kDrawIndexedAspects` | `draw_indexed_aspects` | `src/command/state_tracker.zig` | port | `:89`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:339` | `kLazyAspects` | `lazy_aspects` | `src/command/state_tracker.zig` | port | `:101`. Everything except the pipeline: the pipeline is never lazy, so a missing one is an error before any recompute runs. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:344` | `CommandBufferStateTracker()` | `Tracker.init` | `src/command/state_tracker.zig` | port | `:218`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:313` | `enum ValidationAspect` | `Aspect` | `src/command/state_tracker.zig:30` | port | `:30`. Six values in Dawn's order, so the bit values agree. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:325` | `kDispatchAspects` | `dispatch_aspects` | `src/command/state_tracker.zig:78` | port | `:77`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:329` | `kDrawAspects` | `draw_aspects` | `src/command/state_tracker.zig:81` | port | `:80`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:334` | `kDrawIndexedAspects` | `draw_indexed_aspects` | `src/command/state_tracker.zig:90` | port | `:89`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:339` | `kLazyAspects` | `lazy_aspects` | `src/command/state_tracker.zig:102` | port | `:101`. Everything except the pipeline: the pipeline is never lazy, so a missing one is an error before any recompute runs. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:344` | `CommandBufferStateTracker()` | `Tracker.init` | `src/command/state_tracker.zig:219` | port | `:218`. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:346` | `CommandBufferStateTracker(const CommandBufferStateTracker&)` | — | — | skip | The tracker is one value per pass and one owner. Dawn copies it to snapshot state around a bundle (`ComputePassEncoder.cpp:622`), and there is no bundle in the port. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:348` | `CommandBufferStateTracker(CommandBufferStateTracker&&)` | — | — | skip | With the row above. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:350` | `~CommandBufferStateTracker` | — | — | skip | The tracker owns only two `std::vector`s, both empty unless a buffer or a texture is recorded; `Tracker.init` takes the allocator and the field types allocate through it, so the port has no destructor to write. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:352` | `operator=(const CommandBufferStateTracker&)` | — | — | skip | With the copy constructor. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:355` | `operator=(CommandBufferStateTracker&&)` | — | — | skip | With the move constructor. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:358` | `ValidateCanDispatch` | `Tracker.validateCanDispatch` | `src/command/state_tracker.zig` | port | `:423`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:362` | `ValidateCanDraw` | `Tracker.validateCanDraw` | `src/command/state_tracker.zig` | port | `:427`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:366` | `ValidateCanDrawIndexed` | `Tracker.validateCanDrawIndexed` | `src/command/state_tracker.zig` | port | `:431`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:370` | `ValidateNoDifferentTextureViewsOnSameTexture` | `Tracker.validateNoDifferentTextureViewsOnSameTexture` | `src/command/state_tracker.zig` | port | `:509`. Dawn files every texture binding under its texture and refuses one that carries two views. The port holds the bindings per group and does the same filing; the compatibility flag is Dawn's `HasFlexibleTextureViews()` gate at `:390`. §M16 asserts this rule through a draw. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:395` | the `DAWN_INVALID_IF` on `TextureViewsAllMatch` | `error.ConflictingTextureViews` | `src/command/state_tracker.zig` | port | `:516`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:405` | `ValidateBufferInRangeForVertexBuffer` | `Tracker.validateBufferInRangeForVertexBuffer` | `src/command/state_tracker.zig` | port | `:440`. The overflow argument in Dawn's comment holds for the port too: the stride is a `u64` and the counts are `u32`, so the product cannot wrap. This is the rule the M15 acceptance names `DrawVertexCount` for. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:410` | the step-mode early return | the `stride_count == 0` guard | `src/command/state_tracker.zig` | port | `:448`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:451` | `ValidateBufferInRangeForInstanceBuffer` | `Tracker.validateBufferInRangeForInstanceBuffer` | `src/command/state_tracker.zig` | port | `:468`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:498` | `ValidateIndexBufferInRange` | `Tracker.validateIndexBufferInRange` | `src/command/state_tracker.zig` | port | `:486`. The element size is 2 or 4 and the counts are `u32`, so the arithmetic cannot wrap — the same argument Dawn makes in its comment at `:500-503`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:513` | `ValidateOperation` | `Tracker.validateOperation` | `src/command/state_tracker.zig` | port | `:339`. Fast path, non-lazy error, lazy recompute, then the check again. The order matters: a missing pipeline is reported before a missing bind group, because the recompute needs a pipeline. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:534` | `RecomputeLazyAspects` | `Tracker.recomputeLazyAspects` | `src/command/state_tracker.zig` | port | `:350`. The only place a bit is ever set, apart from `setPipeline`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:538` | the bind-groups branch | `Tracker.recomputeBindGroups` | `src/command/state_tracker.zig` | port | `:366`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:545` | `FindFirstUndersizedBuffer` / `mMinBufferSizes` | `BindGroupRecord.min_binding_buffer_size`, `Tracker.smallestBoundBufferSize` | `src/command/state_tracker.zig` | simplify | Dawn compares the group's minimum binding sizes against the sizes the pass bound. The port cannot read a binding's size, so the caller supplies the minimum at set time; the comparison is then against the minimum over the vertex buffers the pass actually bound, which is the same bound whenever the group names a vertex buffer and a strictly weaker one when it does not. The weaker bound is recorded here rather than hidden. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:566` | the resource-tables branch | `Tracker.recomputeResourceTables` | `src/command/state_tracker.zig` | port | `:378`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:574` | the vertex-buffers branch | `Tracker.recomputeVertexBuffers` | `src/command/state_tracker.zig` | port | `:387`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:586` | the strip-index-format comparison | `Tracker.recomputeIndexBuffer` | `src/command/state_tracker.zig` | port | `:396`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:591` | the immediate-data branch | `Tracker.recomputeImmediateData` | `src/command/state_tracker.zig` | port | `:403`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:599` | `CheckMissingAspects` | `checkMissingAspects` | `src/command/state_tracker.zig` | port | `:412`. The order of the four checks is the order of the errors, so a caller sees the first thing that is wrong rather than an arbitrary one. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:781` | `SetComputePipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig` | port | `:240`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:785` | `SetRenderPipeline` | `Tracker.setPipeline` | `src/command/state_tracker.zig` | port | `:225`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:789` | `UnsetBindGroup` | `Tracker.unsetBindGroup` | `src/command/state_tracker.zig` | port | `:266`. A bundle replays with the state reset, and Dawn clears the bit rather than leaving a stale group visible to the next command. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:793` | `SetBindGroup` | `Tracker.setBindGroup` | `src/command/state_tracker.zig` | port | `:257`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:802` | `SetResourceTable` | `Tracker.setResourceTable` | `src/command/state_tracker.zig` | port | `:303`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:358` | `ValidateCanDispatch` | `Tracker.validateCanDispatch` | `src/command/state_tracker.zig:425` | port | `:423`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:362` | `ValidateCanDraw` | `Tracker.validateCanDraw` | `src/command/state_tracker.zig:429` | port | `:427`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:366` | `ValidateCanDrawIndexed` | `Tracker.validateCanDrawIndexed` | `src/command/state_tracker.zig:433` | port | `:431`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:370` | `ValidateNoDifferentTextureViewsOnSameTexture` | `Tracker.validateNoDifferentTextureViewsOnSameTexture` | `src/command/state_tracker.zig:511` | port | `:509`. Dawn files every texture binding under its texture and refuses one that carries two views. The port holds the bindings per group and does the same filing; the compatibility flag is Dawn's `HasFlexibleTextureViews()` gate at `:390`. §M16 asserts this rule through a draw. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:395` | the `DAWN_INVALID_IF` on `TextureViewsAllMatch` | `Tracker.validateNoDifferentTextureViewsOnSameTexture` | `src/command/state_tracker.zig:511` | merge | `:516`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:405` | `ValidateBufferInRangeForVertexBuffer` | `Tracker.validateBufferInRangeForVertexBuffer` | `src/command/state_tracker.zig:442` | port | `:440`. The overflow argument in Dawn's comment holds for the port too: the stride is a `u64` and the counts are `u32`, so the product cannot wrap. This is the rule the M15 acceptance names `DrawVertexCount` for. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:410` | the step-mode early return | `Tracker.validateBufferInRangeForVertexBuffer` | `src/command/state_tracker.zig:442` | port | `:448`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:451` | `ValidateBufferInRangeForInstanceBuffer` | `Tracker.validateBufferInRangeForInstanceBuffer` | `src/command/state_tracker.zig:470` | port | `:468`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:498` | `ValidateIndexBufferInRange` | `Tracker.validateIndexBufferInRange` | `src/command/state_tracker.zig:488` | port | `:486`. The element size is 2 or 4 and the counts are `u32`, so the arithmetic cannot wrap — the same argument Dawn makes in its comment at `:500-503`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:513` | `ValidateOperation` | `Tracker.validateOperation` | `src/command/state_tracker.zig:341` | port | `:339`. Fast path, non-lazy error, lazy recompute, then the check again. The order matters: a missing pipeline is reported before a missing bind group, because the recompute needs a pipeline. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:534` | `RecomputeLazyAspects` | `Tracker.recomputeLazyAspects` | `src/command/state_tracker.zig:352` | port | `:350`. The only place a bit is ever set, apart from `setPipeline`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:538` | the bind-groups branch | `Tracker.recomputeBindGroups` | `src/command/state_tracker.zig:368` | port | `:366`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:545` | `FindFirstUndersizedBuffer` / `mMinBufferSizes` | `BindGroupRecord.min_binding_buffer_size`, `Tracker.smallestBoundBufferSize` | `src/command/state_tracker.zig:178`, `src/command/state_tracker.zig:531` | simplify | Dawn compares the group's minimum binding sizes against the sizes the pass bound. The port cannot read a binding's size, so the caller supplies the minimum at set time; the comparison is then against the minimum over the vertex buffers the pass actually bound, which is the same bound whenever the group names a vertex buffer and a strictly weaker one when it does not. The weaker bound is recorded here rather than hidden. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:566` | the resource-tables branch | `Tracker.recomputeResourceTables` | `src/command/state_tracker.zig:380` | port | `:378`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:574` | the vertex-buffers branch | `Tracker.recomputeVertexBuffers` | `src/command/state_tracker.zig:389` | port | `:387`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:586` | the strip-index-format comparison | `Tracker.recomputeIndexBuffer` | `src/command/state_tracker.zig:398` | port | `:396`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:591` | the immediate-data branch | `Tracker.recomputeImmediateData` | `src/command/state_tracker.zig:405` | port | `:403`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:599` | `CheckMissingAspects` | `checkMissingAspects` | `src/command/state_tracker.zig:414` | port | `:412`. The order of the four checks is the order of the errors, so a caller sees the first thing that is wrong rather than an arbitrary one. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:781` | `SetComputePipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig:242` | port | `:240`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:785` | `SetRenderPipeline` | `Tracker.setPipeline` | `src/command/state_tracker.zig:227` | port | `:225`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:789` | `UnsetBindGroup` | `Tracker.unsetBindGroup` | `src/command/state_tracker.zig:268` | port | `:266`. A bundle replays with the state reset, and Dawn clears the bit rather than leaving a stale group visible to the next command. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:793` | `SetBindGroup` | `Tracker.setBindGroup` | `src/command/state_tracker.zig:259` | port | `:257`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:802` | `SetResourceTable` | `Tracker.setResourceTable` | `src/command/state_tracker.zig:305` | port | `:303`. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:808` | `SetRenderBundleHasResourceTable` | — | — | skip | Bundles are not ported. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:812` | `SetIndexBuffer` | `Tracker.setIndexBuffer` | `src/command/state_tracker.zig` | port | `:289`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:823` | `UnsetVertexBuffer` | `Tracker.unsetVertexBuffer` | `src/command/state_tracker.zig` | port | `:281`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:829` | `SetVertexBuffer` | `Tracker.setVertexBuffer` | `src/command/state_tracker.zig` | port | `:273`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:834` | `SetImmediateData` | `Tracker.setImmediateData` | `src/command/state_tracker.zig` | port | `:314`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:846` | `SetPipelineCommon` | the shared six-bit update | `src/command/state_tracker.zig` | merge | With `CommandBufferStateTracker.h:106`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:812` | `SetIndexBuffer` | `Tracker.setIndexBuffer` | `src/command/state_tracker.zig:291` | port | `:289`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:823` | `UnsetVertexBuffer` | `Tracker.unsetVertexBuffer` | `src/command/state_tracker.zig:283` | port | `:281`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:829` | `SetVertexBuffer` | `Tracker.setVertexBuffer` | `src/command/state_tracker.zig:275` | port | `:273`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:834` | `SetImmediateData` | `Tracker.setImmediateData` | `src/command/state_tracker.zig:316` | port | `:314`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:846` | `SetPipelineCommon` | `Tracker.setPipeline` | `src/command/state_tracker.zig:227` | merge | With `CommandBufferStateTracker.h:106`. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:857` | `GetBindGroup` | — | — | skip | Dawn reads the group back to check its bindings; the port records those bindings at set time, so there is no reader left. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:861` | `GetResourceTable` | — | — | skip | The replay reads the recorded `SetResourceTableCmd.table`; the tracker keeps no reader for a stream field. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:865` | `GetDynamicOffsets` | — | — | skip | The offsets are in the counted run behind `SetBindGroupCmd`, which M18 reads. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:870` | `HasPipeline` | `AspectMask.has(.pipeline)` | `src/command/state_tracker.zig` | merge | The bit answers the question Dawn asks with a pointer. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:874` | `HasResourceTable` | `Tracker.has_resource_table` | `src/command/state_tracker.zig` | port | `:211`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:878` | `IndexBufferSet` | `Tracker.index_buffer` | `src/command/state_tracker.zig` | port | `:202`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:882` | `GetRenderPipeline` | `Tracker.render_pipeline` | `src/command/state_tracker.zig` | port | `:193`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:887` | `GetComputePipeline` | `Tracker.compute_pipeline` | `src/command/state_tracker.zig` | port | `:194`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:870` | `HasPipeline` | `AspectMask.has` | `src/command/state_tracker.zig:61` | merge | The bit answers the question Dawn asks with a pointer. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:874` | `HasResourceTable` | `Tracker.has_resource_table` | `src/command/state_tracker.zig:212` | port | `:211`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:878` | `IndexBufferSet` | `Tracker.index_buffer` | `src/command/state_tracker.zig:203` | port | `:202`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:882` | `GetRenderPipeline` | `Tracker.render_pipeline` | `src/command/state_tracker.zig:194` | port | `:193`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:887` | `GetComputePipeline` | `Tracker.compute_pipeline` | `src/command/state_tracker.zig:195` | port | `:194`. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:892` | `GetPipelineLayout` | — | — | skip | Dawn walks the layout to name the bind group indices. The port cannot read a layout, so `PipelineRequirements.bind_group_layout_mask` is the answer recorded at set time. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:896` | `GetIndexBuffer` | `Tracker.index_buffer` | `src/command/state_tracker.zig` | merge | With `IndexBufferSet`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:900` | `GetIndexFormat` | `Tracker.index_format` | `src/command/state_tracker.zig` | port | `:204`. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:904` | `GetIndexBufferSize` | `Tracker.index_buffer_size` | `src/command/state_tracker.zig` | port | `:203`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:896` | `GetIndexBuffer` | `Tracker.index_buffer` | `src/command/state_tracker.zig:203` | merge | With `IndexBufferSet`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:900` | `GetIndexFormat` | `Tracker.index_format` | `src/command/state_tracker.zig:205` | port | `:204`. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:904` | `GetIndexBufferSize` | `Tracker.index_buffer_size` | `src/command/state_tracker.zig:204` | port | `:203`. |
 | `src/dawn/native/CommandBufferStateTracker.cpp:908` | `GetIndexBufferOffset` | — | — | skip | The offset is a field of the recorded `SetIndexBufferCmd`; the tracker never needs it. |
-| `src/dawn/native/CommandBufferStateTracker.cpp:912` | `End` | `Tracker.end` | `src/command/state_tracker.zig` | port | `:329`. Dawn clears the pipeline pointers and leaves `mAspects` alone; the port clears both, because after `End` no further command may consult the cache and a stale set bit would answer for an encoder that no longer records. |
+| `src/dawn/native/CommandBufferStateTracker.cpp:912` | `End` | `Tracker.end` | `src/command/state_tracker.zig:331` | port | `:329`. Dawn clears the pipeline pointers and leaves `mAspects` alone; the port clears both, because after `End` no further command may consult the cache and a stale set bit would answer for an encoder that no longer records. |
 
 **The one place the port refuses Dawn's mechanism outright.** Dawn's
 `RecomputeLazyAspects` (`:534-597`) walks the pipeline layout, the bind group
@@ -5846,46 +6369,46 @@ invalidation table and the order of the errors are unchanged.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/ProgrammableEncoder.cpp:64` | `IsValidationEnabled` | `Tracker.compatibility_mode` | `src/command/state_tracker.zig` | merge | Dawn asks its own descriptor whether validation runs. The port asks the device fact once, at `Tracker.init`, because it is a property of the device and never changes for the life of the pass. |
+| `src/dawn/native/ProgrammableEncoder.cpp:64` | `IsValidationEnabled` | `Tracker.compatibility_mode` | `src/command/state_tracker.zig:217` | merge | Dawn asks its own descriptor whether validation runs. The port asks the device fact once, at `Tracker.init`, because it is a property of the device and never changes for the life of the pass. |
 | `src/dawn/native/ProgrammableEncoder.cpp:70` | `NeedsIndirectGPUValidation` | — | — | skip | The indirect-draw validation encoder is not ported (see the skip list above). |
-| `src/dawn/native/ProgrammableEncoder.cpp:74` | `ValidateProgrammableEncoderEnd` | `ProgrammableEncoder.validateProgrammableEncoderEnd` | `src/command/programmable_encoder.zig` | port | `:138`. A debug group left open is an error at `end`, not at `finish`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:81` | `APIInsertDebugMarker` | `ProgrammableEncoder.insertDebugMarker` | `src/command/programmable_encoder.zig` | port | `:259`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:95` | `APIPopDebugGroup` | `ProgrammableEncoder.popDebugGroup` | `src/command/programmable_encoder.zig` | port | `:253`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:112` | `APIPushDebugGroup` | `ProgrammableEncoder.pushDebugGroup` | `src/command/programmable_encoder.zig` | port | `:240`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:130` | `ValidateSetImmediates` | `ProgrammableEncoder.validateSetImmediates` | `src/command/programmable_encoder.zig` | port | `:200`. |
-| `src/dawn/native/ComputePassEncoder.cpp:544` | `ComputePassEncoder::APISetBindGroup` | `ProgrammableEncoder.setBindGroup` | `src/command/programmable_encoder.zig` | port | `:189`. Validate-then-record in one call, because Dawn's is: `ComputePassEncoder.cpp:549` calls `ValidateSetBindGroup` and `:551` calls `RecordSetBindGroup`, both declared in `ProgrammableEncoder.h:67` and `:71` and both defined in `ProgrammableEncoder.cpp:146` and `:226`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:146` | `ValidateSetBindGroup` | `ProgrammableEncoder.validateSetBindGroup` | `src/command/programmable_encoder.zig` | port | `:143`. |
-| `src/dawn/native/ProgrammableEncoder.cpp:146` | `ValidateSetBindGroup`'s body | `ProgrammableEncoder.validateSetBindGroup` | `src/command/programmable_encoder.zig` | port | `:144-146`. The index bound and the offset-count match. |
-| `src/dawn/native/ProgrammableEncoder.cpp:226` | `RecordSetBindGroup` | `ProgrammableEncoder.recordSetBindGroup` | `src/command/programmable_encoder.zig` | port | `:156`. Dawn writes no dynamic-offset run at all when the count is zero (`:236-238`), so `skip` must not look for one — and `commands.skip` does look for one. See the defect note above. |
-| `src/dawn/native/ProgrammableEncoder.cpp:244` | `RecordSetImmediates` | `ProgrammableEncoder.recordSetImmediates` | `src/command/programmable_encoder.zig` | port | `:213`. Dawn records nothing for an empty payload (`:248`) and the port keeps that, because a zero-length run behind a tag is a tag a reader would have to special-case. |
-| `src/dawn/native/ProgrammableEncoder.h:60` | `ValidateSetImmediates(uint32_t offset, size_t size)` | `SetImmediatesOptions` | `src/command/programmable_encoder.zig` | simplify | Dawn's validator takes `(offset, size)`, where `size` counts bytes, and the caller passes `data.size()` (`ComputePassEncoder.cpp:575`). `data` is not a third argument anywhere in the tree, so this row claims no upstream shape; it records that the port takes the exact bytes rather than an offset plus a caller-sized scratch buffer. |
-| `src/dawn/native/ProgrammableEncoder.cpp:236` | the `!dynamicOffsets.empty()` guard | `recordSetBindGroup`'s `if` | `src/command/programmable_encoder.zig` | port | `:169-172`. Dawn tests the span, not the count it stored at `:234`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:74` | `ValidateProgrammableEncoderEnd` | `ProgrammableEncoder.validateProgrammableEncoderEnd` | `src/command/programmable_encoder.zig:127` | port | `:138`. A debug group left open is an error at `end`, not at `finish`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:81` | `APIInsertDebugMarker` | `ProgrammableEncoder.insertDebugMarker` | `src/command/programmable_encoder.zig:267` | port | `:259`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:95` | `APIPopDebugGroup` | `ProgrammableEncoder.popDebugGroup` | `src/command/programmable_encoder.zig:257` | port | `:253`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:112` | `APIPushDebugGroup` | `ProgrammableEncoder.pushDebugGroup` | `src/command/programmable_encoder.zig:243` | port | `:240`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:130` | `ValidateSetImmediates` | `ProgrammableEncoder.validateSetImmediates` | `src/command/programmable_encoder.zig:199` | port | `:200`. |
+| `src/dawn/native/ComputePassEncoder.cpp:544` | `ComputePassEncoder::APISetBindGroup` | `ProgrammableEncoder.setBindGroup` | `src/command/programmable_encoder.zig:187` | port | `:189`. Validate-then-record in one call, because Dawn's is: `ComputePassEncoder.cpp:549` calls `ValidateSetBindGroup` and `:551` calls `RecordSetBindGroup`, both declared in `ProgrammableEncoder.h:67` and `:71` and both defined in `ProgrammableEncoder.cpp:146` and `:226`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:146` | `ValidateSetBindGroup` | `ProgrammableEncoder.validateSetBindGroup` | `src/command/programmable_encoder.zig:135` | port | `:143`. |
+| `src/dawn/native/ProgrammableEncoder.cpp:146` | `ValidateSetBindGroup`'s body | `ProgrammableEncoder.validateSetBindGroup` | `src/command/programmable_encoder.zig:135` | port | `:144-146`. The index bound and the offset-count match. |
+| `src/dawn/native/ProgrammableEncoder.cpp:226` | `RecordSetBindGroup` | `ProgrammableEncoder.recordSetBindGroup` | `src/command/programmable_encoder.zig:151` | port | `:156`. Dawn writes no dynamic-offset run at all when the count is zero (`:236-238`), so `skip` must not look for one — and `commands.skip` does look for one. See the defect note above. |
+| `src/dawn/native/ProgrammableEncoder.cpp:244` | `RecordSetImmediates` | `ProgrammableEncoder.recordSetImmediates` | `src/command/programmable_encoder.zig:216` | port | `:213`. Dawn records nothing for an empty payload (`:248`) and the port keeps that, because a zero-length run behind a tag is a tag a reader would have to special-case. |
+| `src/dawn/native/ProgrammableEncoder.h:60` | `ValidateSetImmediates(uint32_t offset, size_t size)` | `SetImmediatesOptions` | `src/command/programmable_encoder.zig:57` | simplify | Dawn's validator takes `(offset, size)`, where `size` counts bytes, and the caller passes `data.size()` (`ComputePassEncoder.cpp:575`). `data` is not a third argument anywhere in the tree, so this row claims no upstream shape; it records that the port takes the exact bytes rather than an offset plus a caller-sized scratch buffer. |
+| `src/dawn/native/ProgrammableEncoder.cpp:236` | the `!dynamicOffsets.empty()` guard | `recordSetBindGroup` | `src/command/programmable_encoder.zig:151` | port | `:169-172`. Dawn tests the span, not the count it stored at `:234`. |
 
 ### `src/dawn/native/RenderEncoderBase.cpp` — 21 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/RenderEncoderBase.cpp:72` | `DestroyImpl` | `RenderEncoderBase.deinit` | `src/command/render_encoder_base.zig` | port | `:134`. Usages, then metadata, then the shared base. The port has no commands to free — they hold no references — so the third step is gone. |
-| `src/dawn/native/RenderEncoderBase.cpp:80` | `GetAttachmentState` | `RenderEncoderBase.attachment_state` | `src/command/render_encoder_base.zig` | port | `:110`. |
+| `src/dawn/native/RenderEncoderBase.cpp:72` | `DestroyImpl` | `RenderEncoderBase.deinit` | `src/command/render_encoder_base.zig:157` | port | `:134`. Usages, then metadata, then the shared base. The port has no commands to free — they hold no references — so the third step is gone. |
+| `src/dawn/native/RenderEncoderBase.cpp:80` | `GetAttachmentState` | `RenderEncoderBase.attachment_state` | `src/command/render_encoder_base.zig:122` | port | `:110`. |
 | `src/dawn/native/RenderEncoderBase.cpp:86` | `IsDepthReadOnly` | — | — | skip | Dawn reads it off the interned attachment state to build a barrier. The barrier is a back-end decision, so the field has no front-end reader here. |
 | `src/dawn/native/RenderEncoderBase.cpp:91` | `IsStencilReadOnly` | — | — | skip | With `IsDepthReadOnly`. |
-| `src/dawn/native/RenderEncoderBase.cpp:96` | `GetDrawCount` | `RenderEncoderBase.draw_count` | `src/command/render_encoder_base.zig` | port | `:112`. |
-| `src/dawn/native/RenderEncoderBase.cpp:101` | `AcquireAttachmentState` | `RenderPassResourceUsage`/interning | `src/command/attachment_state.zig` | merge | Which allocator produces the interned state is §M14's decision (`attachment_state.zig:14-16`); what the front end does is carry the identity, which the `setPipeline` comparison reads. |
-| `src/dawn/native/RenderEncoderBase.cpp:105` | `APIDraw` | `RenderEncoderBase.draw` | `src/command/render_encoder_base.zig` | port | `:238`. Validate, record, count — in that order, and the order is why an overrun is reported rather than recorded. |
-| `src/dawn/native/RenderEncoderBase.cpp:151` | `APIDrawIndexed` | `RenderEncoderBase.drawIndexed` | `src/command/render_encoder_base.zig` | port | `:258`. |
-| `src/dawn/native/RenderEncoderBase.cpp:203` | `APIDrawIndirect` | `RenderEncoderBase.drawIndirect` | `src/command/render_encoder_base.zig` | port | `:282`. |
-| `src/dawn/native/RenderEncoderBase.cpp:262` | `APIDrawIndexedIndirect` | `RenderEncoderBase.drawIndexedIndirect` | `src/command/render_encoder_base.zig` | port | `:289`. Dawn's two tags share one payload by inheritance (`Commands.h:306`); the port reuses the struct and keeps two tags (`commands.zig:334`), so one record writes both. |
-| `src/dawn/native/RenderEncoderBase.cpp:328` | `APIMultiDrawIndirect` | `RenderEncoderBase.multiDrawIndirect` | `src/command/render_encoder_base.zig` | port | `:296`. |
-| `src/dawn/native/RenderEncoderBase.cpp:434` | `APIMultiDrawIndexedIndirect` | `RenderEncoderBase.multiDrawIndexedIndirect` | `src/command/render_encoder_base.zig` | port | `:304`. |
-| `src/dawn/native/RenderEncoderBase.cpp:544` | `APISetPipeline` | `RenderEncoderBase.setPipeline` | `src/command/render_encoder_base.zig` | port | `:195`, plus the lazy-bit clear from `CommandBufferStateTracker.cpp:785`. |
-| `src/dawn/native/RenderEncoderBase.cpp:551` | the `pipeline->GetAttachmentState() != mAttachmentState` check | `error.AttachmentFormatMismatch` | `src/command/errors.zig` | port | `:78`, raised by `RenderEncoderBase.setPipeline` (`render_encoder_base.zig:201`). Dawn compares two interned states with `AttachmentState::EqualityFunc` (`AttachmentState.cpp:204`); the port compares the interned pointers, because the cache guarantees two equal states are one pointer. |
-| `src/dawn/native/RenderEncoderBase.cpp:581` | `APISetIndexBuffer` | `RenderEncoderBase.setIndexBuffer` | `src/command/render_encoder_base.zig` | port | `:171`. |
-| `src/dawn/native/RenderEncoderBase.cpp:641` | `APISetVertexBuffer` | `RenderEncoderBase.setVertexBuffer` | `src/command/render_encoder_base.zig` | port | `:148`. Dawn resolves "the whole buffer" inside the record lambda, so the recorded `size` is concrete and the draw's in-range check (`:131`) compares a real number. The port's options carry `size: ?u64`, where null is the whole remaining buffer, and resolve it once at record time. |
-| `src/dawn/native/RenderEncoderBase.cpp:649` | the `slot >= kMaxVertexBuffers` check inside `APISetVertexBuffer` | `RenderEncoderBase.validateSetVertexBuffer` | `src/command/render_encoder_base.zig` | port | `:142`. Upstream has no separate validate function here; the port splits validate from record the way it does for the setters that do have one (`ProgrammableEncoder.cpp:127`), so the two rules are reachable without recording. |
-| `src/dawn/native/RenderEncoderBase.cpp:708` | `APISetBindGroup` | `RenderEncoderBase.setBindGroup` | `src/command/render_encoder_base.zig` | port | `:212`. A forward into the shared half. |
-| `src/dawn/native/RenderEncoderBase.cpp:734` | `APISetImmediates` | `RenderEncoderBase.setImmediates` | `src/command/render_encoder_base.zig` | port | `:219`. A forward. |
-| `src/dawn/native/RenderEncoderBase.cpp:239` | the metadata write inside `APIDrawIndirect` | `recordIndirect` | `src/command/render_encoder_base.zig` | port | `:341`. |
-| `src/dawn/native/RenderEncoderBase.cpp:303` | the metadata write inside `APIDrawIndexedIndirect` | `recordIndirect` | `src/command/render_encoder_base.zig` | merge | With the row above; the indexed flag is the only difference. |
+| `src/dawn/native/RenderEncoderBase.cpp:96` | `GetDrawCount` | `RenderEncoderBase.draw_count` | `src/command/render_encoder_base.zig:123` | port | `:112`. |
+| `src/dawn/native/RenderEncoderBase.cpp:101` | `AcquireAttachmentState` | `AttachmentState.fromRenderPass` | `src/command/attachment_state.zig:79` | merge | Which allocator produces the interned state is §M14's decision (`attachment_state.zig:14-16`); what the front end does is carry the identity, which the `setPipeline` comparison reads. |
+| `src/dawn/native/RenderEncoderBase.cpp:105` | `APIDraw` | `RenderEncoderBase.draw` | `src/command/render_encoder_base.zig:538` | port | `:238`. Validate, record, count — in that order, and the order is why an overrun is reported rather than recorded. |
+| `src/dawn/native/RenderEncoderBase.cpp:151` | `APIDrawIndexed` | `RenderEncoderBase.drawIndexed` | `src/command/render_encoder_base.zig:558` | port | `:258`. |
+| `src/dawn/native/RenderEncoderBase.cpp:203` | `APIDrawIndirect` | `RenderEncoderBase.drawIndirect` | `src/command/render_encoder_base.zig:582` | port | `:282`. |
+| `src/dawn/native/RenderEncoderBase.cpp:262` | `APIDrawIndexedIndirect` | `RenderEncoderBase.drawIndexedIndirect` | `src/command/render_encoder_base.zig:593` | port | `:289`. Dawn's two tags share one payload by inheritance (`Commands.h:306`); the port reuses the struct and keeps two tags (`commands.zig:334`), so one record writes both. |
+| `src/dawn/native/RenderEncoderBase.cpp:328` | `APIMultiDrawIndirect` | `RenderEncoderBase.multiDrawIndirect` | `src/command/render_encoder_base.zig:604` | port | `:296`. |
+| `src/dawn/native/RenderEncoderBase.cpp:434` | `APIMultiDrawIndexedIndirect` | `RenderEncoderBase.multiDrawIndexedIndirect` | `src/command/render_encoder_base.zig:615` | port | `:304`. |
+| `src/dawn/native/RenderEncoderBase.cpp:544` | `APISetPipeline` | `RenderEncoderBase.setPipeline` | `src/command/render_encoder_base.zig:268` | port | `:195`, plus the lazy-bit clear from `CommandBufferStateTracker.cpp:785`. |
+| `src/dawn/native/RenderEncoderBase.cpp:551` | the `pipeline->GetAttachmentState() != mAttachmentState` check | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:78`, raised by `RenderEncoderBase.setPipeline` (`render_encoder_base.zig:201`). Dawn compares two interned states with `AttachmentState::EqualityFunc` (`AttachmentState.cpp:204`); the port compares the interned pointers, because the cache guarantees two equal states are one pointer. |
+| `src/dawn/native/RenderEncoderBase.cpp:581` | `APISetIndexBuffer` | `RenderEncoderBase.setIndexBuffer` | `src/command/render_encoder_base.zig:244` | port | `:171`. |
+| `src/dawn/native/RenderEncoderBase.cpp:641` | `APISetVertexBuffer` | `RenderEncoderBase.setVertexBuffer` | `src/command/render_encoder_base.zig:221` | port | `:148`. Dawn resolves "the whole buffer" inside the record lambda, so the recorded `size` is concrete and the draw's in-range check (`:131`) compares a real number. The port's options carry `size: ?u64`, where null is the whole remaining buffer, and resolve it once at record time. |
+| `src/dawn/native/RenderEncoderBase.cpp:649` | the `slot >= kMaxVertexBuffers` check inside `APISetVertexBuffer` | `RenderEncoderBase.validateSetVertexBuffer` | `src/command/render_encoder_base.zig:215` | port | `:142`. Upstream has no separate validate function here; the port splits validate from record the way it does for the setters that do have one (`ProgrammableEncoder.cpp:127`), so the two rules are reachable without recording. |
+| `src/dawn/native/RenderEncoderBase.cpp:708` | `APISetBindGroup` | `RenderEncoderBase.setBindGroup` | `src/command/render_encoder_base.zig:285` | port | `:212`. A forward into the shared half. |
+| `src/dawn/native/RenderEncoderBase.cpp:734` | `APISetImmediates` | `RenderEncoderBase.setImmediates` | `src/command/render_encoder_base.zig:292` | port | `:219`. A forward. |
+| `src/dawn/native/RenderEncoderBase.cpp:239` | the metadata write inside `APIDrawIndirect` | `recordIndirect` | `src/command/render_encoder_base.zig:635` | port | `:341`. |
+| `src/dawn/native/RenderEncoderBase.cpp:303` | the metadata write inside `APIDrawIndexedIndirect` | `recordIndirect` | `src/command/render_encoder_base.zig:635` | merge | With the row above; the indexed flag is the only difference. |
 
 ### `src/dawn/native/IndirectDrawMetadata.h` and `.cpp` — 27 rows
 
@@ -5895,100 +6418,100 @@ not port.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/IndirectDrawMetadata.h:70` | `struct IndirectDraw` | `IndirectDraw` | `src/command/indirect_draw.zig` | port | `:29`. |
+| `src/dawn/native/IndirectDrawMetadata.h:70` | `struct IndirectDraw` | `IndirectDraw` | `src/command/indirect_draw.zig:29` | port | `:29`. |
 | `src/dawn/native/IndirectDrawMetadata.h:84` | `struct ValidatedIndirectDraw` | — | — | skip | The GPU-side rewrite, which needs the validation encoder and its WGSL. |
-| `src/dawn/native/IndirectDrawMetadata.h:91` | `struct IndirectValidationBatch` | `ValidationBatch` | `src/command/indirect_draw.zig` | port | `:48`. The struct lands; the list stays empty, which the file header says in so many words. |
-| `src/dawn/native/IndirectDrawMetadata.h:97` | `struct IndirectMultiDraw` | `IndirectDraw`'s `multi`, `max_draw_count` fields | `src/command/indirect_draw.zig` | merge | Dawn's fourth draw struct differs from `IndirectDraw` in two fields; the port's is one struct with two flags, because a reader that branches on two booleans is one reader and not four. |
-| `src/dawn/native/IndirectDrawMetadata.h:124` | `IndexedIndirectBufferValidationInfo::AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig` | port | `:75`. |
+| `src/dawn/native/IndirectDrawMetadata.h:91` | `struct IndirectValidationBatch` | `ValidationBatch` | `src/command/indirect_draw.zig:49` | port | `:48`. The struct lands; the list stays empty, which the file header says in so many words. |
+| `src/dawn/native/IndirectDrawMetadata.h:97` | `struct IndirectMultiDraw` | `IndirectDraw`'s `multi`, `max_draw_count` fields | `src/command/indirect_draw.zig:29`, `src/command/indirect_draw.zig:38`, `src/command/indirect_draw.zig:42` | merge | Dawn's fourth draw struct differs from `IndirectDraw` in two fields; the port's is one struct with two flags, because a reader that branches on two booleans is one reader and not four. |
+| `src/dawn/native/IndirectDrawMetadata.h:124` | `IndexedIndirectBufferValidationInfo::AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig:75` | port | `:75`. |
 | `src/dawn/native/IndirectDrawMetadata.h:131` | `IndexedIndirectBufferValidationInfo::AddBatch` | — | — | skip | The batches are empty; see the file header. |
 | `src/dawn/native/IndirectDrawMetadata.h:155` | `struct IndexedIndirectConfig` | — | — | skip | The comparison it feeds is the validation encoder's. |
 | `src/dawn/native/IndirectDrawMetadata.h:178` | `operator=(IndirectDrawMetadata&&)` | — | — | skip | The metadata is one value per pass and is moved out once, by `Context.finish`. |
-| `src/dawn/native/IndirectDrawMetadata.h:182` | `AddBundle` | `IndirectDrawMetadata.addBundle` | `src/command/indirect_draw.zig` | port | `:139`. Bundles are not ported, so this has no caller today and the row records the shape rather than a reachable path. |
-| `src/dawn/native/IndirectDrawMetadata.h:183` | `AddIndexedIndirectDraw` | `IndirectDrawMetadata.addIndexedIndirectDraw` | `src/command/indirect_draw.zig` | port | `:93`. |
-| `src/dawn/native/IndirectDrawMetadata.h:191` | `AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig` | port | `:75`. |
-| `src/dawn/native/IndirectDrawMetadata.h:196` | `AddMultiDrawIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig` | port | `:115`. |
-| `src/dawn/native/IndirectDrawMetadata.h:200` | `AddMultiDrawIndexedIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig` | merge | The indexed sibling (`.cpp:317`) differs in one flag. |
+| `src/dawn/native/IndirectDrawMetadata.h:182` | `AddBundle` | `IndirectDrawMetadata.addBundle` | `src/command/indirect_draw.zig:139` | port | `:139`. Bundles are not ported, so this has no caller today and the row records the shape rather than a reachable path. |
+| `src/dawn/native/IndirectDrawMetadata.h:183` | `AddIndexedIndirectDraw` | `IndirectDrawMetadata.addIndexedIndirectDraw` | `src/command/indirect_draw.zig:93` | port | `:93`. |
+| `src/dawn/native/IndirectDrawMetadata.h:191` | `AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig:75` | port | `:75`. |
+| `src/dawn/native/IndirectDrawMetadata.h:196` | `AddMultiDrawIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig:115` | port | `:115`. |
+| `src/dawn/native/IndirectDrawMetadata.h:200` | `AddMultiDrawIndexedIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig:115` | merge | The indexed sibling (`.cpp:317`) differs in one flag. |
 | `src/dawn/native/IndirectDrawMetadata.h:208` | `ClearIndexedIndirectBufferValidationInfo` | — | — | skip | Validation state. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:106` | `AdjustValidatedDrawIndex` | — | — | skip | Renumbering for the batch merge. |
-| `src/dawn/native/IndirectDrawMetadata.cpp:152` | `GetBatches` | `IndirectDrawMetadata.getBatches` | `src/command/indirect_draw.zig` | port | `:154`. The port's list is always empty; the reader exists so the assertion "no batches were ported" is one comparison rather than a comment. |
+| `src/dawn/native/IndirectDrawMetadata.cpp:152` | `GetBatches` | `IndirectDrawMetadata.getBatches` | `src/command/indirect_draw.zig:161` | port | `:154`. The port's list is always empty; the reader exists so the assertion "no batches were ported" is one comparison rather than a comment. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:156` | `GetIndirectBuffer` | — | — | skip | The single buffer of the validation info. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:168` | `operator=(IndirectDrawMetadata&&)` | — | — | skip | With `IndirectDrawMetadata.h:178`. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:176` | `GetIndirectMultiDraws` | — | — | skip | Validation-side read. Upstream spells the name `GetIndirectMultiDraws`, not `GetMultiDraws`. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:180` | `SetValidatedIndirectDrawArgs` | — | — | skip | The argument rewrite. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:206` | `GetValidatedIndirectDraw` | — | — | skip | With the row above. |
-| `src/dawn/native/IndirectDrawMetadata.cpp:221` | `AddBundle` | `IndirectDrawMetadata.addBundle` | `src/command/indirect_draw.zig` | port | `:139`. |
-| `src/dawn/native/IndirectDrawMetadata.cpp:242` | `AddIndexedIndirectDraw` | `IndirectDrawMetadata.addIndexedIndirectDraw` | `src/command/indirect_draw.zig` | port | `:93`. |
-| `src/dawn/native/IndirectDrawMetadata.cpp:281` | `AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig` | port | `:75`. |
-| `src/dawn/native/IndirectDrawMetadata.cpp:306` | `AddMultiDrawIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig` | port | `:115`. |
+| `src/dawn/native/IndirectDrawMetadata.cpp:221` | `AddBundle` | `IndirectDrawMetadata.addBundle` | `src/command/indirect_draw.zig:139` | port | `:139`. |
+| `src/dawn/native/IndirectDrawMetadata.cpp:242` | `AddIndexedIndirectDraw` | `IndirectDrawMetadata.addIndexedIndirectDraw` | `src/command/indirect_draw.zig:93` | port | `:93`. |
+| `src/dawn/native/IndirectDrawMetadata.cpp:281` | `AddIndirectDraw` | `IndirectDrawMetadata.addIndirectDraw` | `src/command/indirect_draw.zig:75` | port | `:75`. |
+| `src/dawn/native/IndirectDrawMetadata.cpp:306` | `AddMultiDrawIndirect` | `IndirectDrawMetadata.addMultiDrawIndirect` | `src/command/indirect_draw.zig:115` | port | `:115`. |
 | `src/dawn/native/IndirectDrawMetadata.cpp:337` | `IndexedIndirectConfig::operator<` | — | — | skip | The batch ordering. |
-| `src/dawn/native/RenderEncoderBase.cpp:218` | the `IndirectBufferTooSmall` check | `IndirectDrawMetadata.validateIndirectBufferSize` | `src/command/indirect_draw.zig` | port | `:165`. Dawn resolves the size from the buffer object; the port records the size, so the rule runs here. |
+| `src/dawn/native/RenderEncoderBase.cpp:218` | the `IndirectBufferTooSmall` check | `IndirectDrawMetadata.validateIndirectBufferSize` | `src/command/indirect_draw.zig:172` | port | `:165`. Dawn resolves the size from the buffer object; the port records the size, so the rule runs here. |
 
 ### `src/dawn/native/PassResourceUsageTracker.cpp` — 37 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/PassResourceUsageTracker.cpp:44` | `SyncScopeUsageTracker()` | `SyncScopeUsageTracker.init` | `src/command/usage.zig` | port | `:244`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:44` | `SyncScopeUsageTracker()` | `SyncScopeUsageTracker.init` | `src/command/usage.zig:265` | port | `:244`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:46` | `SyncScopeUsageTracker(SyncScopeUsageTracker&&)` | — | — | skip | The tracker is one value per pass; `acquireSyncScopeUsage` empties it rather than moving it. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:48` | `~SyncScopeUsageTracker` | `SyncScopeUsageTracker.deinit` | `src/command/usage.zig` | port | `:248`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:48` | `~SyncScopeUsageTracker` | `SyncScopeUsageTracker.deinit` | `src/command/usage.zig:269` | port | `:248`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:50` | `operator=` | — | — | skip | With the move constructor. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:52` | `BufferUsedAs` | `SyncScopeUsageTracker.bufferUsedAs` | `src/command/usage.zig` | port | `:255`. Find the entry, or add one; returning the index is what lets the caller merge without a second search. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:63` | `TextureViewUsedAs` | `SyncScopeUsageTracker.textureRangeUsedAs` | `src/command/usage.zig` | port | `:270`. Dawn expands a view into the subresources it spans; the port records the subresources the caller names, so `command` never reads a view. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:69` | `TextureRangeUsedAs` | `SyncScopeUsageTracker.textureRangeUsedAs` | `src/command/usage.zig` | merge | With the row above; Dawn's two functions are one because the port's caller does the expansion. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:88` | `MergeTextureUsage` | `SyncScopeUsageTracker.mergeTextureUsage` | `src/command/usage.zig` | port | `:299`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:107` | `MergeResourceUsages` | `SyncScopeResourceUsage.moveInto` | `src/command/usage.zig` | port | `:100`. Dawn's move constructor of the scope; the port writes it as a named move so the reader knows the lists are gone afterwards. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:124` | `AddBindGroup` | `RenderPassResourceUsageTracker.addBindGroupResources` | `src/command/usage.zig` | port | `:446`. Dawn reads the four binding kinds off the group; the caller resolves them, because `command` cannot read a group. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:229` | `SetUsedResourceTable` | `SyncScopeUsageTracker.setUsedResourceTable` | `src/command/usage.zig` | port | `:321`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:234` | `AcquireSyncScopeUsage` | `SyncScopeUsageTracker.acquireSyncScopeUsage` | `src/command/usage.zig` | port | `:330`. Dawn returns a `ResultOrError` and the pass keeps the scope; the port moves, because a value that copies six lists is worse than one that empties itself. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:266` | `ComputePassResourceUsageTracker()` | `ComputePassResourceUsageTracker.init` | `src/command/usage.zig` | port | `:341`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:52` | `BufferUsedAs` | `SyncScopeUsageTracker.bufferUsedAs` | `src/command/usage.zig:277` | port | `:255`. Find the entry, or add one; returning the index is what lets the caller merge without a second search. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:63` | `TextureViewUsedAs` | `SyncScopeUsageTracker.textureRangeUsedAs` | `src/command/usage.zig:292` | port | `:270`. Dawn expands a view into the subresources it spans; the port records the subresources the caller names, so `command` never reads a view. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:69` | `TextureRangeUsedAs` | `SyncScopeUsageTracker.textureRangeUsedAs` | `src/command/usage.zig:292` | merge | With the row above; Dawn's two functions are one because the port's caller does the expansion. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:88` | `MergeTextureUsage` | `SyncScopeUsageTracker.mergeTextureUsage` | `src/command/usage.zig:324` | port | `:299`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:107` | `MergeResourceUsages` | `SyncScopeResourceUsage.moveInto` | `src/command/usage.zig:105` | port | `:100`. Dawn's move constructor of the scope; the port writes it as a named move so the reader knows the lists are gone afterwards. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:124` | `AddBindGroup` | `RenderPassResourceUsageTracker.addBindGroupResources` | `src/command/usage.zig:479` | port | `:446`. Dawn reads the four binding kinds off the group; the caller resolves them, because `command` cannot read a group. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:229` | `SetUsedResourceTable` | `SyncScopeUsageTracker.setUsedResourceTable` | `src/command/usage.zig:336` | port | `:321`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:234` | `AcquireSyncScopeUsage` | `SyncScopeUsageTracker.acquireSyncScopeUsage` | `src/command/usage.zig:344` | port | `:330`. Dawn returns a `ResultOrError` and the pass keeps the scope; the port moves, because a value that copies six lists is worse than one that empties itself. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:266` | `ComputePassResourceUsageTracker()` | `ComputePassResourceUsageTracker.init` | `src/command/usage.zig:356` | port | `:341`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:268` | `ComputePassResourceUsageTracker(ComputePassResourceUsageTracker&&)` | — | — | skip | With `SyncScopeUsageTracker`'s move. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:271` | `~ComputePassResourceUsageTracker` | `ComputePassResourceUsageTracker.deinit` | `src/command/usage.zig` | port | `:346`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:271` | `~ComputePassResourceUsageTracker` | `ComputePassResourceUsageTracker.deinit` | `src/command/usage.zig:360` | port | `:346`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:273` | `operator=` | — | — | skip | With the move constructor. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:276` | `AddDispatch` | — | — | skip | The compute pass encoder lands with the encoder M18 drives; `ComputePassResourceUsage.dispatch_usages` (`:147`) is the field it fills. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:280` | `AddReferencedBuffer` | `ComputePassResourceUsageTracker.addReferencedBuffer` | `src/command/usage.zig` | port | `:352`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:284` | `AddReferencedResourceTable` | `ComputePassResourceUsageTracker.addReferencedResourceTable` | `src/command/usage.zig` | port | `:374`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:288` | `AddResourcesReferencedByBindGroup` | `UsageSink.addBindGroup` | `src/command/programmable_encoder.zig` | port | `:90`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:311` | `ComputePassResourceUsageTracker::AcquireResourceUsage` | `ComputePassResourceUsageTracker.acquireResourceUsage` | `src/command/usage.zig` | port | `:379`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:315` | `RenderPassResourceUsageTracker()` | `RenderPassResourceUsageTracker.init` | `src/command/usage.zig` | port | `:396`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:280` | `AddReferencedBuffer` | `ComputePassResourceUsageTracker.addReferencedBuffer` | `src/command/usage.zig:377` | port | `:352`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:284` | `AddReferencedResourceTable` | `ComputePassResourceUsageTracker.addReferencedResourceTable` | `src/command/usage.zig:398` | port | `:374`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:288` | `AddResourcesReferencedByBindGroup` | `UsageSink.addBindGroup` | `src/command/programmable_encoder.zig:72` | port | `:90`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:311` | `ComputePassResourceUsageTracker::AcquireResourceUsage` | `ComputePassResourceUsageTracker.acquireResourceUsage` | `src/command/usage.zig:406` | port | `:379`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:315` | `RenderPassResourceUsageTracker()` | `RenderPassResourceUsageTracker.init` | `src/command/usage.zig:423` | port | `:396`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:317` | `RenderPassResourceUsageTracker(RenderPassResourceUsageTracker&&)` | — | — | skip | With `SyncScopeUsageTracker`'s move. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:320` | `~RenderPassResourceUsageTracker` | `RenderPassResourceUsageTracker.deinit` | `src/command/usage.zig` | port | `:404`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:320` | `~RenderPassResourceUsageTracker` | `RenderPassResourceUsageTracker.deinit` | `src/command/usage.zig:431` | port | `:404`. |
 | `src/dawn/native/PassResourceUsageTracker.cpp:322` | `operator=` | — | — | skip | With the move constructor. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:325` | `MarkFramebufferFetchUsed` | `RenderPassResourceUsageTracker.markFramebufferFetchUsed` | `src/command/usage.zig` | port | `:439`. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:329` | `AcquireResourceUsage` | `RenderPassResourceUsageTracker.acquireResourceUsage` | `src/command/usage.zig` | port | `:507`. Moves every list into a fresh usage and starts over, clearing `usesFrameBufferFetch` by replacing the struct. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:348` | `TrackQueryAvailability` | `RenderPassResourceUsageTracker.trackQueryAvailability` | `src/command/usage.zig` | port | `:474`. Dawn records one bit per query; the port records one `bool`, which is the same information at eight times the size and is correct only because a pass holds at most `max_tracked_query_count` queries. That bound is recorded rather than assumed. |
-| `src/dawn/native/PassResourceUsageTracker.cpp:360` | `GetQueryAvailabilityMap` | `markQueryAvailable` | `src/command/usage.zig` | port | `:495`. Dawn returns the map to the replay; the port's rule runs inside the tracker, so the reader is the one that records. |
-| `src/dawn/native/PassResourceUsage.cpp:34` | `GatherWritableTextures` | `writableTexturesInto` | `src/command/usage.zig` | port | `:118`. Dawn returns an unordered hash set; the port fills a caller's list, so the barrier order is a function of the record order and two runs of the same stream produce the same barriers. |
-| `src/dawn/native/PassResourceUsage.h:54` | `BufferSyncInfo` | `BufferSyncInfo` | `src/command/usage.zig` | port | `:29`. |
-| `src/dawn/native/PassResourceUsage.h:61` | `TextureSyncInfo` | `TextureSyncInfo` | `src/command/usage.zig` | port | `:40`. |
-| `src/dawn/native/PassResourceUsage.h:68` | `SubresourceStorage<TextureSyncInfo>` | `TextureSubresourceSyncInfo` | `src/command/usage.zig` | port | `:56`. A subresource is a mip level, one array layer and one aspect; the port stores three fields and a `subresourceMatches` predicate instead of a hash map, because a pass's list is short and a map would be a hash function with no reader that needs one. |
-| `src/dawn/native/PassResourceUsage.h:73` | `SyncScopeResourceUsage` | `SyncScopeResourceUsage` | `src/command/usage.zig` | port | `:75`. |
-| `src/dawn/native/PassResourceUsage.h:90` | `ComputePassResourceUsage` | `ComputePassResourceUsage` | `src/command/usage.zig` | port | `:145`. |
-| `src/dawn/native/PassResourceUsage.h:107` | `RenderPassResourceUsage` | `RenderPassResourceUsage` | `src/command/usage.zig` | port | `:179`. Dawn's inherits `SyncScopeResourceUsage` only so a bundle can hand one scope to a pass's list; Zig has no inheritance, so the port inlines the field set and the tracker merges the two directly. |
-| `src/dawn/native/PassResourceUsage.h:119` | `CommandBufferResourceUsage` | `CommandBufferResourceUsage` | `src/command/usage.zig` | port | `:204`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:325` | `MarkFramebufferFetchUsed` | `RenderPassResourceUsageTracker.markFramebufferFetchUsed` | `src/command/usage.zig:472` | port | `:439`. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:329` | `AcquireResourceUsage` | `RenderPassResourceUsageTracker.acquireResourceUsage` | `src/command/usage.zig:549` | port | `:507`. Moves every list into a fresh usage and starts over, clearing `usesFrameBufferFetch` by replacing the struct. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:348` | `TrackQueryAvailability` | `RenderPassResourceUsageTracker.trackQueryAvailability` | `src/command/usage.zig:513` | port | `:474`. Dawn records one bit per query; the port records one `bool`, which is the same information at eight times the size and is correct only because a pass holds at most `max_tracked_query_count` queries. That bound is recorded rather than assumed. |
+| `src/dawn/native/PassResourceUsageTracker.cpp:360` | `GetQueryAvailabilityMap` | `markQueryAvailable` | `src/command/usage.zig:536` | port | `:495`. Dawn returns the map to the replay; the port's rule runs inside the tracker, so the reader is the one that records. |
+| `src/dawn/native/PassResourceUsage.cpp:34` | `GatherWritableTextures` | `writableTexturesInto` | `src/command/usage.zig:123` | port | `:118`. Dawn returns an unordered hash set; the port fills a caller's list, so the barrier order is a function of the record order and two runs of the same stream produce the same barriers. |
+| `src/dawn/native/PassResourceUsage.h:54` | `BufferSyncInfo` | `BufferSyncInfo` | `src/command/usage.zig:33` | port | `:29`. |
+| `src/dawn/native/PassResourceUsage.h:61` | `TextureSyncInfo` | `TextureSyncInfo` | `src/command/usage.zig:45` | port | `:40`. |
+| `src/dawn/native/PassResourceUsage.h:68` | `SubresourceStorage<TextureSyncInfo>` | `TextureSubresourceSyncInfo` | `src/command/usage.zig:59` | port | `:56`. A subresource is a mip level, one array layer and one aspect; the port stores three fields and a `subresourceMatches` predicate instead of a hash map, because a pass's list is short and a map would be a hash function with no reader that needs one. |
+| `src/dawn/native/PassResourceUsage.h:73` | `SyncScopeResourceUsage` | `SyncScopeResourceUsage` | `src/command/usage.zig:79` | port | `:75`. |
+| `src/dawn/native/PassResourceUsage.h:90` | `ComputePassResourceUsage` | `ComputePassResourceUsage` | `src/command/usage.zig:161` | port | `:145`. |
+| `src/dawn/native/PassResourceUsage.h:107` | `RenderPassResourceUsage` | `RenderPassResourceUsage` | `src/command/usage.zig:196` | port | `:179`. Dawn's inherits `SyncScopeResourceUsage` only so a bundle can hand one scope to a pass's list; Zig has no inheritance, so the port inlines the field set and the tracker merges the two directly. |
+| `src/dawn/native/PassResourceUsage.h:119` | `CommandBufferResourceUsage` | `CommandBufferResourceUsage` | `src/command/usage.zig:224` | port | `:204`. |
 
 ### `src/dawn/native/AttachmentState.cpp` — 13 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/AttachmentState.cpp:199` | `DeleteThis` | — | — | skip | Dawn's intrusive-lifetime idiom. The port's arena owns every object (`commands.zig:18-24`), so there is no per-object delete. |
-| `src/dawn/native/AttachmentState.cpp:204` | `EqualityFunc::operator()` | `AttachmentState.eql`, `SlotShape.eql` | `src/command/attachment_state.zig` | port | The hash and equality must agree with Dawn's `isPresent` (`commands.zig:166-170`), or two interned states that Dawn would merge would be two keys here. |
-| `src/dawn/native/AttachmentState.cpp:254` | `ComputeContentHash` | `SlotShape.hash`, `AttachmentState.hash` | `src/command/attachment_state.zig` | port | Computes the hash and leaves the interning to the cache that owns it; the identity `BeginRenderPassCmd.attachment_state` and `SetRenderPipelineCmd.attachment_state` hold is that pointer, and which allocator produced it is §M14's decision (`attachment_state.zig:14-16`). |
-| `src/dawn/native/AttachmentState.cpp:282` | `GetColorAttachmentsMask` | `AttachmentState.color_attachments` | `src/command/attachment_state.zig` | port | `:54`. |
-| `src/dawn/native/AttachmentState.cpp:286` | `GetColorAttachmentFormat` | `SlotShape.format` | `src/command/attachment_state.zig` | port | `:38`. The wire value; zero is `Undefined` and means the slot is absent, which is how Dawn spells "no depth-stencil attachment" (`AttachmentState.h:93-94`). |
-| `src/dawn/native/AttachmentState.cpp:291` | `HasDepthStencilAttachment` | `SlotShape.format` | `src/command/attachment_state.zig` | merge | A non-zero wire format is the same fact as a present slot, so one field answers both questions and the port writes it once. |
-| `src/dawn/native/AttachmentState.cpp:295` | `GetDepthStencilFormat` | `SlotShape.format` | `src/command/attachment_state.zig` | merge | With the row above. |
-| `src/dawn/native/AttachmentState.cpp:300` | `GetSampleCount` | `SlotShape.sample_count` | `src/command/attachment_state.zig` | port | `:38`. |
-| `src/dawn/native/AttachmentState.cpp:304` | `GetExpandResolveInfo` | `ExpandResolveInfo` | `src/command/attachment_state.zig` | port | `:30`. |
-| `src/dawn/native/AttachmentState.cpp:308` | `HasPixelLocalStorage` | `AttachmentState.storage_slots` | `src/command/attachment_state.zig` | port | `:54`. |
-| `src/dawn/native/AttachmentState.cpp:312` | `GetStorageAttachmentSlots` | `AttachmentState.storage_slots` | `src/command/attachment_state.zig` | port | `:54`. |
-| `src/dawn/native/AttachmentState.cpp:47` | the `colorFormats.size() <= kMaxColorAttachmentsTyped` check | `AttachmentError.TooManyAttachments` | `src/command/attachment_state.zig` | port | `:235`. Dawn asserts; the port returns the rule, because a caller naming nine colour attachments is a caller bug and the acceptance shard asserts it by name. |
-| `src/dawn/native/AttachmentState.cpp:68` | the `fragment->targets.size()` check | `AttachmentError.PerSlotAnswersMissing` | `src/command/attachment_state.zig` | port | `:236`. The pipeline-side spelling of the same bound, and the reason the port needs its own member: it takes one `SlotShape` per index, so a pipeline that answered fewer slots than the pass renders into has no representation for the rest. The two members are the two ways the port refuses a partially-answered descriptor, and the switch over them is exhaustive by construction. |
+| `src/dawn/native/AttachmentState.cpp:204` | `EqualityFunc::operator()` | `AttachmentState.eql`, `SlotShape.eql` | `src/command/attachment_state.zig:157`, `src/command/attachment_state.zig:157` | port | The hash and equality must agree with Dawn's `isPresent` (`commands.zig:166-170`), or two interned states that Dawn would merge would be two keys here. |
+| `src/dawn/native/AttachmentState.cpp:254` | `ComputeContentHash` | `AttachmentState.computeContentHash` | `src/command/attachment_state.zig:179` | port | Computes the hash and leaves the interning to the cache that owns it; the identity `BeginRenderPassCmd.attachment_state` and `SetRenderPipelineCmd.attachment_state` hold is that pointer, and which allocator produced it is §M14's decision (`attachment_state.zig:14-16`). |
+| `src/dawn/native/AttachmentState.cpp:282` | `GetColorAttachmentsMask` | `AttachmentState.color_attachments_set` | `src/command/attachment_state.zig:59` | port | `:54`. |
+| `src/dawn/native/AttachmentState.cpp:286` | `GetColorAttachmentFormat` | `SlotShape.format` | `src/command/attachment_state.zig:42` | port | `:38`. The wire value; zero is `Undefined` and means the slot is absent, which is how Dawn spells "no depth-stencil attachment" (`AttachmentState.h:93-94`). |
+| `src/dawn/native/AttachmentState.cpp:291` | `HasDepthStencilAttachment` | `SlotShape.format` | `src/command/attachment_state.zig:42` | merge | A non-zero wire format is the same fact as a present slot, so one field answers both questions and the port writes it once. |
+| `src/dawn/native/AttachmentState.cpp:295` | `GetDepthStencilFormat` | `SlotShape.format` | `src/command/attachment_state.zig:42` | merge | With the row above. |
+| `src/dawn/native/AttachmentState.cpp:300` | `GetSampleCount` | `SlotShape.sample_count` | `src/command/attachment_state.zig:45` | port | `:38`. |
+| `src/dawn/native/AttachmentState.cpp:304` | `GetExpandResolveInfo` | `ExpandResolveInfo` | `src/command/attachment_state.zig:30` | port | `:30`. |
+| `src/dawn/native/AttachmentState.cpp:308` | `HasPixelLocalStorage` | `AttachmentState.hasPixelLocalStorage` | `src/command/attachment_state.zig:141` | port | `:54`. |
+| `src/dawn/native/AttachmentState.cpp:312` | `GetStorageAttachmentSlots` | `AttachmentState.storageAttachmentPacking` | `src/command/attachment_state.zig:151` | port | `:54`. |
+| `src/dawn/native/AttachmentState.cpp:47` | the `colorFormats.size() <= kMaxColorAttachmentsTyped` check | `AttachmentError` | `src/command/attachment_state.zig:234` | port | `:235`. Dawn asserts; the port returns the rule, because a caller naming nine colour attachments is a caller bug and the acceptance shard asserts it by name. |
+| `src/dawn/native/AttachmentState.cpp:68` | the `fragment->targets.size()` check | `AttachmentError` | `src/command/attachment_state.zig:234` | port | `:236`. The pipeline-side spelling of the same bound, and the reason the port needs its own member: it takes one `SlotShape` per index, so a pipeline that answered fewer slots than the pass renders into has no representation for the rest. The two members are the two ways the port refuses a partially-answered descriptor, and the switch over them is exhaustive by construction. |
 
 ### `src/dawn/native/ValidationUtils.cpp` — 2 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/ValidationUtils.cpp:34` | `ValidateFloat` | `validateFloat` | `src/command/validation_utils.zig` | port | `:23`. Dawn's takes a name used only in the message; the port returns the rule, because `command` does not import `core`'s error sink and the caller names the value in its own context. |
-| `src/dawn/native/ValidationUtils.cpp:39` | `ValidateColor` | `validateColor`, `validateViewport` | `src/command/validation_utils.zig` | port | `:30` and `:41`. Dawn's four separate calls at `RenderPassEncoder.cpp:237-242` are one call here, because the rule is the rule. `validateViewport` is the `SetViewport` check at `RenderPassEncoder.cpp:216`; the depth range may legitimately be inverted, so `minDepth > maxDepth` is not a rule here. |
+| `src/dawn/native/ValidationUtils.cpp:34` | `ValidateFloat` | `validateFloat` | `src/command/validation_utils.zig:22` | port | `:23`. Dawn's takes a name used only in the message; the port returns the rule, because `command` does not import `core`'s error sink and the caller names the value in its own context. |
+| `src/dawn/native/ValidationUtils.cpp:39` | `ValidateColor` | `validateColor`, `validateViewport` | `src/command/validation_utils.zig:29`, `src/command/validation_utils.zig:40` | port | `:30` and `:41`. Dawn's four separate calls at `RenderPassEncoder.cpp:237-242` are one call here, because the rule is the rule. `validateViewport` is the `SetViewport` check at `RenderPassEncoder.cpp:216`; the depth range may legitimately be inverted, so `minDepth > maxDepth` is not a rule here. |
 
 ### `src/dawn/native/RenderPassEncoder.cpp` — 16 rows
 
@@ -6002,20 +6525,20 @@ object-management rows are `skip` and the record rows land on
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/RenderPassEncoder.cpp:100` | `RenderPassEncoder::Create` | — | — | skip | The front-end object. The port's pass encoder is a value. |
 | `src/dawn/native/RenderPassEncoder.cpp:126` | `RenderPassEncoder::MakeError` | — | — | skip | With the row above; the port's equivalent is `error_in_recording`, which is a status and not an object. |
-| `src/dawn/native/RenderPassEncoder.cpp:138` | `DestroyImpl` | `RenderEncoderBase.deinit` | `src/command/render_encoder_base.zig` | merge | With `RenderEncoderBase.cpp:72`. |
+| `src/dawn/native/RenderPassEncoder.cpp:138` | `DestroyImpl` | `RenderEncoderBase.deinit` | `src/command/render_encoder_base.zig:157` | merge | With `RenderEncoderBase.cpp:72`. |
 | `src/dawn/native/RenderPassEncoder.cpp:147` | `GetType` | — | — | skip | Type dispatch. The port has no front-end object table below `core`. |
-| `src/dawn/native/RenderPassEncoder.cpp:151` | `APIEnd` | `RenderPass.end` | `src/command/command_encoder.zig` | port | `:147`. One call into the pass, and the tag it records is `end_render_pass` (`commands.zig:355`). |
-| `src/dawn/native/RenderPassEncoder.cpp:157` | `End` | `RenderPass.end`, `RenderPass.validateDrawCount` | `src/command/command_encoder.zig` | port | `:147` and `:176`. Dawn checks an already-ended pass, an open occlusion query, the draw count, then records the tag and calls `ExitRenderPass`. The port has no occlusion query encoder yet, so it checks the already-ended case (`:148`), the draw count (`:156`), and the debug-group stack, then the tag and the context. `exitRenderPass` (`encoding_context.zig:229`) closes and commits; `Tracker.end` (`:329`) drops the state. |
-| `src/dawn/native/RenderPassEncoder.cpp:198` | `APISetStencilReference` | `SetStencilReferenceCmd` | `src/command/commands.zig` | port | `:383`. The payload is ported; the record function lands with the encoder M18 drives. |
-| `src/dawn/native/RenderPassEncoder.cpp:211` | `APISetBlendConstant` | `SetBlendConstantCmd` | `src/command/commands.zig` | port | `:396`. The colour is validated by `validation_utils.validateColor` (`:30`). |
-| `src/dawn/native/RenderPassEncoder.cpp:227` | `APISetViewport` | `SetViewportCmd` | `src/command/commands.zig` | port | `:385`. Its four extents are checked by `validation_utils.validateViewport` (`:41`). |
-| `src/dawn/native/RenderPassEncoder.cpp:300` | `APISetScissorRect` | `SetScissorRectCmd` | `src/command/commands.zig` | port | `:394`. |
-| `src/dawn/native/RenderPassEncoder.cpp:329` | `APISetResourceTable` | `SetResourceTableCmd` | `src/command/commands.zig` | port | `:432`. |
-| `src/dawn/native/RenderPassEncoder.cpp:360` | `APIExecuteBundles` | `ExecuteBundlesCmd` | `src/command/commands.zig` | port | `:357`. The payload is ported and `commands.DataElement` names its run (`:511`). Bundles themselves are not ported. |
-| `src/dawn/native/RenderPassEncoder.cpp:437` | `APIBeginOcclusionQuery` | `BeginOcclusionQueryCmd` | `src/command/commands.zig` | port | `:258`. Its rules are in `query.zig`. |
-| `src/dawn/native/RenderPassEncoder.cpp:479` | `APIEndOcclusionQuery` | `EndOcclusionQueryCmd` | `src/command/commands.zig` | port | `:350`. |
-| `src/dawn/native/RenderPassEncoder.cpp:505` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig` | port | `:441`. |
-| `src/dawn/native/RenderPassEncoder.cpp:538` | `APIPixelLocalStorageBarrier` | `PixelLocalStorageBarrierCmd` | `src/command/commands.zig` | port | `:361`. |
+| `src/dawn/native/RenderPassEncoder.cpp:151` | `APIEnd` | `RenderEncoderBase.end` | `src/command/render_encoder_base.zig:174` | merge | The pass validates programmable state, an open occlusion query, and the draw-count bound. It records the end tag and transfers usage metadata through the encoding context. No separate `RenderPass.validateDrawCount` declaration exists. |
+| `src/dawn/native/RenderPassEncoder.cpp:157` | `End` | `RenderEncoderBase.end` | `src/command/render_encoder_base.zig:174` | merge | The pass validates programmable state, an open occlusion query, and the draw-count bound. It records the end tag and transfers usage metadata through the encoding context. No separate `RenderPass.validateDrawCount` declaration exists. |
+| `src/dawn/native/RenderPassEncoder.cpp:198` | `APISetStencilReference` | `SetStencilReferenceCmd` | `src/command/commands.zig:378` | port | `:383`. The payload is ported; the record function lands with the encoder M18 drives. |
+| `src/dawn/native/RenderPassEncoder.cpp:211` | `APISetBlendConstant` | `SetBlendConstantCmd` | `src/command/commands.zig:391` | port | `:396`. The colour is validated by `validation_utils.validateColor` (`:30`). |
+| `src/dawn/native/RenderPassEncoder.cpp:227` | `APISetViewport` | `SetViewportCmd` | `src/command/commands.zig:380` | port | `:385`. Its four extents are checked by `validation_utils.validateViewport` (`:41`). |
+| `src/dawn/native/RenderPassEncoder.cpp:300` | `APISetScissorRect` | `SetScissorRectCmd` | `src/command/commands.zig:389` | port | `:394`. |
+| `src/dawn/native/RenderPassEncoder.cpp:329` | `APISetResourceTable` | `SetResourceTableCmd` | `src/command/commands.zig:426` | port | `:432`. |
+| `src/dawn/native/RenderPassEncoder.cpp:360` | `APIExecuteBundles` | `ExecuteBundlesCmd` | `src/command/commands.zig:350` | port | `:357`. The payload is ported and `commands.DataElement` names its run (`:511`). Bundles themselves are not ported. |
+| `src/dawn/native/RenderPassEncoder.cpp:437` | `APIBeginOcclusionQuery` | `BeginOcclusionQueryCmd` | `src/command/commands.zig:246` | port | `:258`. Its rules are in `query.zig`. |
+| `src/dawn/native/RenderPassEncoder.cpp:479` | `APIEndOcclusionQuery` | `EndOcclusionQueryCmd` | `src/command/commands.zig:343` | port | `:350`. |
+| `src/dawn/native/RenderPassEncoder.cpp:505` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig:435` | port | `:441`. |
+| `src/dawn/native/RenderPassEncoder.cpp:538` | `APIPixelLocalStorageBarrier` | `PixelLocalStorageBarrierCmd` | `src/command/commands.zig:354` | port | `:361`. |
 
 ### `src/dawn/native/ComputePassEncoder.cpp` — 16 rows
 
@@ -6025,16 +6548,16 @@ object-management rows are `skip` and the record rows land on
 | `src/dawn/native/ComputePassEncoder.cpp:179` | `ComputePassEncoder::MakeError` | — | — | skip | With the row above. |
 | `src/dawn/native/ComputePassEncoder.cpp:187` | `DestroyImpl` | — | — | skip | With the row above. |
 | `src/dawn/native/ComputePassEncoder.cpp:196` | `GetType` | — | — | skip | With `RenderPassEncoder.cpp:147`. |
-| `src/dawn/native/ComputePassEncoder.cpp:200` | `APIEnd` | `Context.exitComputePass` | `src/command/encoding_context.zig` | port | `:243`. |
-| `src/dawn/native/ComputePassEncoder.cpp:225` | `APIDispatchWorkgroups` | `DispatchCmd` | `src/command/commands.zig` | port | `:311`. The payload is ported. |
-| `src/dawn/native/ComputePassEncoder.cpp:241` | `GetDevice()->GetLimits()` | `constants.Limits.max_compute_workgroups_per_dimension` | `src/command/constants.zig` | port | `:97`. Dawn reaches the device at the call site; `command` cannot, so the limit set is a value the caller passes in and the encoder holds. |
-| `src/dawn/native/ComputePassEncoder.cpp:418` | `APIDispatchWorkgroupsIndirect` | `DispatchIndirectCmd` | `src/command/commands.zig` | port | `:313`, sized by `constants.dispatch_indirect_size` (`constants.zig:79`). |
-| `src/dawn/native/ComputePassEncoder.cpp:496` | `APISetPipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig` | port | `:240`. |
-| `src/dawn/native/ComputePassEncoder.cpp:515` | `APISetResourceTable` | `SetResourceTableCmd` | `src/command/commands.zig` | port | `:432`. |
-| `src/dawn/native/ComputePassEncoder.cpp:544` | `APISetBindGroup` | `ProgrammableEncoder.setBindGroup` | `src/command/programmable_encoder.zig` | port | `:189`. |
-| `src/dawn/native/ComputePassEncoder.cpp:570` | `APISetImmediates` | `ProgrammableEncoder.setImmediates` | `src/command/programmable_encoder.zig` | port | `:230`. |
-| `src/dawn/native/ComputePassEncoder.cpp:585` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig` | port | `:441`. |
-| `src/dawn/native/ComputePassEncoder.cpp:609` | `AddDispatchSyncScope` | `ComputePassResourceUsageTracker.addDispatch` | `src/command/usage.zig` | skip | There is no compute pass encoder in the port yet; the field it would fill, `dispatch_usages` (`usage.zig:147`), is ported. |
+| `src/dawn/native/ComputePassEncoder.cpp:200` | `APIEnd` | `Context.exitComputePass` | `src/command/encoding_context.zig:309` | port | `:243`. |
+| `src/dawn/native/ComputePassEncoder.cpp:225` | `APIDispatchWorkgroups` | `DispatchCmd` | `src/command/commands.zig:304` | port | `:311`. The payload is ported. |
+| `src/dawn/native/ComputePassEncoder.cpp:241` | `GetDevice()->GetLimits()` | `constants.Limits.max_compute_workgroups_per_dimension` | `src/command/constants.zig:97` | port | `:97`. Dawn reaches the device at the call site; `command` cannot, so the limit set is a value the caller passes in and the encoder holds. |
+| `src/dawn/native/ComputePassEncoder.cpp:418` | `APIDispatchWorkgroupsIndirect` | `DispatchIndirectCmd` | `src/command/commands.zig:306` | port | `:313`, sized by `constants.dispatch_indirect_size` (`constants.zig:79`). |
+| `src/dawn/native/ComputePassEncoder.cpp:496` | `APISetPipeline` | `Tracker.setComputePipeline` | `src/command/state_tracker.zig:242` | port | `:240`. |
+| `src/dawn/native/ComputePassEncoder.cpp:515` | `APISetResourceTable` | `SetResourceTableCmd` | `src/command/commands.zig:426` | port | `:432`. |
+| `src/dawn/native/ComputePassEncoder.cpp:544` | `APISetBindGroup` | `ProgrammableEncoder.setBindGroup` | `src/command/programmable_encoder.zig:187` | port | `:189`. |
+| `src/dawn/native/ComputePassEncoder.cpp:570` | `APISetImmediates` | `ProgrammableEncoder.setImmediates` | `src/command/programmable_encoder.zig:233` | port | `:230`. |
+| `src/dawn/native/ComputePassEncoder.cpp:585` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig:435` | port | `:441`. |
+| `src/dawn/native/ComputePassEncoder.cpp:609` | `AddDispatchSyncScope` | `ComputePassResourceUsageTracker.addDispatch` | `src/command/usage.zig:367` | skip | There is no compute pass encoder in the port yet; the field it would fill, `dispatch_usages` (`usage.zig:147`), is ported. |
 | `src/dawn/native/ComputePassEncoder.cpp:622` | `RestoreCommandBufferState` | — | — | skip | Bundles are not ported, and this is the snapshot-and-restore around one. |
 | `src/dawn/native/ComputePassEncoder.cpp:638` | `GetCommandBufferStateTrackerForTesting` | — | — | skip | Upstream's own test hook. The port's `Tracker` is a value in a value, so a test holds it directly. |
 
@@ -6047,70 +6570,70 @@ order, so a reader looking for the rule finds the file it is written in.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandEncoder.cpp:1339` | `CommandEncoder::Create` | `CommandEncoder.init` | `src/command/command_encoder.zig` | port | `:267`. Dawn's constructor takes a device; the port's takes the compatibility flag, which is the one fact it cannot derive (`Device.cpp:1840-1842`), and a block size. It is infallible because `Context.init`'s only `try` is `Allocator.init` (`allocator.zig:63`), which returns a struct literal: the first block comes from `appendNewBlock` (`:166`) on the first record, so nothing is allocated before then and the context is built in `ensureContext` (`:384`). An infallible wrapper that trapped instead would be the thing `AGENTS.md` §3 forbids. |
-| `src/dawn/native/CommandEncoder.cpp:1346` | `CommandEncoder::MakeError` | `Context.openFailed` | `src/command/encoding_context.zig` | port | `:128`. |
+| `src/dawn/native/CommandEncoder.cpp:1339` | `CommandEncoder::Create` | `CommandEncoder.init` | `src/command/command_encoder.zig:204` | port | `:267`. Dawn's constructor takes a device; the port's takes the compatibility flag, which is the one fact it cannot derive (`Device.cpp:1840-1842`), and a block size. It is infallible because `Context.init`'s only `try` is `Allocator.init` (`allocator.zig:63`), which returns a struct literal: the first block comes from `appendNewBlock` (`:166`) on the first record, so nothing is allocated before then and the context is built in `ensureContext` (`:384`). An infallible wrapper that trapped instead would be the thing `AGENTS.md` §3 forbids. |
+| `src/dawn/native/CommandEncoder.cpp:1346` | `CommandEncoder::MakeError` | `Context.openFailed` | `src/command/encoding_context.zig:154` | port | `:128`. |
 | `src/dawn/native/CommandEncoder.cpp:1368` | `GetType` | — | — | skip | Type dispatch. The port has no front-end object table below `core`. |
-| `src/dawn/native/CommandEncoder.cpp:1372` | `DestroyImpl` | `CommandEncoder.deinit` | `src/command/command_encoder.zig` | port | `:281`, draining `Context.deinit` (`encoding_context.zig:97`). |
-| `src/dawn/native/CommandEncoder.cpp:1376` | `AcquireResourceUsages` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:64`. |
-| `src/dawn/native/CommandEncoder.cpp:1386` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:64`. |
-| `src/dawn/native/CommandEncoder.cpp:1390` | `TrackUsedQuerySet` | `CommandBufferResourceUsage.used_query_sets` | `src/command/usage.zig` | port | `:208`. |
-| `src/dawn/native/CommandEncoder.cpp:1394` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig` | merge | With `EncodingContext.h:109`. |
-| `src/dawn/native/CommandEncoder.cpp:1400` | `APIBeginComputePass` | `BeginComputePassCmd` | `src/command/commands.zig` | port | `:253`. |
-| `src/dawn/native/CommandEncoder.cpp:1407` | `BeginComputePass` | `Context.exitComputePass`'s sibling | `src/command/encoding_context.zig` | port | `:243`. |
-| `src/dawn/native/CommandEncoder.cpp:1460` | `APIBeginRenderPass` | `BeginRenderPassCmd` | `src/command/commands.zig` | port | `:263`. |
-| `src/dawn/native/CommandEncoder.cpp:1467` | `BeginRenderPass` | `CommandEncoder.beginRenderPass` | `src/command/command_encoder.zig` | port | `:290`. Commit what came before the pass, record the pass's own descriptor on the top-level encoder, then enter the pass (`encoding_context.zig:210` and `:215`). This is the call both acceptance shards record through. |
-| `src/dawn/native/CommandEncoder.cpp:1751` | `APICopyBufferToBuffer` | `CopyBufferToBufferCmd` | `src/command/commands.zig` | port | `:285`. |
+| `src/dawn/native/CommandEncoder.cpp:1372` | `DestroyImpl` | `CommandEncoder.deinit` | `src/command/command_encoder.zig:223` | port | `:281`, draining `Context.deinit` (`encoding_context.zig:97`). |
+| `src/dawn/native/CommandEncoder.cpp:1376` | `AcquireResourceUsages` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:64`. |
+| `src/dawn/native/CommandEncoder.cpp:1386` | `AcquireCommands` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:64`. |
+| `src/dawn/native/CommandEncoder.cpp:1390` | `TrackUsedQuerySet` | `CommandBufferResourceUsage.used_query_sets` | `src/command/usage.zig:230` | port | `:208`. |
+| `src/dawn/native/CommandEncoder.cpp:1394` | `AcquireIndirectDrawMetadata` | `Context.finish` | `src/command/encoding_context.zig:352` | merge | With `EncodingContext.h:109`. |
+| `src/dawn/native/CommandEncoder.cpp:1400` | `APIBeginComputePass` | `BeginComputePassCmd` | `src/command/commands.zig:241` | port | `:253`. |
+| `src/dawn/native/CommandEncoder.cpp:1407` | `BeginComputePass` | `Context.exitComputePass`'s sibling | `src/command/encoding_context.zig:309` | port | `:243`. |
+| `src/dawn/native/CommandEncoder.cpp:1460` | `APIBeginRenderPass` | `BeginRenderPassCmd` | `src/command/commands.zig:251` | port | `:263`. |
+| `src/dawn/native/CommandEncoder.cpp:1467` | `BeginRenderPass` | `CommandEncoder.beginRenderPass` | `src/command/command_encoder.zig:241` | port | `:290`. Commit what came before the pass, record the pass's own descriptor on the top-level encoder, then enter the pass (`encoding_context.zig:210` and `:215`). This is the call both acceptance shards record through. |
+| `src/dawn/native/CommandEncoder.cpp:1751` | `APICopyBufferToBuffer` | `CopyBufferToBufferCmd` | `src/command/commands.zig:278` | port | `:285`. |
 | `src/dawn/native/CommandEncoder.cpp:1797` | `InternalCopyBufferToBufferWithAllocatedSize` | — | — | skip | Dawn's split between the API path and the internally-allocated one. The port records a concrete size, so there is no second path. |
-| `src/dawn/native/CommandEncoder.cpp:1845` | `APICopyBufferToTexture` | `CopyBufferToTextureCmd` | `src/command/commands.zig` | port | `:293`. |
-| `src/dawn/native/CommandEncoder.cpp:1956` | `APICopyTextureToBuffer` | `CommandEncoder.copyTextureToBuffer`, `CopyTextureToBufferCmd` | `src/command/command_encoder.zig`, `src/command/commands.zig` | port | `:343` and `:299`. |
-| `src/dawn/native/CommandEncoder.cpp:2022` | `BytesToBlocks` / the public-layout conversion | `blocksPerRow` on `Request` | `src/command/blit_texture_to_buffer.zig` | port | `:388`. §M17's file. |
-| `src/dawn/native/CommandEncoder.cpp:2064` | `APICopyTextureToTexture` | `CopyTextureToTextureCmd` | `src/command/commands.zig` | port | `:305`. |
-| `src/dawn/native/CommandEncoder.cpp:2192` | `APIClearBuffer` | `ClearBufferCmd` | `src/command/commands.zig` | port | `:279`. |
+| `src/dawn/native/CommandEncoder.cpp:1845` | `APICopyBufferToTexture` | `CopyBufferToTextureCmd` | `src/command/commands.zig:286` | port | `:293`. |
+| `src/dawn/native/CommandEncoder.cpp:1956` | `APICopyTextureToBuffer` | `CommandEncoder.copyTextureToBuffer`, `CopyTextureToBufferCmd` | `src/command/command_encoder.zig:344`, `src/command/commands.zig:292` | port | `:343` and `:299`. |
+| `src/dawn/native/CommandEncoder.cpp:2022` | `BytesToBlocks` / the public-layout conversion | `DeriveRequest.blocks_per_row` | `src/command/blit_texture_to_buffer.zig:391` | port | `:388`. §M17's file. |
+| `src/dawn/native/CommandEncoder.cpp:2064` | `APICopyTextureToTexture` | `CopyTextureToTextureCmd` | `src/command/commands.zig:298` | port | `:305`. |
+| `src/dawn/native/CommandEncoder.cpp:2192` | `APIClearBuffer` | `ClearBufferCmd` | `src/command/commands.zig:272` | port | `:279`. |
 | `src/dawn/native/CommandEncoder.cpp:2244` | `APIInjectValidationError` | — | — | skip | Injects an error the application wrote; the port's callers return errors directly, so there is nothing to inject. |
-| `src/dawn/native/CommandEncoder.cpp:2254` | `APIInsertDebugMarker` | `ProgrammableEncoder.insertDebugMarker` | `src/command/programmable_encoder.zig` | port | `:259`. |
-| `src/dawn/native/CommandEncoder.cpp:2267` | `APIPopDebugGroup` | `ProgrammableEncoder.popDebugGroup` | `src/command/programmable_encoder.zig` | port | `:253`. |
-| `src/dawn/native/CommandEncoder.cpp:2284` | `APIPushDebugGroup` | `ProgrammableEncoder.pushDebugGroup` | `src/command/programmable_encoder.zig` | port | `:240`. |
-| `src/dawn/native/CommandEncoder.cpp:2302` | `APIResolveQuerySet` | `query.validateResolve` | `src/command/query.zig` | port | `:128`, plus the destination-usage rule at `:2320`. |
-| `src/dawn/native/CommandEncoder.cpp:1091` | `ValidateQuerySetResolve` | `query.validateResolve` | `src/command/query.zig` | port | Four rules in one function: the first query at or above the set's count, the count above what remains, the offset's 256-byte alignment, and the destination too small. The port writes the second as a subtraction, because that is how upstream writes it (`CommandEncoder.cpp:1100`) — `first_query + query_count` wraps on a large `first_query` and would accept a range the set does not hold. |
-| `src/dawn/native/CommandEncoder.cpp:1096` | the first-query rule | `error.ResolveFirstQueryAboveCount` | `src/command/errors.zig` | port | `:175`. |
-| `src/dawn/native/CommandEncoder.cpp:1101` | the count-above-remaining rule | `error.ResolveQueryCountAboveRemaining` | `src/command/errors.zig` | port | `:179`. |
-| `src/dawn/native/CommandEncoder.cpp:1106` | the destination-offset alignment rule | `error.ResolveDestinationOffsetUnaligned` | `src/command/errors.zig` | port | `:183`. |
-| `src/dawn/native/CommandEncoder.cpp:1116` | the destination-size rule | `error.ResolveDestinationTooSmall` | `src/command/errors.zig` | port | `:189`. |
+| `src/dawn/native/CommandEncoder.cpp:2254` | `APIInsertDebugMarker` | `ProgrammableEncoder.insertDebugMarker` | `src/command/programmable_encoder.zig:267` | port | `:259`. |
+| `src/dawn/native/CommandEncoder.cpp:2267` | `APIPopDebugGroup` | `ProgrammableEncoder.popDebugGroup` | `src/command/programmable_encoder.zig:257` | port | `:253`. |
+| `src/dawn/native/CommandEncoder.cpp:2284` | `APIPushDebugGroup` | `ProgrammableEncoder.pushDebugGroup` | `src/command/programmable_encoder.zig:243` | port | `:240`. |
+| `src/dawn/native/CommandEncoder.cpp:2302` | `APIResolveQuerySet` | `query.validateResolve` | `src/command/query.zig:143` | port | `:128`, plus the destination-usage rule at `:2320`. |
+| `src/dawn/native/CommandEncoder.cpp:1091` | `ValidateQuerySetResolve` | `query.validateResolve` | `src/command/query.zig:143` | port | Four rules in one function: the first query at or above the set's count, the count above what remains, the offset's 256-byte alignment, and the destination too small. The port writes the second as a subtraction, because that is how upstream writes it (`CommandEncoder.cpp:1100`) — `first_query + query_count` wraps on a large `first_query` and would accept a range the set does not hold. |
+| `src/dawn/native/CommandEncoder.cpp:1096` | the first-query rule | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:175`. |
+| `src/dawn/native/CommandEncoder.cpp:1101` | the count-above-remaining rule | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:179`. |
+| `src/dawn/native/CommandEncoder.cpp:1106` | the destination-offset alignment rule | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:183`. |
+| `src/dawn/native/CommandEncoder.cpp:1116` | the destination-size rule | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:189`. |
 | `src/dawn/native/CommandEncoder.cpp:2334` | the timestamp-conversion branch | — | — | skip | The conversion is `native/QueryHelper.{h,cpp}`, and §M19 carries it. `CommandEncoder.cpp:2334-2336` returns before that path for an occlusion set, so the row is not M15's rule either. |
-| `src/dawn/native/CommandEncoder.cpp:2356` | `APIWriteBuffer` | `WriteBufferCmd` | `src/command/commands.zig` | port | `:435`. |
-| `src/dawn/native/CommandEncoder.cpp:2381` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig` | port | `:441`. |
-| `src/dawn/native/CommandEncoder.cpp:2406` | `APIFinish` | `CommandEncoder.finish` | `src/command/command_encoder.zig` | port | `:376`. |
-| `src/dawn/native/CommandEncoder.cpp:2422` | `Finish` | `CommandEncoder.finish` | `src/command/command_encoder.zig` | merge | With the row above; the blocks, the usages and the status leave together, so there is one door out. |
-| `src/dawn/native/CommandEncoder.cpp:2447` | `ValidateFinish` | `Context.ensurePassExited` | `src/command/encoding_context.zig` | merge | Dawn's finish rule is that no pass is open, which is exactly what `ensurePassExited` (`:257`) reports. |
+| `src/dawn/native/CommandEncoder.cpp:2356` | `APIWriteBuffer` | `WriteBufferCmd` | `src/command/commands.zig:429` | port | `:435`. |
+| `src/dawn/native/CommandEncoder.cpp:2381` | `APIWriteTimestamp` | `WriteTimestampCmd` | `src/command/commands.zig:435` | port | `:441`. |
+| `src/dawn/native/CommandEncoder.cpp:2406` | `APIFinish` | `CommandEncoder.finish` | `src/command/command_encoder.zig:555` | port | `:376`. |
+| `src/dawn/native/CommandEncoder.cpp:2422` | `Finish` | `CommandEncoder.finish` | `src/command/command_encoder.zig:555` | merge | With the row above; the blocks, the usages and the status leave together, so there is one door out. |
+| `src/dawn/native/CommandEncoder.cpp:2447` | `ValidateFinish` | `Context.ensurePassExited` | `src/command/encoding_context.zig:329` | merge | Dawn's finish rule is that no pass is open, which is exactly what `ensurePassExited` (`:257`) reports. |
 | `src/dawn/native/CommandEncoder.cpp:2472` | `MakeInternalUsageScope` | — | — | skip | Chromium's internal-usage accounting. There is no Chromium in this port. |
-| `src/dawn/native/CommandEncoder.cpp:413` | `ValidateTextureFormatForTextureToBufferCopyInCompatibilityMode` | `error.CompressedTextureCopy` | `src/command/errors.zig` | port | `:88`. §M16's re-gate names this as restriction 9 and asserts it through the copy. The port keys the rule off the format recorded on the copy, because that is the field a replay reads. |
-| `src/dawn/native/CommandEncoder.cpp:422` | `ValidateSourceTextureFormatForTextureToTextureCopyInCompatibilityMode` | `error.CompressedTextureCopy` | `src/command/errors.zig` | merge | The same rule for the other direction; one error member covers both because the recorded field is the same one. |
-| `src/dawn/native/CommandEncoder.cpp:986` | the occlusion-set type check in `BeginRenderPass` | `error.QuerySetTypeMismatch` | `src/command/errors.zig` | port | `:171`. |
-| `src/dawn/native/CommandEncoder.cpp:1014` | the pixel-local-storage + expand-resolve check in `BeginRenderPass` | `error.AttachmentFormatMismatch` | `src/command/errors.zig` | skip | The port rejects the pair at the interning site instead, so the pass and the pipeline can never hold two states that differ only here. The pass-side comparison is the `RenderEncoderBase.cpp:551` row above. |
+| `src/dawn/native/CommandEncoder.cpp:413` | `ValidateTextureFormatForTextureToBufferCopyInCompatibilityMode` | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:88`. §M16's re-gate names this as restriction 9 and asserts it through the copy. The port keys the rule off the format recorded on the copy, because that is the field a replay reads. |
+| `src/dawn/native/CommandEncoder.cpp:422` | `ValidateSourceTextureFormatForTextureToTextureCopyInCompatibilityMode` | `CommandValidationError` | `src/command/errors.zig:28` | merge | The same rule for the other direction; one error member covers both because the recorded field is the same one. |
+| `src/dawn/native/CommandEncoder.cpp:986` | the occlusion-set type check in `BeginRenderPass` | `CommandValidationError` | `src/command/errors.zig:28` | merge | `:171`. |
+| `src/dawn/native/CommandEncoder.cpp:1014` | the pixel-local-storage + expand-resolve check in `BeginRenderPass` | `CommandValidationError` | `src/command/errors.zig:28` | merge | The port rejects the pair at the interning site instead, so the pass and the pipeline can never hold two states that differ only here. The pass-side comparison is the `RenderEncoderBase.cpp:551` row above. |
 
 ### `src/dawn/native/CommandValidation.cpp` — 19 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/CommandValidation.cpp:130` | `ValidateSyncScopeResourceUsage` | `SyncScopeResourceUsage` invariants | `src/command/usage.zig` | merge | Dawn checks a recorded scope at `finish`. The port records the scope as it is built and never records an invalid one, so there is nothing left to re-check. |
-| `src/dawn/native/CommandValidation.cpp:171` | `ValidateTimestampQuery` | `query.validateDescriptor` | `src/command/query.zig` | port | `:84`. |
-| `src/dawn/native/CommandValidation.cpp:191` | `ValidatePassTimestampWrites` | `TimestampWrites` | `src/command/commands.zig` | port | `:147`. |
-| `src/dawn/native/CommandValidation.cpp:228` | `ValidateWriteBuffer` | `WriteBufferCmd` | `src/command/commands.zig` | port | `:435`. |
-| `src/dawn/native/CommandValidation.cpp:322` | `ValidateCopySizeFitsInBuffer` | `BufferCopy` | `src/command/commands.zig` | port | `:225`. The port records the buffer's size into the payload so the rule needs no engine object. |
-| `src/dawn/native/CommandValidation.cpp:358` | the default `bytesPerRow` derivation | `bytes_per_row_alignment` | `src/command/constants.zig` | port | `:32`. |
-| `src/dawn/native/CommandValidation.cpp:366` | `ValidateLinearTextureData` | `blit_texture_to_buffer.validateRequest` | `src/command/blit_texture_to_buffer.zig` | port | §M17's file. |
-| `src/dawn/native/CommandValidation.cpp:423` | `ValidateTexelCopyBufferInfo` | `BufferCopy` | `src/command/commands.zig` | port | `:225`. |
-| `src/dawn/native/CommandValidation.cpp:440` | `ValidateTexelCopyTextureInfo` | `TextureCopy` | `src/command/commands.zig` | port | `:236`. |
-| `src/dawn/native/CommandValidation.cpp:475` | `ValidateTextureCopyRange` | `TextureCopy.extent`, `block_width`, `block_height` | `src/command/commands.zig` | port | `:243-248`. Dawn reads the block count off the texture; the port records it, because `command` cannot reach the texture object. |
-| `src/dawn/native/CommandValidation.cpp:566` | `ValidateLinearToDepthStencilCopyRestrictions` | `error.CompressedTextureCopy` | `src/command/errors.zig` | merge | One more direction of the compressed-format rule. |
-| `src/dawn/native/CommandValidation.cpp:584` | `ValidateTextureToTextureCopyCommonRestrictions` | `error.CompressedTextureCopy` | `src/command/errors.zig` | merge | With the row above. |
-| `src/dawn/native/CommandValidation.cpp:644` | `ValidateTextureToTextureCopyRestrictions` | `error.CompressedTextureCopy` | `src/command/errors.zig` | merge | With the row above. |
+| `src/dawn/native/CommandValidation.cpp:130` | `ValidateSyncScopeResourceUsage` | `SyncScopeResourceUsage` invariants | `src/command/usage.zig:79` | merge | Dawn checks a recorded scope at `finish`. The port records the scope as it is built and never records an invalid one, so there is nothing left to re-check. |
+| `src/dawn/native/CommandValidation.cpp:171` | `ValidateTimestampQuery` | `query.validateDescriptor` | `src/command/query.zig:96` | port | `:84`. |
+| `src/dawn/native/CommandValidation.cpp:191` | `ValidatePassTimestampWrites` | `TimestampWrites` | `src/command/commands.zig:144` | port | `:147`. |
+| `src/dawn/native/CommandValidation.cpp:228` | `ValidateWriteBuffer` | `WriteBufferCmd` | `src/command/commands.zig:429` | port | `:435`. |
+| `src/dawn/native/CommandValidation.cpp:322` | `ValidateCopySizeFitsInBuffer` | `BufferCopy` | `src/command/commands.zig:213` | port | `:225`. The port records the buffer's size into the payload so the rule needs no engine object. |
+| `src/dawn/native/CommandValidation.cpp:358` | the default `bytesPerRow` derivation | `texture_bytes_per_row_alignment` | `src/command/constants.zig:32` | port | `:32`. |
+| `src/dawn/native/CommandValidation.cpp:366` | `ValidateLinearTextureData` | `resolveCopy` | `src/engine/texture.zig:2258` | merge | The native helper validates linear-copy pitch, offsets, and byte bounds. There is no blit `validateRequest` declaration. |
+| `src/dawn/native/CommandValidation.cpp:423` | `ValidateTexelCopyBufferInfo` | `BufferCopy` | `src/command/commands.zig:213` | port | `:225`. |
+| `src/dawn/native/CommandValidation.cpp:440` | `ValidateTexelCopyTextureInfo` | `TextureCopy` | `src/command/commands.zig:224` | port | `:236`. |
+| `src/dawn/native/CommandValidation.cpp:475` | `ValidateTextureCopyRange` | `TextureCopy.extent`, `block_width`, `block_height` | `src/command/commands.zig:233`, `src/command/commands.zig:235`, `src/command/commands.zig:236` | port | `:243-248`. Dawn reads the block count off the texture; the port records it, because `command` cannot reach the texture object. |
+| `src/dawn/native/CommandValidation.cpp:566` | `ValidateLinearToDepthStencilCopyRestrictions` | `CommandValidationError` | `src/command/errors.zig:28` | merge | One more direction of the compressed-format rule. |
+| `src/dawn/native/CommandValidation.cpp:584` | `ValidateTextureToTextureCopyCommonRestrictions` | `CommandValidationError` | `src/command/errors.zig:28` | merge | With the row above. |
+| `src/dawn/native/CommandValidation.cpp:644` | `ValidateTextureToTextureCopyRestrictions` | `CommandValidationError` | `src/command/errors.zig:28` | merge | With the row above. |
 | `src/dawn/native/CommandValidation.cpp:658` | `ValidateCanUseAs(const TextureBase*)` | — | — | skip | A texture's own usage rule, raised at `createTexture`, which is §M11's. |
 | `src/dawn/native/CommandValidation.cpp:676` | `ValidateCanUseAs(const TextureViewBase*)` | — | — | skip | With the row above. |
 | `src/dawn/native/CommandValidation.cpp:695` | `ValidateCanUseAs(const BufferBase*)` | — | — | skip | §M10's. |
 | `src/dawn/native/CommandValidation.cpp:702` | `ValidateCanUseAsInternal` | — | — | skip | With the row above. |
-| `src/dawn/native/CommandValidation.cpp:721` | `ValidateColorAttachmentBytesPerSample` | `AttachmentState` sample count | `src/command/attachment_state.zig` | port | The port compares two recorded sample counts rather than multiplying against a device limit, so the check is the `AttachmentFormatMismatch` a pipeline raises against a pass. |
-| `src/dawn/native/CommandValidation.cpp:741` | `ValidatePLSInfo` | `AttachmentState.storage_slots`, `constants.Limits` | `src/command/attachment_state.zig`, `src/command/constants.zig` | port | The per-pass storage-attachment ceiling is a device limit, so it is a field of `constants.Limits` (`constants.zig:104`) rather than a constant. |
+| `src/dawn/native/CommandValidation.cpp:721` | `ValidateColorAttachmentBytesPerSample` | `AttachmentState` sample count | `src/command/attachment_state.zig:54` | port | The port compares two recorded sample counts rather than multiplying against a device limit, so the check is the `AttachmentFormatMismatch` a pipeline raises against a pass. |
+| `src/dawn/native/CommandValidation.cpp:741` | `ValidatePLSInfo` | `AttachmentState.storage_attachment_slots`, `Limits` | `src/command/attachment_state.zig:69`, `src/command/constants.zig:93` | port | The per-pass storage-attachment ceiling is a device limit, so it is a field of `constants.Limits` (`constants.zig:104`) rather than a constant. |
 
 ### `src/dawn/native/CommandBuffer.cpp` — 24 rows
 
@@ -6118,16 +6641,28 @@ order, so a reader looking for the rule finds the file it is written in.
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/CommandBuffer.cpp` (all 24) | the `CommandBufferBase` object lifecycle | — | — | skip | The command buffer is the thing M18 replays. §M18 owns the whole file; nothing in M15's front end reads it, because `Context.finish` hands back the blocks and the usages and the caller builds the buffer out of them. |
 
-### The files the milestone skips
+### Skipped files and transferred contracts
 
 | `upstream_file` | `rows` | `reason` |
 | --- | ---: | --- |
 | `native/IndirectDrawValidationEncoder.{h,cpp}` | 7 | 971 lines whose `:101-339` is 239 lines of inline WGSL compiled at run time through Tint. `AGENTS.md` §3.2 forbids a WGSL front end here, and the batches it produced are `getBatches`' empty list (`indirect_draw.zig:154`). |
-| `native/RenderBundle.{h,cpp}` | 16 | A bundle records into its own stream and replays it inside a pass. The stream framing is ported, so the only missing pieces are the bundle object and its replay, which are the back end's. |
-| `native/RenderBundleEncoder.{h,cpp}` | 17 | With the row above. |
+| `native/RenderBundle.{h,cpp}` | 16 | Transferred selected stream-ownership contract. `RenderBundle` (`src/command/render_bundle.zig:228`) owns blocks and usage metadata. `BorrowedIterator` (`src/command/render_bundle.zig:202`) reads without freeing those blocks. Replay uses `Replay.executeBundles` (`src/engine/command_buffer.zig:812`). These source declarations do not close all 16 upstream census rows. |
+| `native/RenderBundleEncoder.{h,cpp}` | 17 | Transferred selected producer contract. `RenderBundleEncoder` (`src/command/render_bundle.zig:273`) records through `RenderEncoderBase`. `RenderBundleEncoder.finish` (`src/command/render_bundle.zig:328`) transfers block and usage ownership. `RenderBundleEncoder.recordFailure` (`src/command/render_bundle.zig:320`) preserves allocation failure if the context was released. Detailed accounting for the 17 upstream census rows remains open. |
 | `native/RenderPassWorkaroundsHelper.{h,cpp}` | 7 | Workarounds are driver decisions, and a driver is §M9's and §M18's. The file has no front-end rule to port. |
 | `native/VisitableMembers.h` | 1 | Dawn's `DAWN_VISITABLE_MEMBERS` macro generates an object-tree walker used by the error tree. The port's arena (`core.ObjectArena`) has its own list and no macro. |
 | `native/QueryHelper.{h,cpp}` | 0 | §M19's. `CommandEncoder.cpp:2337-2338` returns before that path for an occlusion set, so M15 does not reach it either. |
+
+**Bundle failure lifecycle, 2026-10-08.**
+`RenderBundleEncoder.recordFailure` (`src/command/render_bundle.zig:320`) has
+signature `fn recordFailure(self: *RenderBundleEncoder, err: errors.Error) errors.Error`.
+It returns the original error. For `OutOfMemory`, it marks recording failed
+only when `self.context` still exists. An allocation callback can destroy the
+encoder before allocation fails. The helper must not read the released context.
+The regression declaration is `src/command/render_bundle.zig:94`.
+Parent artifact 273 records the dated pre-fix crash: 250/251 tests passed,
+with one crash. Parent artifact 275 passed all 251 root tests in Debug and
+actual ReleaseSafe. This regression passed as test 213/251 in both modes.
+The narrow failure contract does not establish safe successful reentrant encoding.
 
 ### What the shard proves
 
@@ -6190,8 +6725,8 @@ simplify — every row re-gates a symbol an earlier milestone already wrote.
 | 3 | No depth texture use in a shader | `Pipeline.cpp:138-141`, then `:143-147` | `src/pipeline/pipeline.zig:644`, then `:647` | `validateStage` (`:635`) | `error.CompatibilityTextureLoadWithDepthTexture`, `error.CompatibilityDepthTextureWithNonComparisonSampler` | `textureLoad` on a depth image, then a depth image bound to a non-comparison sampler. A comparison sampler is the positive case and is accepted. |
 | 4 | No fine derivatives | `Pipeline.cpp:149-152` | `src/pipeline/pipeline.zig:650` | `validateStage` (`:635`) | `error.CompatibilityFineDerivativeBuiltin` | A fragment stage reporting `dpdxFine`, `dpdyFine` or `fwidthFine`. A fragment stage reporting none is the positive case. |
 | 5 | `depthBiasClamp` not supported | `RenderPipeline.cpp:345-347` | `src/pipeline/pipeline_render.zig:420` | `validateDepthStencil` (`:402`) | `error.CompatibilityDepthBiasClampNonZero` | A depth-stencil state with `depthBiasClamp != 0`. Zero is accepted, and a null state beside an undefined attachment format is not checked at all. |
-| 6 | No cube-array texture views | `Texture.cpp:133`, then `:269-272` | `src/engine/texture.zig:1174` | `validateTextureViewDimensionCompatibility` (`:1146`) | `error.TextureViewCubeArrayCompatibility` | A `cube-array` view of a twelve-layer square texture, so the view is in range and this rule is the only one that can refuse it. |
-| 7 | View format must equal texture format | `Texture.cpp:66-68` | `src/engine/texture.zig:1120` | `validateCanViewTextureAs` (`:1102`) | `error.TextureViewFormatIncompatible` | A `createTextureView` naming a different base format from its texture. The refusal is the base-format rule, not the compatibility rule: see the divergence below. |
+| 6 | No cube-array texture views | `Texture.cpp:133`, then `:269-272` | `src/engine/texture.zig:1175` | `validateTextureViewDimensionCompatibility` (`:1146`) | `error.TextureViewCubeArrayCompatibility` | A `cube-array` view of a twelve-layer square texture, so the view is in range and this rule is the only one that can refuse it. |
+| 7 | View format must equal texture format | `Texture.cpp:66-68` | `src/engine/texture.zig:1121` | `validateCanViewTextureAs` (`:1102`) | `error.TextureViewFormatIncompatible` | A `createTextureView` naming a different base format from its texture. The refusal is the base-format rule, not the compatibility rule: see the divergence below. |
 | 8 | One view per draw | `CommandBufferStateTracker.cpp:395-399` | `src/command/state_tracker.zig:516` | `validateNoDifferentTextureViewsOnSameTexture` (`:509`), reached from `draw` (`render_encoder_base.zig:240`) | `error.ConflictingTextureViews` | One bind group binding two views of one texture, refused at the draw and not at the bind-group record. One view of one texture is the positive case. |
 | 9 | Compressed-format copy rejected | `CommandEncoder.cpp:413-418` | `src/command/command_encoder.zig:348` | `CommandEncoder.copyTextureToBuffer` (`:343`) | `error.CompressedTextureCopy` | `copyTextureToBuffer` on a compressed format, keyed off the recorded wire format. An uncompressed format is the positive case. |
 
@@ -6218,14 +6753,14 @@ port.** Row 7 first. Upstream's compatibility rule (`Texture.cpp:66-68`)
 compares the view format against the texture format and fires only when
 `device->IsCompatibilityMode()` is true; the base-format rule above it
 (`Texture.cpp:61-64`) is the same comparison Dawn runs in both modes. The port
-merged the two: `validateCanViewTextureAs` (`src/engine/texture.zig:1102`) takes
+merged the two: `validateCanViewTextureAs` (`src/engine/texture.zig:1103`) takes
 no compatibility flag, and reaches `error.TextureViewFormatIncompatible` at
 `:1120` from the base-format rule. A core device therefore refuses the same view
 with the same error, which is stricter than Dawn rather than equal to it, and the
 row as the test writes it proves M11's format rule and not this milestone's.
 Upstream reaches its compatibility half at `Texture.cpp:838`, over the declared
 `view_formats` list at creation, so the port site a re-gate would need is the one
-in `validateTextureDescriptor` (`src/engine/texture.zig:885`) and not the one the
+in `validateTextureDescriptor` (`src/engine/texture.zig:886`) and not the one the
 table above names. This is recorded here rather than left as a silent pass: the
 checklist's job is to say which rows are proven and which are not.
 
@@ -6304,13 +6839,13 @@ blit path" gives.
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `src/dawn/native/BlitTextureToBuffer.cpp:961` | `GetOrCreateTextureToBufferPipeline` | — | — | skip | Assembles WGSL per format and view dimension, for thirty-five pairs, then compiles it. `AGENTS.md` §3.2 forbids a WGSL front end in the library. The dispatch arithmetic it feeds is `deriveLayout` at `src/command/blit_texture_to_buffer.zig:403` and `writeParams` at `:523`, and neither needs the shader text. |
-| `src/dawn/native/BlitTextureToBuffer.cpp:1493` | `IsFormatSupportedByTextureToBufferBlit` | `isFormatSupportedByTextureToBufferBlit` | `src/command/blit_texture_to_buffer.zig:129` | port | The hand-maintained list under `TODO(348654098)` at `:1495`: forty `case` arms at `:1497-1536`, none compressed. The port keeps the list exactly and the test sweeps it over the whole `TextureFormat` domain, so a dropped entry is a compile error rather than a silent loss. |
-| `src/dawn/native/BlitTextureToBuffer.cpp:1543` | `BlitTextureToBuffer` | `blitTextureToBuffer` | `src/command/blit_texture_to_buffer.zig:731` | port | The body splits four ways. The destination layout arithmetic at `:1584-1662` is `deriveLayout` at `:403`; the uniform Dawn fills at `:1741-1777` is `writeParams` at `:523`; the destination address the shader computes at `:359-361` is `destinationByteOffset` at `:273`; the two `pack4x8unorm` encoders at `:229-233` and `:257-263` are `pack4x8Unorm` at `:558` and `pack4x8UnormBgra` at `:568`. The dispatch itself, the pipeline and the bind groups, are M18's. |
+| `src/dawn/native/BlitTextureToBuffer.cpp:1493` | `IsFormatSupportedByTextureToBufferBlit` | `isFormatSupportedByTextureToBufferBlit` | `src/command/blit_texture_to_buffer.zig:130` | port | The hand-maintained list under `TODO(348654098)` at `:1495`: forty `case` arms at `:1497-1536`, none compressed. The port keeps the list exactly and the test sweeps it over the whole `TextureFormat` domain, so a dropped entry is a compile error rather than a silent loss. |
+| `src/dawn/native/BlitTextureToBuffer.cpp:1543` | `BlitTextureToBuffer` | `blitTextureToBuffer` | `src/command/blit_texture_to_buffer.zig:732` | port | The body splits four ways. The destination layout arithmetic at `:1584-1662` is `deriveLayout` at `:403`; the uniform Dawn fills at `:1741-1777` is `writeParams` at `:523`; the destination address the shader computes at `:359-361` is `destinationByteOffset` at `:273`; the two `pack4x8unorm` encoders at `:229-233` and `:257-263` are `pack4x8Unorm` at `:558` and `pack4x8UnormBgra` at `:568`. The dispatch itself, the pipeline and the bind groups, are M18's. |
 | `src/dawn/native/BlitBufferToTexture.cpp:214` | `GenerateShaderSource` | — | — | skip | Emits WGSL for the format, from the fourteen unpacker constants at `:106-212`. `AGENTS.md` §3.2. The unpackers the shader would call are ported as the pure byte-level rows below. |
 | `src/dawn/native/BlitBufferToTexture.cpp:284` | `GetOrCreatePipeline` | — | — | skip | Compiles the string above and caches it. With no WGSL front end there is nothing to cache, and `AGENTS.md` §2 says a cache key whose cache is not ported has no reader. |
 | `src/dawn/native/BlitBufferToTexture.cpp:346` | `IsFormatSupportedByBufferToTextureBlit` | `isFormatSupportedByBufferToTextureBlit` | `src/command/blit_buffer_to_texture.zig:79` | port | Fourteen `case` arms at `:350-363`, under the same `TODO(348653642)` at `:347-348`. The test asserts the list is exactly Dawn's fourteen, so the two cannot drift. |
 | `src/dawn/native/BlitBufferToTexture.cpp:370` | `IsBufferToTextureBlitSupported` | `isBufferToTextureBlitSupported` | `src/command/blit_buffer_to_texture.zig:140` | port | Four rejections and one acceptance: the storage usage at `:373-376`, the format at `:378-380`, a 1D destination at `:382-385`, a non-colour aspect at `:387-390`, and the non-zero extent at `:392-393`. The port returns a bool over `SupportRequest` at `:128` and each rejection is a distinct case of `isBufferToTextureBlitSupported`'s caller's error set, named by `test/blit.zig`. |
-| `src/dawn/native/BlitBufferToTexture.cpp:396` | `BlitBufferToTexture` | `blitBufferToTexture` | `src/command/blit_buffer_to_texture.zig:292` | port | The body keeps the per-layer source offset ladder at `:461-464`, the four-`u32` uniform at `:470-476`, and the `pack4x8unorm` unpackers at `:106-212`: `layerOffsets` at `:168`, `writeParams` at `:197`, `unpackRgba8Unorm` at `:250` and `unpack4x8UnormBgra` at `:260`. The viewport and the draw at `:501-509` are M18's. |
+| `src/dawn/native/BlitBufferToTexture.cpp:396` | `BlitBufferToTexture` | `blitBufferToTexture` | `src/command/blit_buffer_to_texture.zig:293` | port | The body keeps the per-layer source offset ladder at `:461-464`, the four-`u32` uniform at `:470-476`, and the `pack4x8unorm` unpackers at `:106-212`: `layerOffsets` at `:168`, `writeParams` at `:197`, `unpackRgba8Unorm` at `:250` and `unpack4x8UnormBgra` at `:260`. The viewport and the draw at `:501-509` are M18's. |
 | `src/dawn/native/BlitColorToColorWithDraw.cpp:62` | `GenerateBlitToColorVS` | — | — | skip | Emits the vertex shader. `AGENTS.md` §3.2. The file is unreachable on Vulkan in any case; see the reachability section. |
 | `src/dawn/native/BlitColorToColorWithDraw.cpp:99` | `GenerateExpandFS` | — | — | skip | Emits the expand fragment shader, for the `ExpandResolveTextureWithDraw` row below. Same two reasons. |
 | `src/dawn/native/BlitColorToColorWithDraw.cpp:131` | `GenerateResolveFS` | `resolveMultisampleColor` | `src/command/blit_color_to_color_with_draw.zig:107` | port | The shader text is a `skip`; the arithmetic in it is a port. The body at `:139-145` sums the samples and divides by the sample count written into the text at `:145`, a plain box average with no weights. The port keeps `sum / f32(sampleCount)` and bounds the count at `max_resolve_sample_count` (`:56`), so an out-of-range count is `error.TooManySamples` rather than a silently wrong average. |
@@ -6332,7 +6867,7 @@ blit path" gives.
 | `src/dawn/native/BlitBufferToDepthStencil.cpp:593` | `BlitStagingBufferToStencil` | — | — | skip | With `BlitStagingBufferToDepth` above. |
 | `src/dawn/native/BlitBufferToDepthStencil.cpp:627` | `BlitBufferToStencil` | — | — | skip | With `BlitBufferToDepth` above: it creates an intermediate `R8Uint` texture. |
 | `src/dawn/native/BlitDepthToDepth.cpp:66` | `GetOrCreateDepthBlitPipeline` | — | — | skip | Compiles the WGSL at `:47-63`. `AGENTS.md` §3.2. The fragment body inside that WGSL is the whole blit and it is the row below. |
-| `src/dawn/native/BlitDepthToDepth.cpp:108` | `BlitDepthToDepth` | `blitDepthToDepth` | `src/command/blit_depth_to_depth.zig:142` | port | The fragment at `:62` is a `textureLoad` returned straight back as `frag_depth`, so every destination value is bit-identical to the source it was read from. The four `DAWN_CHECK`s at `:115-119` become the error set at `:34` rather than an abort: `SourceFormatHasNoDepth`, `DestinationFormatHasNoDepth`, `MultisampledDepth`, `EmptyExtent`. The per-layer pass at `:195-239` is a loop in the port. The caller's gate at `CommandEncoder.cpp:2155-2161` is `gate` at `:86`, with the toggle folded in as a field because a toggle is a device setting and not a property of the copy. |
+| `src/dawn/native/BlitDepthToDepth.cpp:108` | `BlitDepthToDepth` | `blitDepthToDepth` | `src/command/blit_depth_to_depth.zig:143` | port | The fragment at `:62` is a `textureLoad` returned straight back as `frag_depth`, so every destination value is bit-identical to the source it was read from. The four `DAWN_CHECK`s at `:115-119` become the error set at `:34` rather than an abort: `SourceFormatHasNoDepth`, `DestinationFormatHasNoDepth`, `MultisampledDepth`, `EmptyExtent`. The per-layer pass at `:195-239` is a loop in the port. The caller's gate at `CommandEncoder.cpp:2155-2161` is `gate` at `:86`, with the toggle folded in as a field because a toggle is a device setting and not a property of the copy. |
 | `src/dawn/native/ApplyClearColorValueWithDrawHelper.cpp:68` | `GetTextureComponentTypeString` | — | — | skip | Returns a WGSL type name for the shader text below. `AGENTS.md` §3.2. |
 | `src/dawn/native/ApplyClearColorValueWithDrawHelper.cpp:113` | `ConstructFragmentShader` | — | — | skip | Builds the WGSL. Same reason. |
 | `src/dawn/native/ApplyClearColorValueWithDrawHelper.cpp:194` | `GetCachedPipeline` | — | — | skip | A lookup in a pipeline store this milestone does not port. `AGENTS.md` §2. |
@@ -6437,29 +6972,29 @@ a reviewer opens rather than the file to search. Sixty-two of them.
 | `Error` | `src/command/blit_texture_to_buffer.zig:29` | The eight refusals the texture-to-buffer copy can make. Each is named by a case in `test/blit.zig`. |
 | `ChannelOrder` | `src/command/blit_texture_to_buffer.zig:57` | The byte order a four-channel texel reaches the buffer in. Upstream writes it into two shaders; the port names the two so the swap is one value rather than a second copy of the loop. |
 | `Texel` | `src/command/blit_texture_to_buffer.zig:67` | Four channels in `[0, 1]`, the domain `pack4x8unorm` quantises. |
-| `Params` | `src/command/blit_texture_to_buffer.zig:77` | The uniform, byte for byte the struct at `BlitTextureToBuffer.cpp:294-314` and the WGSL at `:319-347`. Upstream asserts no layout, so the `comptime` block at `:98-113` is the assertion the port owes it; `math::Vec3u` is `alignas(16)` at `common/Algebra.h:402`, which is what the four padding arrays reproduce. |
-| `workgroup_size_x` | `src/command/blit_texture_to_buffer.zig:117` | Eight, from `kWorkgroupSizeX` at `BlitTextureToBuffer.cpp:1478`. |
-| `workgroup_size_y` | `src/command/blit_texture_to_buffer.zig:121` | Eight, from `kWorkgroupSizeY`. Upstream forces one for a 1D view at `:1475-1476`; the port has no 1D view and keeps the general case. |
-| `channelOrderFor` | `src/command/blit_texture_to_buffer.zig:178` | `rgba` for `rgba8unorm`, `bgra` for `bgra8unorm`, null for the thirty-eight formats this pack does not lay out. |
-| `bytesPerBlock` | `src/command/blit_texture_to_buffer.zig:197` | Upstream takes the value from `TypedTexelBlockInfo::byteSize` at `:1590` rather than from the format. The allowlist holds no compressed format, so for every format the allowlist accepts the two agree. The three null cases are the `depth24plus` family, whose low bits are undefined (`:1353-1365`). |
-| `outputUnitSize` | `src/command/blit_texture_to_buffer.zig:239` | `max(bytesPerBlock, 4)`, the `outputUnitSize` at `BlitTextureToBuffer.cpp:1474`. A format narrower than a word still has its texels packed into whole `u32` elements. |
-| `packTexelCount` | `src/command/blit_texture_to_buffer.zig:244` | `max(1, 4 / bytesPerBlock)`, `:1747`: how many texels one thread packs. |
-| `shiftFor` | `src/command/blit_texture_to_buffer.zig:251` | `(shaderStartOffset % 4) / bytesPerBlock`, `:1760`. Only the sub-word path reads it, so it stays the arithmetic and not a parameter. |
-| `numU32PerRowNeedsWritingRoundedUp` | `src/command/blit_texture_to_buffer.zig:261` | `(bytesInRow + extraBytes + 3) / 4`, `:1621-1622`. The comment at `:1618-1620` gives the case: a 256-texel `R8Snorm` row needs 64 words at offset zero and 65 at offset one. |
-| `destinationByteOffset` | `src/command/blit_texture_to_buffer.zig:273` | The byte the copy writes at, from the shader's own `dstOffset` at `:359-361`. The shader works in `array<u32>`, so its element index is four times the byte. |
-| `computeRequiredBytesInCopy` | `src/command/blit_texture_to_buffer.zig:296` | `ComputeRequiredBytesInCopy` at `CommandValidation.cpp:295-321` for the uncompressed case. The last row contributes its true length and not its padded one, which for a 4x4 `rgba8unorm` at a 256-byte pitch is `256 * 3 + 16`. |
-| `Layout` | `src/command/blit_texture_to_buffer.zig:344` | Everything the dispatch derives, at `:1584-1662`. Each field is wrong in exactly one way: a pitch off by a row, an offset that is not storage-buffer aligned, a last row counted at its padded length. |
-| `DeriveRequest` | `src/command/blit_texture_to_buffer.zig:382` | What the derivation needs: the copy rectangle in blocks plus the two destination-buffer facts the intermediate decision reads at `:1658-1662`. |
-| `deriveLayout` | `src/command/blit_texture_to_buffer.zig:403` | The derivation itself, `BlitTextureToBuffer.cpp:1584-1662`. |
-| `isFullBufferOverwritten` | `src/command/blit_texture_to_buffer.zig:497` | `IsFullBufferOverwrittenInTextureToBufferCopy` at `CommandBuffer.cpp:335`, the overload `BlitTextureToBuffer` reaches: whether every byte the blit writes is one the copy owns. False for the acceptance copy, which is what takes the intermediate path. |
-| `writeParams` | `src/command/blit_texture_to_buffer.zig:523` | The uniform fill, `:1741-1777`. `srcOrigin` is the copy origin (`:1742-1746`) and `srcExtent` the copy extent (`:1748-1752`); `levelSize` at `:1771-1777` is a cube sample's mip virtual size and is zero here, because the field is present for the layout assertion. |
-| `quantizeUnorm8` | `src/command/blit_texture_to_buffer.zig:552` | `round(255 * clamp(value, 0, 1))`, what WGSL's `pack4x8unorm` applies per channel. |
-| `pack4x8Unorm` | `src/command/blit_texture_to_buffer.zig:558` | The `rgba8unorm` encoder at `:229-233`. Byte zero is red. |
-| `pack4x8UnormBgra` | `src/command/blit_texture_to_buffer.zig:568` | The `bgra8unorm` encoder at `:257-263`. Red and blue are exchanged and nothing else, so the word differs from the row above in bits 0-7 and 16-23. |
-| `Request` | `src/command/blit_texture_to_buffer.zig:576` | What the copy takes: the source subresource's texels and the destination buffer's pitch and offset. |
-| `deriveRequestFor` | `src/command/blit_texture_to_buffer.zig:605` | The one conversion between the public layout in bytes and the internal one in blocks (`CommandEncoder.cpp:2021`), done once and not twice inside the arithmetic. |
-| `sourceByteOffset` | `src/command/blit_texture_to_buffer.zig:654` | The byte a source texel sits at. The blit reads the source as a texture view spanning the whole subresource (`:1796-1805`), so this is a row-major index into that subresource and not into the copy rectangle. |
-| `readChannels` | `src/command/blit_texture_to_buffer.zig:690` | The four channels as the shader's `textureLoad` returns them. A view is a `texture_2d<f32>`, so the driver has already un-swizzled the texel; that is why upstream's `bgra8unorm` encoder puts the swap back with `.bgra`. The port applies the same order on the way in, so the encoder stays upstream's expression. |
+| `Params` | `src/command/blit_texture_to_buffer.zig:78` | The uniform, byte for byte the struct at `BlitTextureToBuffer.cpp:294-314` and the WGSL at `:319-347`. Upstream asserts no layout, so the `comptime` block at `:98-113` is the assertion the port owes it; `math::Vec3u` is `alignas(16)` at `common/Algebra.h:402`, which is what the four padding arrays reproduce. |
+| `workgroup_size_x` | `src/command/blit_texture_to_buffer.zig:118` | Eight, from `kWorkgroupSizeX` at `BlitTextureToBuffer.cpp:1478`. |
+| `workgroup_size_y` | `src/command/blit_texture_to_buffer.zig:122` | Eight, from `kWorkgroupSizeY`. Upstream forces one for a 1D view at `:1475-1476`; the port has no 1D view and keeps the general case. |
+| `channelOrderFor` | `src/command/blit_texture_to_buffer.zig:179` | `rgba` for `rgba8unorm`, `bgra` for `bgra8unorm`, null for the thirty-eight formats this pack does not lay out. |
+| `bytesPerBlock` | `src/command/blit_texture_to_buffer.zig:198` | Upstream takes the value from `TypedTexelBlockInfo::byteSize` at `:1590` rather than from the format. The allowlist holds no compressed format, so for every format the allowlist accepts the two agree. The three null cases are the `depth24plus` family, whose low bits are undefined (`:1353-1365`). |
+| `outputUnitSize` | `src/command/blit_texture_to_buffer.zig:240` | `max(bytesPerBlock, 4)`, the `outputUnitSize` at `BlitTextureToBuffer.cpp:1474`. A format narrower than a word still has its texels packed into whole `u32` elements. |
+| `packTexelCount` | `src/command/blit_texture_to_buffer.zig:245` | `max(1, 4 / bytesPerBlock)`, `:1747`: how many texels one thread packs. |
+| `shiftFor` | `src/command/blit_texture_to_buffer.zig:252` | `(shaderStartOffset % 4) / bytesPerBlock`, `:1760`. Only the sub-word path reads it, so it stays the arithmetic and not a parameter. |
+| `numU32PerRowNeedsWritingRoundedUp` | `src/command/blit_texture_to_buffer.zig:262` | `(bytesInRow + extraBytes + 3) / 4`, `:1621-1622`. The comment at `:1618-1620` gives the case: a 256-texel `R8Snorm` row needs 64 words at offset zero and 65 at offset one. |
+| `destinationByteOffset` | `src/command/blit_texture_to_buffer.zig:274` | The byte the copy writes at, from the shader's own `dstOffset` at `:359-361`. The shader works in `array<u32>`, so its element index is four times the byte. |
+| `computeRequiredBytesInCopy` | `src/command/blit_texture_to_buffer.zig:297` | `ComputeRequiredBytesInCopy` at `CommandValidation.cpp:295-321` for the uncompressed case. The last row contributes its true length and not its padded one, which for a 4x4 `rgba8unorm` at a 256-byte pitch is `256 * 3 + 16`. |
+| `Layout` | `src/command/blit_texture_to_buffer.zig:345` | Everything the dispatch derives, at `:1584-1662`. Each field is wrong in exactly one way: a pitch off by a row, an offset that is not storage-buffer aligned, a last row counted at its padded length. |
+| `DeriveRequest` | `src/command/blit_texture_to_buffer.zig:383` | What the derivation needs: the copy rectangle in blocks plus the two destination-buffer facts the intermediate decision reads at `:1658-1662`. |
+| `deriveLayout` | `src/command/blit_texture_to_buffer.zig:404` | The derivation itself, `BlitTextureToBuffer.cpp:1584-1662`. |
+| `isFullBufferOverwritten` | `src/command/blit_texture_to_buffer.zig:498` | `IsFullBufferOverwrittenInTextureToBufferCopy` at `CommandBuffer.cpp:335`, the overload `BlitTextureToBuffer` reaches: whether every byte the blit writes is one the copy owns. False for the acceptance copy, which is what takes the intermediate path. |
+| `writeParams` | `src/command/blit_texture_to_buffer.zig:524` | The uniform fill, `:1741-1777`. `srcOrigin` is the copy origin (`:1742-1746`) and `srcExtent` the copy extent (`:1748-1752`); `levelSize` at `:1771-1777` is a cube sample's mip virtual size and is zero here, because the field is present for the layout assertion. |
+| `quantizeUnorm8` | `src/command/blit_texture_to_buffer.zig:553` | `round(255 * clamp(value, 0, 1))`, what WGSL's `pack4x8unorm` applies per channel. |
+| `pack4x8Unorm` | `src/command/blit_texture_to_buffer.zig:559` | The `rgba8unorm` encoder at `:229-233`. Byte zero is red. |
+| `pack4x8UnormBgra` | `src/command/blit_texture_to_buffer.zig:569` | The `bgra8unorm` encoder at `:257-263`. Red and blue are exchanged and nothing else, so the word differs from the row above in bits 0-7 and 16-23. |
+| `Request` | `src/command/blit_texture_to_buffer.zig:577` | What the copy takes: the source subresource's texels and the destination buffer's pitch and offset. |
+| `deriveRequestFor` | `src/command/blit_texture_to_buffer.zig:606` | The one conversion between the public layout in bytes and the internal one in blocks (`CommandEncoder.cpp:2021`), done once and not twice inside the arithmetic. |
+| `sourceByteOffset` | `src/command/blit_texture_to_buffer.zig:655` | The byte a source texel sits at. The blit reads the source as a texture view spanning the whole subresource (`:1796-1805`), so this is a row-major index into that subresource and not into the copy rectangle. |
+| `readChannels` | `src/command/blit_texture_to_buffer.zig:691` | The four channels as the shader's `textureLoad` returns them. A view is a `texture_2d<f32>`, so the driver has already un-swizzled the texel; that is why upstream's `bgra8unorm` encoder puts the swap back with `.bgra`. The port applies the same order on the way in, so the encoder stays upstream's expression. |
 | `Error` | `src/command/blit_buffer_to_texture.zig:29` | The nine refusals. Each is named by a case in `test/blit.zig`. |
 | `Params` | `src/command/blit_buffer_to_texture.zig:54` | Four `u32`, byte for byte `BlitBufferToTexture.cpp:470-476`. The `comptime` block at `:61-67` is the layout assertion upstream does not have. |
 | `Texel` | `src/command/blit_buffer_to_texture.zig:71` | Four channels in `[0, 1]`, the domain every unpacker returns. |
@@ -6469,13 +7004,13 @@ a reviewer opens rather than the file to search. Sixty-two of them.
 | `layerOffsets` | `src/command/blit_buffer_to_texture.zig:168` | The ladder, `BlitBufferToTexture.cpp:461-464`: the source offset accumulates `rowsPerImage * bytesPerRow` per layer, then splits into a storage-buffer-aligned binding offset and a shader-visible remainder. |
 | `writeParams` | `src/command/blit_buffer_to_texture.zig:197` | The four `u32` fill, `:470-476`. |
 | `shaderReadByteOffset` | `src/command/blit_buffer_to_texture.zig:218` | The element index the fragment's `unpackData` receives, from `shaderReadOffset` and the position at `:95-103`. |
-| `loadU32` | `src/command/blit_buffer_to_texture.zig:229` | The `loadU32` helper at `:85-88`, bounds-checked because the Zig copy is a caller-supplied slice. |
-| `unpack4x8Unorm` | `src/command/blit_buffer_to_texture.zig:238` | `unpack4x8unorm`, the shared head of the fourteen unpackers at `:106-212`. |
-| `unpackRgba8Unorm` | `src/command/blit_buffer_to_texture.zig:250` | The `rgba8unorm` unpacker, `kUnpackRGBA8Unorm` at `:106-111`. |
-| `unpack4x8UnormBgra` | `src/command/blit_buffer_to_texture.zig:260` | The `bgra8unorm` unpacker, which swaps red and blue on the way in so the encoder on the texture-to-buffer side stays one expression. |
-| `Request` | `src/command/blit_buffer_to_texture.zig:266` | What the copy takes: the source buffer's bytes and the destination's format, dimension, origin and extent. |
-| `writeTexel` | `src/command/blit_buffer_to_texture.zig:365` | The one-texel store, the fragment body at `:95-103`. Private: the loop in `blitBufferToTexture` is its only reader. |
-| `quantizeUnorm8` | `src/command/blit_buffer_to_texture.zig:405` | The same quantisation as the texture-to-buffer side, kept per file because `AGENTS.md` §2 forbids a second convention and two private copies of a one-line pure function are not a convention. |
+| `loadU32` | `src/command/blit_buffer_to_texture.zig:230` | The `loadU32` helper at `:85-88`, bounds-checked because the Zig copy is a caller-supplied slice. |
+| `unpack4x8Unorm` | `src/command/blit_buffer_to_texture.zig:239` | `unpack4x8unorm`, the shared head of the fourteen unpackers at `:106-212`. |
+| `unpackRgba8Unorm` | `src/command/blit_buffer_to_texture.zig:251` | The `rgba8unorm` unpacker, `kUnpackRGBA8Unorm` at `:106-111`. |
+| `unpack4x8UnormBgra` | `src/command/blit_buffer_to_texture.zig:261` | The `bgra8unorm` unpacker, which swaps red and blue on the way in so the encoder on the texture-to-buffer side stays one expression. |
+| `Request` | `src/command/blit_buffer_to_texture.zig:267` | What the copy takes: the source buffer's bytes and the destination's format, dimension, origin and extent. |
+| `writeTexel` | `src/command/blit_buffer_to_texture.zig:366` | The one-texel store, the fragment body at `:95-103`. Private: the loop in `blitBufferToTexture` is its only reader. |
+| `quantizeUnorm8` | `src/command/blit_buffer_to_texture.zig:406` | The same quantisation as the texture-to-buffer side, kept per file because `AGENTS.md` §2 forbids a second convention and two private copies of a one-line pure function are not a convention. |
 | `Error` | `src/command/blit_color_to_color_with_draw.zig:29` | Three refusals: an offset outside `int16_t`, an empty sample list, and a list past `max_resolve_sample_count`. |
 | `ResolveRect` | `src/command/blit_color_to_color_with_draw.zig:43` | The four offsets `PackOffsets` differences, as `RenderPassDescriptorResolveRect`. |
 | `max_resolve_sample_count` | `src/command/blit_color_to_color_with_draw.zig:56` | Eight. Vulkan requires a queue family that supports two or four samples to support eight, so eight is the largest count a resolve meets on this back end. A longer list is refused rather than averaged. |
@@ -6487,8 +7022,8 @@ a reviewer opens rather than the file to search. Sixty-two of them.
 | `hasDepth` | `src/command/blit_depth_to_depth.zig:53` | Whether a format carries a depth aspect, the two `HasDepth()` checks at `:115-116`. |
 | `GateRequest` | `src/command/blit_depth_to_depth.zig:66` | The caller's gate as a value, `CommandEncoder.cpp:2155-2161`, with the toggle as a field: a toggle is a device setting and not a property of the copy. |
 | `gate` | `src/command/blit_depth_to_depth.zig:86` | `CommandEncoder.cpp:2155-2161`. The path exists for a destination subresource the driver will not copy directly, so a full subresource at mip zero and layer zero never reaches it. The aspect is a predicate and not a rejection, because with stencil present the caller still emits a plain copy for the stencil half at `:2166-2172`. |
-| `Request` | `src/command/blit_depth_to_depth.zig:102` | The two slices and the two format and sample-count facts. The depths are the normalised `f32` the shader carries, which is what `texture_2d<f32>` yields and what `frag_depth` stores (`:62`). |
-| `texelCount` | `src/command/blit_depth_to_depth.zig:118` | `width * height * depthOrArrayLayers`, checked. A wrapped count is smaller than the copy and the loop would stop early having reported nothing. |
+| `Request` | `src/command/blit_depth_to_depth.zig:103` | The two slices and the two format and sample-count facts. The depths are the normalised `f32` the shader carries, which is what `texture_2d<f32>` yields and what `frag_depth` stores (`:62`). |
+| `texelCount` | `src/command/blit_depth_to_depth.zig:119` | `width * height * depthOrArrayLayers`, checked. A wrapped count is smaller than the copy and the loop would stop early having reported nothing. |
 | `Error` | `src/command/blit_buffer_to_depth_stencil.zig:33` | Five refusals, the two format checks at `:281-282` plus three the port adds. |
 | `Params` | `src/command/blit_buffer_to_depth_stencil.zig:48` | `BlitRG8ToDepthParams` at `:52-54`, byte for byte the WGSL struct at `:73-75`. Upstream asserts nothing about it. |
 | `StencilParams` | `src/command/blit_buffer_to_depth_stencil.zig:61` | `BlitStencilParams` at `:106-109`. The layout assertion at `:66-72` also pins the bind group layout's `min_binding_size` of four `u32` at `:408`, which is larger than the struct, so a reader can see which of the two it is. |
@@ -6498,9 +7033,14 @@ a reviewer opens rather than the file to search. Sixty-two of them.
 
 #### M18 — command buffer recording into Vulkan
 
-95 rows. `StreamImplVk.cpp` contributes 36 of them and 32 of those are one
-`Write` template; they collapse into one Zig generic and 32 instantiations of
-it. The table lands here with the milestone, before its code.
+95 source rows. `StreamImplVk.cpp` contributes 36 rows, including 32 `Write`
+specializations. Parent artifact 211 verified the selected command replay and
+query paths in Debug and actual ReleaseSafe: 69/69 steps and 250 root tests.
+Cross evidence covers 250 CPU tests on each of three targets. Artifact 216
+passed the native GPU shards with validation layers disabled.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed. This is not full M18 upstream conformance.
+Source references use Dawn `32f77c02294310054a660c393feded4bcb3f203c` at
+`~/.cache/dusk-research/research/dawn`.
 
 **Where the code lands, and one correction to Appendix A4.** Appendix A4 gives
 the Zig module of `vulkan/CommandBufferVk.cpp`, `vulkan/RenderPassCache.cpp`,
@@ -6519,7 +7059,7 @@ the first sentence are one number read twice and neither can drift alone.
 
 | Upstream file | Lines | Rows | Zig path |
 | --- | ---: | ---: | --- |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp` | 2167 | 38 | `src/engine/command_buffer.zig` |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp` | 2167 | 38 | `src/engine/command_buffer.zig`, `src/engine/command_replay_copy.zig`, `src/engine/command_replay_state.zig` |
 | `src/dawn/native/vulkan/StreamImplVk.cpp` | 434 | 36 | `src/engine/stream.zig` |
 | `src/dawn/native/vulkan/RenderPassCache.cpp` | 561 | 12 | `src/engine/render_pass_cache.zig` |
 | `src/dawn/native/vulkan/FramebufferCache.cpp` | 120 | 7 | `src/engine/framebuffer_cache.zig` |
@@ -6539,53 +7079,55 @@ the pass state), the attachment-description holders `RenderPassCache.cpp:52-144`
 and the `pNext` helpers `StreamImplVk.cpp:44-111`. Every member in those three
 regions is keyed by a row below, which is why none of them is a row itself.
 
-**The dynamic-rendering arm is not ported.** `RecordBeginDynamicRenderPass`
-(`:786`) is 140 lines of `VK_KHR_dynamic_rendering` attachment building. M9
-fixes `VulkanRenderPassType`, this milestone claims the render-pass path only,
-and `:930` becomes a comptime error on the other two values rather than a
-runtime branch that silently picks one. The row is `skip`, not deferred: nothing
-else in the port reaches it, and `docs/30-port-design.md` §11.1 requires the
-rejected alternative to say what would change the answer — enabling
-`VK_KHR_dynamic_rendering` in M9 would move this row to `port` and delete
-`render_pass_cache.zig`.
+**Selected render-pass path.** `RecordBeginDynamicRenderPass` (`:786`) remains
+a deliberate skip. Replay uses traditional render-pass and framebuffer caches
+(`src/engine/command_buffer.zig:1451`). This mapping does not implement
+`VK_KHR_dynamic_rendering`. Enabling that path requires matching pipeline
+creation and replay changes, not only a device feature.
 
-**What has landed, and what has not.** Four of the five Zig paths exist:
-`src/engine/recording_context.zig` (2 rows), `src/engine/stream.zig` (35),
-`src/engine/render_pass_cache.zig` (13) and `src/engine/framebuffer_cache.zig`
-(7), 57 rows between them. The fifth, `src/engine/command_buffer.zig`, is not on
-disk, and the 38 rows that name it are the milestone's largest single group.
-That is written down here rather than left for a reader to discover, because the
-`zig_path` column is otherwise a claim about a file nobody can open.
+**One upstream file, three Zig modules.** This is the explicit exception to
+`AGENTS.md` §6's one-file rule. `command_buffer.zig` owns stream traversal,
+pass ordering, resource preparation, and cache calls. Its injected queue,
+recording context, and caches let acceptance tests drive the production path
+through dispatch seams without moving Vulkan into the front end.
+`command_replay_copy.zig` owns copy-region arithmetic and copy recording.
+Separate allocator and dispatch inputs permit overflow, allocation-failure,
+and copy-order tests without constructing a render pass.
+`command_replay_state.zig` owns descriptor and immediate dirty state.
+Its dispatch context permits layout-compatibility and flush-order tests without
+the stream iterator or framebuffer caches. The rows below cite each declaration.
 
-The rows for the four landed files are checkable against those files, and five of
-them do not match what landed; each is corrected in place below. The two
-`FramebufferCacheFuncs` rows merge into the key struct, because `LruCache`
-(`src/pipeline/cache.zig:276`) keys a `std.HashMapUnmanaged` through one
-`KeyContext`, whose `hash` and `eql` are port functions rather than the map's
-derived handling. `RenderPassCreateInfo2` becomes a `skip`, because the only arm
-builds it is the arm `createRenderPassForQuery` does not take. The four `pNext`
-rows become `merge`, because `src/engine/stream.zig:76`-`:82` records that the
-generated optional chain leaves nothing to validate and nothing to walk.
-Where a row names one symbol in a file of many, the `zig_path` column ends in the
-line. The 31 stream-instantiation rows are the one exception: `src/engine/stream.zig`
-declares them as consecutive `pub const` at `:541`-`:597` in the row order below,
-so the column names the file and the order carries the line. Each Zig name is the
-upstream type in snake_case without its `Vk` prefix, because the `Stream(T)` call
-beside it is a value rather than a type and `AGENTS.md` §2 makes a constant name
-snake_case; the `vulkan.` reference keeps the C spelling, and so does the upstream
-column. Three of the 31 spell the extension suffix the house way, `_ext` and
-`_khr`, where the Vulkan header spells it `EXT` and `KHR`.
+**Selected-path evidence, 2026-10-07.** The earlier absent-on-disk and
+unverified disclosures are historical. All three replay modules exist.
+Parent artifact 211 passed 69/69 build steps and 250 root tests in both
+Debug and actual ReleaseSafe, including the native GPU shards.
+Cross run `20261007-211754-709407-22206` passed 250 CPU tests per target.
+Artifact 216 passed native triangle 2/2, query 16/16, and buffer 4/4 with
+validation layers disabled. This verifies selected M18 behavior, not full
+upstream milestone conformance. The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
+`recordCommands` (`src/engine/command_buffer.zig:862`) consumes `encoding.Finished`
+on success and failure. `Queue.submit` (`src/engine/queue.zig:434`) and
+`Queue.wait` (`src/engine/queue.zig:543`) own submission and completion.
 
-**What the acceptance shard reaches.** `test/triangle.zig` is this milestone's
-shard. It discovers a device through `src/engine/vulkan_device.zig`, opens a
-queue through `src/engine/queue.zig`, creates a 2x2 `rgba8unorm` image and a
-host-visible staging buffer, and then goes through the three landed M18 files by
-their public entry points — `RenderPassCache.getRenderPass`,
-`FramebufferCache.getOrCreate` and
-`recording_context.emitBufferBarrierIfNecessary` — before recording one draw
-and one copy, submitting, waiting on the fence and asserting sixteen channel
-values read back. It records its own `cmd_*` calls, because
-`command_buffer.zig` is absent; those calls claim no upstream row.
+**Selected exclusions.** External-texture/Y′CbCr specialization remains omitted.
+`ProgrammablePassState.computeSpecialization`
+(`src/engine/command_replay_state.zig:600`) rejects external layout metadata.
+`ProgrammablePassState.runWithSpecialization`
+(`src/engine/command_replay_state.zig:616`) supports only the selected empty state.
+It does not create specialized descriptors or pipeline variants.
+Experimental bindless resource tables and pixel-local-storage commands remain
+explicitly excluded. Indirect-validation utility batches remain omitted.
+An exhaustive command switch does not establish those capabilities.
+
+**Acceptance evidence, 2026-10-07.** Parent artifact 211 passed the native
+triangle shard. Its original two-color 2x2 readback and blend-constant variant
+use production front-end encoding, replay, submission, and fence completion.
+Both assert channels and untouched staging padding. `test/command_replay.zig`
+adds CPU seam acceptance through the same production replay.
+Artifact 216 passed the zero-layer native run: triangle 2/2, query 16/16,
+buffer 4/4, and 10/10 build steps. Loader logs showed no inserted
+`VK_LAYER_KHRONOS_validation`. This is native GPU evidence only.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
 
 | Upstream path:line | Upstream symbol | Zig symbol | Zig path | Decision | Note |
 | --- | --- | --- | --- | --- | --- |
@@ -6604,10 +7146,10 @@ values read back. It records its own `cmd_*` calls, because
 | `src/dawn/native/vulkan/RenderPassCache.cpp:359` | `RenderPassCacheQuery::SetColor` | `RenderPassCacheQuery.setColor` | `src/engine/render_pass_cache.zig:108` | port | Declared at `RenderPassCache.h:56`. `expand_resolve_mask` is set from `loadOp == ExpandResolveTexture` (`:370`) and `render_to_single_sample_mask` from the last argument; a sparse key is only readable if both masks stay in step with `color_mask`. |
 | `src/dawn/native/vulkan/RenderPassCache.cpp:374` | `RenderPassCacheQuery::SetDepthStencil` | `RenderPassCacheQuery.setDepthStencil` | `src/engine/render_pass_cache.zig:130` | port | Declared at `RenderPassCache.h:62`. Sets `has_depth_stencil = true`, and that one flag is what the hash (`:507`) and the equality test (`:546`) gate every other depth field on. |
 | `src/dawn/native/vulkan/RenderPassCache.cpp:391` | `RenderPassCacheQuery::SetSampleCount` | `RenderPassCacheQuery.setSampleCount` | `src/engine/render_pass_cache.zig:142` | port | Declared at `RenderPassCache.h:69`. |
-| `src/dawn/native/vulkan/RenderPassCache.cpp:397` | `RenderPassCache::RenderPassCache` | `RenderPassCache.init` | `src/engine/render_pass_cache.zig:516` | simplify | A one-line ctor; the port inits `next_render_pass_id` to 1 (`RenderPassCache.h:124`) in the same struct literal. |
-| `src/dawn/native/vulkan/RenderPassCache.cpp:399` | `RenderPassCache::~RenderPassCache` | `RenderPassCache.deinit` | `src/engine/render_pass_cache.zig:532` | port | Every `VkRenderPass` destroyed under the mutex, then the map cleared. |
-| `src/dawn/native/vulkan/RenderPassCache.cpp:408` | `RenderPassCache::GetRenderPass` | `RenderPassCache.getRenderPass` | `src/engine/render_pass_cache.zig:564` | port | Lock, look up, and on a miss create then `emplace` (`:410-419`). The `uniqueId` is stamped inside the create (`:425`), so a pass that fails to create never consumes an id. |
-| `src/dawn/native/vulkan/RenderPassCache.cpp:422` | `RenderPassCache::CreateRenderPassForQuery` | `RenderPassCache.createRenderPassForQuery` | `src/engine/render_pass_cache.zig:586` | split | `nextRenderPassId++` then one arm per `VulkanRenderPassType`. The `CreateRenderPass` arm (`:468-483`) is the port's; `CreateRenderPass2` (`:428`) and `DynamicRendering` (`:484`, `DAWN_UNREACHABLE`) are not built at all, which is what makes `RenderPassCreateInfo2` above a `skip`. |
+| `src/dawn/native/vulkan/RenderPassCache.cpp:397` | `RenderPassCache::RenderPassCache` | `RenderPassCache.init` | `src/engine/render_pass_cache.zig:533` | simplify | Initializes the map and monotonic ID counter in one struct literal. |
+| `src/dawn/native/vulkan/RenderPassCache.cpp:399` | `RenderPassCache::~RenderPassCache` | `RenderPassCache.deinit`, `destroyEveryPass` | `src/engine/render_pass_cache.zig:549,558` | split | Destroys every inserted VkRenderPass under the cache mutex, then frees the map. |
+| `src/dawn/native/vulkan/RenderPassCache.cpp:408` | `RenderPassCache::GetRenderPass` | `RenderPassCache.getRenderPass` | `src/engine/render_pass_cache.zig:583` | simplify | Locks, looks up, creates, and inserts. Dusk's fallible insertion adds an errdefer that destroys the created-but-uninserted handle at `:595`. Real native fail-N tests check create/destroy balance. |
+| `src/dawn/native/vulkan/RenderPassCache.cpp:422` | `RenderPassCache::CreateRenderPassForQuery` | `RenderPassCache.createRenderPassForQuery` | `src/engine/render_pass_cache.zig:607` | split | Only the CreateRenderPass arm at `:468-483` is implemented. CreateRenderPass2 and DynamicRendering are not claimed. The ID counter advances before the native call, so failed calls or insertion can leave gaps. |
 | `src/dawn/native/vulkan/RenderPassCache.cpp:496` | `RenderPassCache::CacheFuncs::operator()(query)` | `RenderPassCacheQuery.hash` | `src/engine/render_pass_cache.zig:152` | split | `Hash` and `HashCombine` become the key hash `CacheContext` (`:449`) passes to the map; the field order at `:497-513` is the contract. Unlike the framebuffer key this one keeps a hand-written hash, because the key holds `undefined_` in every slot no setter touched and hashing those would put uninitialised data into a map lookup. |
 | `src/dawn/native/vulkan/RenderPassCache.cpp:517` | `RenderPassCache::CacheFuncs::operator()(a, b)` | `RenderPassCacheQuery.eql` | `src/engine/render_pass_cache.zig:185` | port | The seven-step field comparison at `:519-556`. The comment at `:494` warns this order is mirrored in `StreamImplVk.cpp`; the Zig key is a struct, so there is no second copy of the order to keep in step, and the one that does serialise it is `writeTo` (`:218`). |
 | `src/dawn/native/vulkan/StreamImplVk.cpp:45` | `detail::ValidatePnextImpl<VK_STRUCT_TYPES...>` | `Stream(T)` | `src/engine/stream.zig:83` | merge | The landed file has no `validatePnext`, and the reason is the note at `src/engine/stream.zig:76`-`:82`: in Zig the chain is the generated optional chain of `src/api/chained.zig`, so there is no chain to validate — every struct is one contiguous block and an unset field is simply absent. Also absorbs the `ToVkBaseOutStructure` at `:85`, whose only body is a `static_assert` on the `sType` and `pNext` offsets. |
@@ -6645,53 +7187,53 @@ values read back. It records its own `cmd_*` calls, because
 | `src/dawn/native/vulkan/StreamImplVk.cpp:376` | `Stream<VkPipelineRobustnessCreateInfo>::Write` | `pipeline_robustness_create_info` | `src/engine/stream.zig` | merge | `vertexInputs`, `images`, `storageBuffers`, `uniformBuffers` (`:379`), the four behaviours and not two: the row exists because the graphics pipeline chains it at `:418`. |
 | `src/dawn/native/vulkan/StreamImplVk.cpp:384` | `Stream<vulkan::RenderPassCacheQuery>::Write` | `RenderPassCacheQuery.writeTo` | `src/engine/render_pass_cache.zig:219` | merge | `colorMask.to_ulong()`, `resolveTargetMask.to_ulong()`, `sampleCount`, then the per-attachment fields and the depth-stencil block (`:386-400`). The only row that is not a `vulkan.zig` type, so it is the one instantiation that is a method on the key rather than a `Stream(T)` beside the other 31. It is not a `Step` list because the key holds `undefined_` in every slot no setter touched, and serialising them all would put uninitialised data into a key; the sparse walk is why (`src/engine/stream.zig:69`-`:74`). |
 | `src/dawn/native/vulkan/StreamImplVk.cpp:404` | `Stream<VkGraphicsPipelineCreateInfo>::Write` | `graphics_pipeline_create_info` | `src/engine/stream.zig` | merge | `flags`, the `pStages` run, then `pVertexInputState`, `pInputAssemblyState`, `pTessellationState`, `pViewportState`, `pRasterizationState`, `pMultisampleState`, `pDepthStencilState`, `pColorBlendState`, `pDynamicState`, `subpass` (`:415-417`). `layout`, `renderPass` and `basePipelineHandle` are absent for the reason the comment at `:410-414` gives, and those three pointers are the only reason a port that serialised them would key a cache on an address. |
-| `src/dawn/native/vulkan/StreamImplVk.cpp:422` | `Stream<VkPipelineRenderingCreateInfoKHR>::Write` | `pipeline_rendering_create_info_khr` | `src/engine/stream.zig` | merge | `viewMask`, `colorAttachmentCount`, `pColorAttachmentFormats`, `depthAttachmentFormat`, `stencilAttachmentFormat` (`:424`). Reached only from the skipped dynamic-rendering row; kept because M14's cache key serialises it. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:77` | `VulkanIndexType` | `vulkanIndexType` | `src/engine/command_buffer.zig` | port | `switch` over `wgpu::IndexFormat` with an `unreachable` on a value the enum cannot hold. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:89` | `ComputePerArrayLayerBufferImageCopyRegions` | `computePerArrayLayerBufferImageCopyRegions` | `src/engine/command_buffer.zig` | port | One region per array layer, `bytesPerImage` from the block info (`:94-95`). Allocates, so it takes the allocator and returns `error.OutOfMemory`. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:116` | `HasSameTextureCopyExtent` | `hasSameTextureCopyExtent` | `src/engine/command_buffer.zig` | port | Compares the two clamped extents; decides whether a blit may take the copy path. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:126` | `ComputeImageCopyRegion` | `computeImageCopyRegion` | `src/engine/command_buffer.zig` | port | Builds the `VkImageCopy`, including the `e3D` branch at `:143` that keeps a 3D source 3D and squares it otherwise. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:198` | `GetAlignedRenderArea(VkExtent2D, BeginRenderPassCmd*)` | `alignedRenderArea` | `src/engine/command_buffer.zig` | port | `forceFullRenderArea` returns the whole target (`:201-204`); otherwise each axis is aligned up and then clamped to the pass size (`:214-217`, `:229-230`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:240` | `GetAlignedRenderArea(Device*, VkRenderPass, BeginRenderPassCmd*)` | `alignedRenderArea` | `src/engine/command_buffer.zig` | merge | Same body; the granularity arrives from `GetRenderAreaGranularity` (`:243`), so the port passes it in and keeps one function. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:251` | `DescriptorSetTracker::AreLayoutsCompatible` | `DescriptorSetTracker.areLayoutsCompatible` | `src/engine/command_buffer.zig` | port | The pipeline layout and the immediate size must both be unchanged, or every group is dirty (`:252-256`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:259` | `DescriptorSetTracker::DirtyAll` | `DescriptorSetTracker.dirtyAll` | `src/engine/command_buffer.zig` | port | Sets both dirty sets and clears the last resource table (`:260-262`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:266` | `DescriptorSetTracker::OnSetPipeline` | `DescriptorSetTracker.onSetPipeline` | `src/engine/command_buffer.zig` | port | Records the `VkPipelineLayout`, whether the layout uses a resource table, and whether framebuffer fetch is on. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:277` | `DescriptorSetTracker::SetFramebufferFetchDescriptorSet` | `DescriptorSetTracker.setFramebufferFetchDescriptorSet` | `src/engine/command_buffer.zig` | port | One setter. Framebuffer fetch itself is M17's; this milestone records the set and never fills it, so the replay's `start_of_bind_groups` stays at 0. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:281` | `DescriptorSetTracker::SetResourceTable` | `DescriptorSetTracker.setResourceTable` | `src/engine/command_buffer.zig` | port | One setter; the resource table is M12's. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:283` | `DescriptorSetTracker::Apply(vk, commandBuffer, bindPoint)` | `DescriptorSetTracker.apply` | `src/engine/command_buffer.zig` | port | The three-argument overload forwards to the next row. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:291` | `DescriptorSetTracker::Apply<F>(...)` | `DescriptorSetTracker.apply` | `src/engine/command_buffer.zig` | merge | The real body: `startOfBindGroups` shifts by one for framebuffer fetch and again for a resource table (`:322-343`), then one `vkCmdBindDescriptorSets` per dirty group (`:345-347`). The Zig function takes a `?*const DescriptorSet` slice instead of a callback. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:383` | `RenderImmediatesTracker::SetClampFragDepth` | `ImmediatesTracker.setClampFragDepth` | `src/engine/command_buffer.zig` | port | Records the clamp, which `RecordRenderPass` sets to `(0, 1)` at `:1791` inside the pass. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:399` | `ImmediateTracker::DirtyAll` | `ImmediatesTracker.dirtyAll` | `src/engine/command_buffer.zig` | port | Sets the dirty mask; the port's is a `u64` over `kMaxImmediateCount`. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:401` | `ImmediateTracker::Apply(vk, commandBuffer)` | `ImmediatesTracker.apply` | `src/engine/command_buffer.zig` | port | The two-argument overload; asserts a pipeline is applied (`:402`) and forwards. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:407` | `ImmediateTracker::Apply(vk, commandBuffer, layout, mask)` | `ImmediatesTracker.apply` | `src/engine/command_buffer.zig` | merge | One `vkCmdPushConstants` per contiguous dirty range intersect the pipeline's immediate mask (`:411-414`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:431` | `PrepareResourcesForSyncScope` | `prepareResourcesForSyncScope` | `src/engine/command_buffer.zig` | port | Resource-table writes first (`:438-440`), then buffers (`:463-486`), then textures (`:501-525`); at most one image barrier call and two buffer barrier calls (`:528-537`). The texture loop skips `EnsureSubresourceContentInitialized` when the usage has no non-render-attachment bit (`:513-515`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:544` | `ResetUsedQuerySetsOnRenderPass` | `resetUsedQuerySetsOnRenderPass` | `src/engine/command_buffer.zig` | port | Emits `vkCmdResetQueryPool` for every used index, and only outside a render pass (`:568-571`). The reset must precede `vkCmdBeginRenderPass`, which is why `RecordCommands` calls it at `:1145-1148` before the pass loop. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:558` | `RecordWriteTimestampCmd` | `recordWriteTimestampCmd` | `src/engine/command_buffer.zig` | port | `RecordComputePass:1567` and `RecordRenderPass:1740` both call it at pass begin. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:577` | `RecordResolveQuerySetCmd` | `recordResolveQuerySetCmd` | `src/engine/command_buffer.zig` | port | The `ResolveQuerySet` arm of the stream. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:599` | `ToVkClearValue` | `toVkClearValue` | `src/engine/command_buffer.zig` | port | Three arms over `TextureComponentType` (`:602`, `:607`, `:613`). `rgba8unorm` is the `Float` arm, so the 2x2 clear is four `f32`, and `test/triangle.zig` clears with `(0, 0, 1, 1)` and tints with `(1, 0, 0, 1)`, which is what makes its two rows tellable apart: row zero reads back `255`, `0`, `0`, `255` and row one reads back `0`, `0`, `255`, `255`. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:631` | `ProgrammablePassState::OnSetPipeline` | `ProgrammablePassState.onSetPipeline` | `src/engine/command_buffer.zig` | port | Records the pipeline and forwards to both trackers (`:632-634`). No Vulkan call happens here; the call is in `syncAndRun`. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:639` | `ProgrammablePassState::SyncAndRun<F>` | `ProgrammablePassState.syncAndRun` | `src/engine/command_buffer.zig` | split | The flush the whole triangle turns on: bind pipeline (`:647`), apply dynamic state (`:648`), apply descriptor sets (`:652`), apply immediates (`:653`), then the caller's operation. The Zig function takes a `?*const Operation` because Zig has no closure type, and the `Draw` arm passes the `vkCmdDraw` argument block. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:660` | `ProgrammablePassState::ComputeSpecializationBaseOnState` | `ProgrammablePassState.computeSpecialization` | `src/engine/command_buffer.zig` | port | Collects the static samplers external textures need. M17's feature; this milestone records the function and returns an empty specialization, with the comment saying which row would fill it. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:720` | `ProgrammablePassState::RunWithSpecialization<F>` | `ProgrammablePassState.runWithSpecialization` | `src/engine/command_buffer.zig` | port | Reallocates descriptor sets against the specialised layout and dirties everything (`:722-724`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:762` | `ProgrammablePassState::DirtyAll` | `ProgrammablePassState.dirtyAll` | `src/engine/command_buffer.zig` | port | Dirs both trackers and clears the applied pipeline (`:763-765`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:786` | `RecordBeginDynamicRenderPass` | — | — | skip | The `VK_KHR_dynamic_rendering` path, 140 lines. Not claimed: see the note above on the arm. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:927` | `RecordBeginRenderPass` | `recordBeginRenderPass` | `src/engine/command_buffer.zig` | split | Becomes `buildRenderPassCacheQuery`, `buildFramebufferCacheQuery`, `alignedRenderArea` and `recordBeginRenderPass`, in that order. The three caches calls are `:963`, `:1008` and `:1048`; `clearValueCount` and `pClearValues` come from the framebuffer query (`:1041-1042`). The `ExpandResolveTexture` arm at `:1044-1046` is M17's and is not claimed. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1054` | `RecordEndRenderPass` | `recordEndRenderPass` | `src/engine/command_buffer.zig` | split | One function: `vkCmdEndRenderPass` (`:1060`). The dynamic-rendering arm at `:1058` disappears with its begin. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1065` | `CommandBuffer::Create` | — | — | skip | `AcquireRef(new CommandBuffer(...))`. `Device.create` (`src/core/device.zig:61`) is the only constructor in the port, and it takes the arena allocator. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1070` | `CommandBuffer::CommandBuffer` | — | — | skip | The ctor only forwards to the base. A Zig struct literal is the whole body. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1073` | `CommandBuffer::RecordCopyImageWithTemporaryBuffer` | `recordCopyImageWithTemporaryBuffer` | `src/engine/command_buffer.zig` | port | M17 owns the helper; this milestone records the row and delegates, because the triangle copies texture to buffer and never goes through it. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1132` | `CommandBuffer::RecordCommands` | `CommandBuffer.recordCommands` | `src/engine/command_buffer.zig` | split | The largest split in the port, which `docs/40-plan.md` §3.1 names as such. The `while (mCommands.NextCommandId(&type))` loop (`:1160`) becomes a `switch (tag)` over `command.Tag` whose `default` arm is `unreachable` with the count of modelled tags named, so an unmodelled command is a compile error and not a silent skip. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1561` | `CommandBuffer::RecordComputePass` | `CommandBuffer.recordComputePass` | `src/engine/command_buffer.zig` | split | Its own iterator over the same stream (`:1580`), so it is its own function and not a mode of `recordRenderPass`. |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1727` | `CommandBuffer::RecordRenderPass` | `CommandBuffer.recordRenderPass` | `src/engine/command_buffer.zig` | split | Begins the pass, sets the default dynamic state (`:1760-1791`), then runs its own iterator (`:2024`); every pass-internal command reaches `EncodeRenderBundleCommand` through the `default` arm (`:2156-2157`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:1797` | `EncodeRenderBundleCommand` | `encodeBundleCommand` | `src/engine/command_buffer.zig` | split | A lambda in Dawn, one function in Zig, driven both by `ExecuteBundles` (`:2119`) and by the `default` arm (`:2157`). |
-| `src/dawn/native/vulkan/CommandBufferVk.cpp:2111` | `case Command::ExecuteBundles` | `executeBundles` | `src/engine/command_buffer.zig` | split | A `case` arm in Dawn, a function in Zig: it reads the bundle list, opens a fresh iterator per bundle (`:2118`) and runs the same `encodeBundleCommand`. |
+| `src/dawn/native/vulkan/StreamImplVk.cpp:422` | `Stream<VkPipelineRenderingCreateInfoKHR>::Write` | `pipeline_rendering_create_info_khr` | `src/engine/stream.zig` | merge | The pure writer remains a representation helper. The selected traditional-pass pipeline cache does not consume dynamic-rendering metadata. This row does not claim a dynamic-rendering runtime path. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:77` | `VulkanIndexType` | `vulkanIndexType` | `src/engine/command_replay_copy.zig:291` | port | Maps both index widths. Undefined input returns an error. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:89` | `ComputePerArrayLayerBufferImageCopyRegions` | `computePerArrayLayerBufferImageCopyRegions` | `src/engine/command_replay_copy.zig:395` | port | Allocator-injected per-layer regions preserve row pitch and layer offsets. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:116` | `HasSameTextureCopyExtent` | `hasSameTextureCopyExtent` | `src/engine/command_replay_copy.zig:314` | port | Compares native extents before selecting direct image copy. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:126` | `ComputeImageCopyRegion` | `computeImageCopyRegion` | `src/engine/command_replay_copy.zig:353` | port | Separates volume depth from array layers. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:198` | `GetAlignedRenderArea(VkExtent2D, BeginRenderPassCmd*)` | `alignedRenderArea` | `src/engine/command_buffer.zig:181` | merge | Pure extent alignment and target clamp. Shares the next row's implementation. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:240` | `GetAlignedRenderArea(Device*, VkRenderPass, BeginRenderPassCmd*)` | `alignedRenderArea`, `recordBeginRenderPass` | `src/engine/command_buffer.zig:181`, `src/engine/command_buffer.zig:1451` | merge | The caller obtains Vulkan granularity. The pure helper accepts it explicitly. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:251` | `DescriptorSetTracker::AreLayoutsCompatible` | `DescriptorSetTracker.areLayoutsCompatible` | `src/engine/command_replay_state.zig:357` | simplify | Uses structural group compatibility and immediate size/stages, not handle identity alone. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:259` | `DescriptorSetTracker::DirtyAll` | `DescriptorSetTracker.dirtyAll` | `src/engine/command_replay_state.zig:369` | port | Dirties groups and the reserved framebuffer-fetch set. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:266` | `DescriptorSetTracker::OnSetPipeline` | `DescriptorSetTracker.onSetPipeline` | `src/engine/command_replay_state.zig:351` | port | Checks pipeline metadata and compatibility before dirty-state changes. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:277` | `DescriptorSetTracker::SetFramebufferFetchDescriptorSet` | `DescriptorSetTracker.setFramebufferFetchDescriptorSet` | `src/engine/command_replay_state.zig:375` | port | Stores a reserved set. This does not implement the producer for framebuffer fetch. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:281` | `DescriptorSetTracker::SetResourceTable` | `DescriptorSetTracker.setResourceTable` | `src/engine/command_replay_state.zig:385` | skip | Declaration returns `UnsupportedResourceTable`. Experimental bindless tables are excluded, not implemented. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:283` | `DescriptorSetTracker::Apply(vk, commandBuffer, bindPoint)` | `DescriptorSetTracker.apply` | `src/engine/command_replay_state.zig:408` | merge | Both overloads become one dispatch-context function. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:291` | `DescriptorSetTracker::Apply<F>(...)` | `DescriptorSetTracker.apply` | `src/engine/command_replay_state.zig:408` | merge | Binds dirty groups with counted offsets and the optional reserved set. No resource-table set is supported. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:383` | `RenderImmediatesTracker::SetClampFragDepth` | `ImmediatesTracker.setClampFragDepth` | `src/engine/command_replay_state.zig:479` | port | Updates the tracked depth-clamp bytes. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:399` | `ImmediateTracker::DirtyAll` | `ImmediatesTracker.dirtyAll` | `src/engine/command_replay_state.zig:503` | port | Dirties the immediate mask. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:401` | `ImmediateTracker::Apply(vk, commandBuffer)` | `ImmediatesTracker.apply` | `src/engine/command_replay_state.zig:507` | merge | Both overloads use explicit layout and mask parameters. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:407` | `ImmediateTracker::Apply(vk, commandBuffer, layout, mask)` | `ImmediatesTracker.apply` | `src/engine/command_replay_state.zig:507` | merge | Pushes contiguous dirty ranges through injected dispatch. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:431` | `PrepareResourcesForSyncScope` | `prepareResourcesForSyncScope` | `src/engine/command_buffer.zig:1010` | simplify | Prepares buffers and textures with merged barrier batches. Resource tables remain excluded. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:544` | `ResetUsedQuerySetsOnRenderPass` | `resetUsedQuerySetsOnRenderPass` | `src/engine/command_buffer.zig:1190` | port | Resets the pass bitmap before render-pass begin. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:558` | `RecordWriteTimestampCmd` | `recordWriteTimestampCmd` | `src/engine/command_buffer.zig:1712` | port | Delegates the pool write to the query backend. Subsequent timestamp conversion uses the separately mapped M19 helper. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:577` | `RecordResolveQuerySetCmd` | `recordResolveQuerySetCmd` | `src/engine/command_buffer.zig:1729` | simplify | Timestamp sets enter `native_timestamps.resolveTimestamps` at `command_buffer.zig:1753`. Other sets retain raw available-range copy and unavailable-slot zero fill. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:599` | `ToVkClearValue` | `toVkClearValue` | `src/engine/command_buffer.zig:1276` | port | Converts float, signed, and unsigned component values from canonical format metadata. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:631` | `ProgrammablePassState::OnSetPipeline` | `ProgrammablePassState.onSetPipeline` | `src/engine/command_replay_state.zig:555` | port | Checks pipeline kind and updates descriptor/immediate state. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:639` | `ProgrammablePassState::SyncAndRun<F>` | `ProgrammablePassState.syncAndRun`, `Replay.syncRender` | `src/engine/command_replay_state.zig:568`, `src/engine/command_buffer.zig:796` | split | Tracker flush is separate from command emission. Render/compute command arms issue the operation without a closure. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:660` | `ProgrammablePassState::ComputeSpecializationBaseOnState` | `ProgrammablePassState.computeSpecialization` | `src/engine/command_replay_state.zig:600` | skip | External-texture specialization is excluded. The declaration rejects external inputs and only returns the selected empty state. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:720` | `ProgrammablePassState::RunWithSpecialization<F>` | `ProgrammablePassState.runWithSpecialization` | `src/engine/command_replay_state.zig:616` | skip | Empty-state flush exists. Specialized descriptors and pipeline variants do not. External inputs return `UnsupportedSpecialization`. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:762` | `ProgrammablePassState::DirtyAll` | `ProgrammablePassState.dirtyAll` | `src/engine/command_replay_state.zig:594` | port | Dirties both trackers and clears applied-pipeline state. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:786` | `RecordBeginDynamicRenderPass` | — | — | skip | Deliberate traditional-render-pass selection. No dynamic-rendering implementation is claimed. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:927` | `RecordBeginRenderPass` | `buildRenderPassCacheQuery`, `buildFramebufferCacheQuery`, `recordBeginRenderPass` | `src/engine/command_buffer.zig:1302`, `src/engine/command_buffer.zig:1373`, `src/engine/command_buffer.zig:1451` | split | Separate key construction from cache/dispatch calls for deterministic tests. Expand-resolve utility drawing remains excluded. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1054` | `RecordEndRenderPass` | `recordEndRenderPass` | `src/engine/command_buffer.zig:1533` | simplify | Ends the selected traditional pass. No dynamic-rendering arm remains. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1065` | `CommandBuffer::Create` | — | — | skip | No second command-buffer object is allocated. Replay consumes the existing front-end `Finished` owner. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1070` | `CommandBuffer::CommandBuffer` | — | — | skip | Zig struct initialization replaces the forwarding constructor. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1073` | `CommandBuffer::RecordCopyImageWithTemporaryBuffer` | `recordCopyImageWithTemporaryBuffer` | `src/engine/command_replay_copy.zig:725` | port | Records image-to-buffer and buffer-to-image copies. The queue retains temporary storage until serial completion. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1132` | `CommandBuffer::RecordCommands` | `recordCommands` | `src/engine/command_buffer.zig:862` | split | Exhaustive top-level dispatch delegates copy/state work to the modules described above. Consumes `Finished`, checks metadata, and poisons recording on errors. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1561` | `CommandBuffer::RecordComputePass` | `Replay.recordComputePass` | `src/engine/command_buffer.zig:364` | split | Separate compute walk checks per-dispatch usage without render-cache dependencies. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1727` | `CommandBuffer::RecordRenderPass` | `Replay.recordRenderPass` | `src/engine/command_buffer.zig:448` | split | Separate render walk owns default dynamic state and attachment/query ordering. Pixel-local-storage commands are excluded. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:1797` | `EncodeRenderBundleCommand` | `Replay.encodeBundleCommand` | `src/engine/command_buffer.zig:544` | split | One helper serves inline render commands and borrowed bundle streams. |
+| `src/dawn/native/vulkan/CommandBufferVk.cpp:2111` | `case Command::ExecuteBundles` | `Replay.executeBundles` | `src/engine/command_buffer.zig:812` | split | Opens a fresh iterator for each borrowed bundle. Repeated replay does not consume the bundle. Transfers internal depth-clamp bytes and shader stages through `ImmediatesTracker.clampFragDepthState` / `restoreClampFragDepth`, not the user-only `set` range. Caller programmable, vertex, and index state is invalidated after execution; depth clamp is retained. |
 
-**Why `applyDynamicState` is not a row.** `RenderPipelineVk.cpp:961` is M14's
-file and the table gives its function to M14. M14 states that replay reads the
-immutable values M14 stores and issues the calls itself, so the `vkCmdSet*`
-burst lives in `src/engine/command_buffer.zig` as a private helper of
-`recordRenderPass` and carries no upstream row of its own. That is the one
-symbol in this milestone that exists in no upstream file at M18; §6 of
-`AGENTS.md` requires the reason, and this is it.
+**Dynamic-state ownership.** `RenderPipelineVk.cpp:961` remains an M14 source
+row transferred to replay. The landed replay initializes pass defaults
+(`src/engine/command_buffer.zig:448`) and emits recorded viewport, scissor,
+stencil-reference, and blend-constant commands (`:349`).
+`Replay.syncRender` validates vertex/index state and flushes trackers (`:454`).
+This mapping does not claim a separate complete port of upstream
+`ApplyDynamicState` merely because these command handlers exist.
 
 **What the table does not claim.** It does not claim the render-pass arm is the
 only Vulkan pass type M9 will pick; it claims M18 does not implement the other
@@ -6720,14 +7262,17 @@ static `VulkanQueryType` at `QuerySetVk.cpp:42`, the third `QueryHelper.cpp`
 definition, and `QuerySet.h`'s one row, which is a template the `.cpp` files do
 not carry.
 
-**Where the rows go.** 9 `port`, 12 `merge`, 1 `split`, 1 `simplify`, 7 `skip`.
-The `skip` ratio is the shape of the milestone, not a shortfall: three rows are
-the timestamp conversion, which `APIResolveQuerySet` never reaches for an
-occlusion set, and the other four are destructors and a debug-name call that a
-pure-Zig object model and a six-file milestone have no room for.
+**Where the rows go.** The 30 rows retain four skips for destructor wrappers and debug names.
+The timestamp helper rows now map to the native GPU conversion path.
+Raw query copying and nanosecond conversion remain separate operations.
+BG222 exercised GPU conversion and both quantization policies. It did not pass the entire utility batch.
 
-**What M19 claims to have built.** `src/engine/query_set.zig` (410 lines),
-`src/command/query.zig` (244 lines) and `test/query_set.zig` (1,647 lines).
+**Selected-path status, 2026-10-07.** `src/engine/query_set.zig`,
+`src/command/query.zig`, `src/engine/vulkan_query_set.zig`, and queue serial
+retirement exist. Parent artifact 211 passed production query acceptance in
+Debug and actual ReleaseSafe. Artifact 216 passed 16/16 native query tests
+with validation layers disabled. The earlier unverified disclosure is historical.
+The full ten-stage house contract is NOT GREEN; the reduced installed gate passed. This is not full M19 upstream conformance.
 
 ### `src/dawn/native/QuerySet.h` — 1 row
 
@@ -6737,55 +7282,55 @@ and this file contributes the template, which has no other definition site.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/QuerySet.h:89` | `ForEachAvailableQueryRange` | `AvailableRangeWalk`, `AvailableRangeWalk.next` | `src/engine/query_set.zig:307`, `:263` | split | A template over two callables cannot be a Zig function value, so it becomes a cursor and each caller keeps its own loop body: `planResolve` (`:319`) is the resolve body and `resetTrackedQueries` in `src/engine/vulkan_query_set.zig` is the reset body. The two walks read different maps — the per-pass one written at `PassResourceUsageTracker.cpp:348`-`:357` and this one at `CommandBuffer.cpp:390`-`:405` — which is why the port's cursor takes no predicate and a caller cannot pass the wrong one. |
+| `src/dawn/native/QuerySet.h:89` | `ForEachAvailableQueryRange` | `AvailableRangeWalk`, `AvailableRangeWalk.next` | `src/engine/query_set.zig:303`, `src/engine/query_set.zig:320` | split | A cursor exposes bounded contiguous ranges. `planResolve` (`src/engine/query_set.zig:384`) reads object availability. `resetTrackedQueries` (`src/engine/vulkan_query_set.zig:90`) reads the separate pass bitmap. |
 
 ### `src/dawn/native/QuerySet.cpp` — 19 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/QuerySet.cpp:41` | `ErrorQuerySet::ErrorQuerySet` | `QuerySet.initError` | `src/engine/query_set.zig:136` | merge | With the error-tag constructor at `:90` and `MakeError` at `:114`. Upstream builds a private subclass and returns a `Ref` to it; the port writes the type and the count and leaves the availability vector empty (`:133`), which is what makes a zero-count error set and a zero-count real set read the same way. |
-| `src/dawn/native/QuerySet.cpp:45` | `ErrorQuerySet::DestroyImpl` | — | — | skip | The body is `DAWN_UNREACHABLE()`. An error object has no destroy path upstream either, and the port's single `QuerySet.destroy` (`src/engine/query_set.zig:145`) has no error-set arm. The invariant the unreachable guards is stated by the `State` enum (`:36`-`:44`) instead of checked at runtime. |
-| `src/dawn/native/QuerySet.cpp:50` | `ValidateQuerySetDescriptor` | `command_query.validateDescriptor` | `src/command/query.zig:96` | merge | Dawn puts the rule in the engine-side `QuerySet.cpp`; `AGENTS.md` §3 asks for a front end drivable with no device, so it moves to `command`. Three upstream rules fold into the one function: the `nextInChain` test at `:51` cannot fire (`dawn.json` lists no chained struct for `query set descriptor` at this revision), the feature test at `:64`-`:66` keeps its own wording rather than borrowing `core.RequiredFeatureMissing`, and the count test at `:55`-`:57` survives whole and compares against `kMaxQueryCount` at `Constants.h:94`. |
-| `src/dawn/native/QuerySet.cpp:77` | `ToQueryStorageSize` | `command_query.queryStorageSize` | `src/command/query.zig:68` | port | The return widens from Dawn's `uint32_t` to `u64` because the caller adds `destinationOffset` before comparing against the destination size (`CommandEncoder.cpp:1113`-`:1117`), and a 32-bit sum wraps on a buffer larger than four gigabytes. The multiplier is `kSingleQueryStorageSize` (`QuerySet.h:42`), which the port names `single_query_storage_size` (`src/command/query.zig:43`). |
-| `src/dawn/native/QuerySet.cpp:81` | `QuerySetBase::QuerySetBase` | `QuerySet.create` | `src/engine/query_set.zig:86` | merge | With `DeviceBase::CreateQuerySet` (`Device.cpp:2172`), which §3.3's M8 table already carries as a `skip` owned by M19. A Zig struct literal is the whole constructor; what remains is the descriptor rule, one arena allocation, and the decision that a rejected descriptor still leaves an object behind. |
-| `src/dawn/native/QuerySet.cpp:90` | `QuerySetBase::QuerySetBase` (error tag) | `QuerySet.initError` | `src/engine/query_set.zig:136` | merge | The third member of the row at `:41`: upstream chains to the same base with an `ObjectBase::ErrorTag`, and the port has one function that writes the two fields the API can still read. |
-| `src/dawn/native/QuerySet.cpp:97` | `QuerySetBase::~QuerySetBase` | — | — | skip | There is no per-object free in the port (`docs/30-port-design.md` §1.1), so there is no destructor to check a state in. The check is the `State` enum that the two transitions set. |
-| `src/dawn/native/QuerySet.cpp:102` | `QuerySetBase::DestroyImpl` | `QuerySet.destroy` | `src/engine/query_set.zig:182` | port | The base half: the state and nothing else. The pool drop is the back-end half (`QuerySetVk.cpp:85`), and the two are one function because the port has no back-end subclass. |
-| `src/dawn/native/QuerySet.cpp:114` | `QuerySetBase::MakeError` | `QuerySet.create` | `src/engine/query_set.zig:86` | merge | Upstream returns a `Ref<QuerySetBase>` for the caller to hold; the port creates the object first and marks it in the `catch` arm (`:97`-`:108`), so the handle the caller would have got names an error object instead of the rule being returned with nothing behind it. |
-| `src/dawn/native/QuerySet.cpp:119` | `QuerySetBase::GetType` | `QuerySet.getObjectType` | `src/engine/query_set.zig:190` | simplify | The port names an object by the handle's kind byte, so the answer is the kind and the function is one return with its argument unnamed. |
-| `src/dawn/native/QuerySet.cpp:123` | `QuerySetBase::GetQueryType` | `QuerySet.apiGetType` | `src/engine/query_set.zig:196` | merge | `APIGetType` at `:158` is one read of the same field, so one function answers both. |
-| `src/dawn/native/QuerySet.cpp:127` | `QuerySetBase::GetQueryCount` | `QuerySet.apiGetCount` | `src/engine/query_set.zig:202` | merge | `APIGetCount` at `:162` is the same read with a `uint32_t` cast, and `QueryIndex` is a `uint32_t` already. |
-| `src/dawn/native/QuerySet.cpp:131` | `QuerySetBase::IsQueryAvailable` | `QuerySet.isQueryAvailable` | `src/engine/query_set.zig:207` | port | The port asserts the index is inside the vector instead of reading past it: `validateResolve` runs before a resolve and `beginOcclusionQuery` before a write (`src/command/query.zig:205`), so an index past the vector is a defect in that caller and not a rule here. |
-| `src/dawn/native/QuerySet.cpp:135` | `QuerySetBase::AreAllQueriesAvailable` | `QuerySet.areAllQueriesAvailable` | `src/engine/query_set.zig:218` | port | `Range(first, first + count)` becomes a bounded loop that returns on the first unavailable index, which is the answer the walk gives and one pass cheaper than reading every index. |
-| `src/dawn/native/QuerySet.cpp:144` | `QuerySetBase::MarkQueryAvailable` | `QuerySet.markQueryAvailable` | `src/engine/query_set.zig:235` | port | Monotonic, and that is the point: the replay calls it at the end of every occlusion query (`CommandBufferVk.cpp:2141`, whose helper is `CommandBuffer.cpp:394`) whatever the query counted. A query that closed on zero passing samples is available and a query that never closed is not, and the two zeros reach the destination by different routes. |
-| `src/dawn/native/QuerySet.cpp:148` | `QuerySetBase::ValidateCanUseInSubmitNow` | `QuerySet.validateCanUseInSubmit` | `src/engine/query_set.zig:244` | merge | `DAWN_CHECK(!IsError())` becomes the `unavailable` arm returning `error.QuerySetIsError`: upstream asserts what the port states, because a handle that names an error object is one the API can still be given. `Queue::ValidateCanUseInSubmitNow` runs this for every set in `usages.usedQuerySets` (`Queue.cpp:543`-`:545`), so it is a submit-time check. |
-| `src/dawn/native/QuerySet.cpp:154` | `QuerySetBase::APIDestroy` | `QuerySet.apiDestroy` | `src/engine/query_set.zig:144` | port | `Destroy()` drops the reference; the port calls `header.release()`, and the state change is the arena's (`docs/30-port-design.md` §1.1). |
-| `src/dawn/native/QuerySet.cpp:158` | `QuerySetBase::APIGetType` | `QuerySet.apiGetType` | `src/engine/query_set.zig:196` | merge | The row at `:123`. |
-| `src/dawn/native/QuerySet.cpp:162` | `QuerySetBase::APIGetCount` | `QuerySet.apiGetCount` | `src/engine/query_set.zig:202` | merge | The row at `:127`. |
+| `src/dawn/native/QuerySet.cpp:41` | `ErrorQuerySet::ErrorQuerySet` | `QuerySet.initError` | `src/engine/query_set.zig:150` | merge | Shares the error-tag constructor and error factory representation. |
+| `src/dawn/native/QuerySet.cpp:45` | `ErrorQuerySet::DestroyImpl` | — | — | skip | No private error subclass or unreachable destructor override. |
+| `src/dawn/native/QuerySet.cpp:50` | `ValidateQuerySetDescriptor` | `command_query.validateDescriptor` | `src/command/query.zig:96` | merge | Device-free count and timestamp-feature validation. |
+| `src/dawn/native/QuerySet.cpp:77` | `ToQueryStorageSize` | `command_query.queryStorageSize` | `src/command/query.zig:68` | port | Widens size arithmetic to `u64`. Each result occupies eight bytes. |
+| `src/dawn/native/QuerySet.cpp:81` | `QuerySetBase::QuerySetBase` | `QuerySet.create` | `src/engine/query_set.zig:95` | merge | Allocates the arena object and availability vector. Backend creation uses this same object. |
+| `src/dawn/native/QuerySet.cpp:90` | `QuerySetBase::QuerySetBase` (error tag) | `QuerySet.initError` | `src/engine/query_set.zig:150` | merge | One error representation replaces subclass construction. |
+| `src/dawn/native/QuerySet.cpp:97` | `QuerySetBase::~QuerySetBase` | — | — | skip | No per-object allocation free. Arena teardown owns storage. Queue teardown owns remaining native pools. |
+| `src/dawn/native/QuerySet.cpp:102` | `QuerySetBase::DestroyImpl` | `QuerySet.destroy` | `src/engine/query_set.zig:195` | port | Marks the object destroyed and asks its backend queue to retire the pool. |
+| `src/dawn/native/QuerySet.cpp:114` | `QuerySetBase::MakeError` | `QuerySet.create`, `QuerySet.initError` | `src/engine/query_set.zig:95`, `src/engine/query_set.zig:150` | merge | Failed descriptor validation leaves an arena error object and returns the rule error, not its handle. |
+| `src/dawn/native/QuerySet.cpp:119` | `QuerySetBase::GetType` | `QuerySet.getObjectType` | `src/engine/query_set.zig:203` | simplify | Returns the handle kind. |
+| `src/dawn/native/QuerySet.cpp:123` | `QuerySetBase::GetQueryType` | `QuerySet.apiGetType` | `src/engine/query_set.zig:209` | merge | Shares the API field read. |
+| `src/dawn/native/QuerySet.cpp:127` | `QuerySetBase::GetQueryCount` | `QuerySet.apiGetCount` | `src/engine/query_set.zig:215` | merge | Shares the API field read. |
+| `src/dawn/native/QuerySet.cpp:131` | `QuerySetBase::IsQueryAvailable` | `QuerySet.isQueryAvailable` | `src/engine/query_set.zig:220` | port | Reads availability after index validation. |
+| `src/dawn/native/QuerySet.cpp:135` | `QuerySetBase::AreAllQueriesAvailable` | `QuerySet.areAllQueriesAvailable` | `src/engine/query_set.zig:231` | port | Bounded range walk stops at the first unavailable query. |
+| `src/dawn/native/QuerySet.cpp:144` | `QuerySetBase::MarkQueryAvailable` | `QuerySet.markQueryAvailable` | `src/engine/query_set.zig:248` | port | Available zero-sample queries differ from unwritten queries. |
+| `src/dawn/native/QuerySet.cpp:148` | `QuerySetBase::ValidateCanUseInSubmitNow` | `QuerySet.validateCanUseInSubmit` | `src/engine/query_set.zig:257` | merge | Queue tracking and submission reject destroyed and error objects before Vulkan. |
+| `src/dawn/native/QuerySet.cpp:154` | `QuerySetBase::APIDestroy` | `QuerySet.apiDestroy` | `src/engine/query_set.zig:158` | port | Explicit destruction releases the object header and enters serial-aware pool retirement. |
+| `src/dawn/native/QuerySet.cpp:158` | `QuerySetBase::APIGetType` | `QuerySet.apiGetType` | `src/engine/query_set.zig:209` | merge | Same read as `:123`. |
+| `src/dawn/native/QuerySet.cpp:162` | `QuerySetBase::APIGetCount` | `QuerySet.apiGetCount` | `src/engine/query_set.zig:215` | merge | Same read as `:127`. |
 
 ### `src/dawn/native/vulkan/QuerySetVk.cpp` — 7 rows
 
-Every row here names `src/engine/vulkan_query_set.zig`, which does not exist
-yet. The name is not invented: `src/engine/query_set.zig:7` names the file as
-the Vulkan half of this one, and the front end refuses nothing without it.
+The backend uses the same arena `QuerySet`, not a second wrapper.
+Its pool remains borrowed until serial-aware destruction.
+The previous absent-on-disk disclosure is superseded on 2026-10-07.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:42` | `VulkanQueryType` | `querySetVulkanType` | `src/engine/vulkan_query_set.zig` | port | A `switch` over the two `wgpu` query types with the `DAWN_UNREACHABLE()` for the case the enum cannot hold. |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:54` | `QuerySet::Create` | `QuerySet.create` | `src/engine/vulkan_query_set.zig` | merge | With the base constructor at `QuerySet.cpp:81`: upstream constructs and then calls `Initialize`, so a failed pool leaves an object the front end has already published. The port keeps the two steps, because the field the create writes is the one `src/engine/query_set.zig:70` declares. |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:61` | `QuerySet::Initialize` | `createPool` | `src/engine/vulkan_query_set.zig` | port | `std::max(GetQueryCount(), 1u)` at `:67` is what makes a zero-query set a legal `VkQueryPool`; the port's rule refuses no count, so the `max` stays. `SetLabelImpl()` at `:74` is the row below. |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:79` | `QuerySet::GetHandle` | `takePool` | `src/engine/vulkan_query_set.zig` | port | Upstream lends a `VkQueryPool` for the set's life. The port's field is `?vulkan.VkQueryPool` (`src/engine/query_set.zig:70`) and `takePool` moves it out, so two readers cannot hold the same pool and `destroy` cannot see a live one. |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:83` | `QuerySet::~QuerySet` | — | — | skip | `= default` on a subclass of a base with a non-trivial destructor. See the row at `QuerySet.cpp:97`: the port has no destructor at either level. |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:85` | `QuerySet::DestroyImpl` | `QuerySet.destroy` | `src/engine/query_set.zig:182` | merge | `QuerySetBase::DestroyImpl` plus the `DeleteWhenUnused` half at `:95`. The port splits the step: the state and the drop are the object's, and the serial timeline that decides when a pool is unused is the queue's (`src/engine/query_set.zig:141`-`:144`). |
-| `src/dawn/native/vulkan/QuerySetVk.cpp:100` | `QuerySet::SetLabelImpl` | — | — | skip | `SetDebugName` is `vulkan/UtilsVulkan.{h,cpp}`, which is not one of the six files §1 M19 names, and no file under `src/` names a debug-name table, so there is nothing for the row to call. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:42` | `VulkanQueryType` | `querySetVulkanType` | `src/engine/vulkan_query_set.zig:21` | port | Exhaustive occlusion/timestamp mapping. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:54` | `QuerySet::Create` | `create`, `QuerySet.create` | `src/engine/vulkan_query_set.zig:28`, `src/engine/query_set.zig:95` | merge | Creates one arena object, then its native pool. No duplicated backend owner. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:61` | `QuerySet::Initialize` | `createPool` | `src/engine/vulkan_query_set.zig:51` | port | Keeps `max(count, 1)` for a legal zero-count pool and registers it with the queue. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:79` | `QuerySet::GetHandle` | `getPool` | `src/engine/vulkan_query_set.zig:79` | port | Borrows the pool. Pinned upstream `:79-80` returns `mHandle` without transfer. The previous `takePool` inference was wrong. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:83` | `QuerySet::~QuerySet` | — | — | skip | No forwarding subclass destructor. Explicit object destruction and queue teardown own retirement. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:85` | `QuerySet::DestroyImpl` | `QuerySet.destroy`, `Queue.retireQueryPool`, `Queue.destroyQueryPool` | `src/engine/query_set.zig:195`, `src/engine/queue.zig:300`, `src/engine/queue.zig:305` | merge | Destroy marks state. Pending use and the last-used serial prevent early native destruction. Completion collects eligible pools. |
+| `src/dawn/native/vulkan/QuerySetVk.cpp:100` | `QuerySet::SetLabelImpl` | — | — | skip | Native debug-name dispatch is outside the selected implementation. |
 
 ### `src/dawn/native/QueryHelper.cpp` — 3 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `src/dawn/native/QueryHelper.cpp:125` | `GetOrCreateTimestampComputePipeline` | — | — | skip | The timestamp conversion path. `APIResolveQuerySet` returns at `CommandEncoder.cpp:2334`-`:2336` for any set that is not a timestamp set, and a timestamp set needs the feature `QuerySet.cpp:64`-`:66` asks for, so no set this milestone creates reaches this row. The WGSL string at `:58` is the source of a compute pipeline the milestone does not build. |
-| `src/dawn/native/QueryHelper.cpp:166` | `TimestampParams::TimestampParams` | — | — | skip | The five packed conversion constants for the shader above, read by nothing but it. |
-| `src/dawn/native/QueryHelper.cpp:193` | `EncodeConvertTimestampsToNanoseconds` | — | — | skip | The only reader of the two rows above (`:201` and `:205`), so skipping all three leaves no half a reader behind. |
+| `src/dawn/native/QueryHelper.cpp:125` | `GetOrCreateTimestampComputePipeline` | `convertWindow`, `recordCompute` | `src/engine/native_timestamps.zig:147`, `src/engine/native_kernels.zig:872` | simplify | The timestamp kernel key selects a device-owned cached pipeline at `native_kernels.zig:884`. Dusk uses precompiled SPIR-V, not a runtime WGSL compiler. |
+| `src/dawn/native/QueryHelper.cpp:166` | `TimestampParams::TimestampParams` | `decodePeriod`, `Constants.encode` | `src/engine/native_timestamps.zig:55,29` | simplify | Decodes the exact physical f32 period into mantissa/shift and includes valid-bit and quantization masks. This is not Dawn's bounded 16-bit multiplier approximation. |
+| `src/dawn/native/QueryHelper.cpp:193` | `EncodeConvertTimestampsToNanoseconds` | `resolveTimestamps`, `convertWindow` | `src/engine/native_timestamps.zig:232,147` | split | Resolves raw queries into internal scratch windows, records GPU u32 conversion, and copies initialized output to the actual query-resolve destination. BG222 checks mapped results against an independent u128 oracle. |
 
 **What the table does not claim.** It does not claim the render-pass and resolve
 rules those three files reach through, which are M15's rows in
@@ -6796,39 +7341,45 @@ claim `DeviceBase::APICreateQuerySet` (`Device.cpp:1364`) or
 `skip` rows annotated "M19": the port's `QuerySet.create` is the one constructor
 and this table folds the second into it rather than listing it twice.
 
-**The acceptance.** `test/query_set.zig:211` records one render pass on a real
-driver. The pass clears a 2x2 `r8g8b8a8` attachment, binds
-`test/fixtures/occlusion.vert.spv` and `occlusion.frag.spv` through one pipeline
-with a dynamic viewport and scissor, and writes two occlusion queries with no
-control flags, because Dawn opens them with none (`CommandBufferVk.cpp:2130`).
-Query zero draws the fixture triangle with the scissor set to the render area;
-query one draws the same three vertices with a scissor rectangle of the
-target's own size whose offset is the target's far corner, which shares no
-pixel with the render area and so is clipped away whole. The submission copies
-both results into a host-visible buffer at `single_query_storage_size` of
-stride, which is the copy `planResolve` plans, and the test asserts that the
-first slot holds exactly 4 and the second exactly 0.
+**Selected-path evidence, 2026-10-07.** Parent artifact 211 passed the native
+query shard in Debug and actual ReleaseSafe. The full suite reports 69/69
+build steps and 250 root tests per mode. Cross evidence covers 250 CPU tests
+on each of three targets. Artifact 216 passed 16/16 native query tests with
+validation layers disabled.
+The GPU fixture asserts 4 covering samples, 0 clipped samples, and 0 for an
+unwritten slot. It reads three eight-byte results after fence completion.
+Timestamp conversion, quantization, and omitted upstream contracts remain outside
+this result. The full ten-stage house contract is NOT GREEN; the reduced installed gate passed.
 
-**Three open concerns, none of which this anchor's files can settle.**
+**Queue serial lifecycle.** `Queue.trackQuerySet` (`src/engine/queue.zig:293`)
+marks pending use for the actual recording. Query reset bitmaps and pending
+resources belong to the command buffer that submission actually includes.
+A different batch cannot claim their submission serial. Failed submission
+does not advance the serial. `Queue.retireQueryPool`
+(`src/engine/queue.zig:300`) waits for pending use and last-used serial.
+`Queue.complete` (`src/engine/queue.zig:781`) collects eligible pools.
+`Queue.destroyQueryPool` (`src/engine/queue.zig:305`) releases the native handle.
+The queue's persistent context allocator must outlive retained resources and
+queue teardown. A recording arena cannot own that storage.
+`getPool` (`src/engine/vulkan_query_set.zig:79`) BORROWS the native handle.
+It never transfers ownership. The query arena must outlive queue teardown.
 
-1. `src/engine/vulkan_query_set.zig` and `src/engine/command_buffer.zig` are not
-   on disk, so the seven `QuerySetVk.cpp` rows name a file that does not exist
-   and the acceptance shard records its pass through the dispatch table itself,
-   the way `test/vulkan_device.zig` drives `vkCmdFillBuffer`. The shard's own
-   header says so (`test/query_set.zig:15`-`:21`). Both files are M18's and M19's
-   to land, and neither is this anchor's.
-2. `validateDescriptor`'s `QueryTypeUnknown` arm is unreachable from a typed
-   descriptor. `descriptor.type_` is `api.QueryType`, an exhaustive two-tag enum,
-   and `std.enums.fromInt` can only fail for a value the enum does not declare —
-   a value no Zig expression can produce without tripping the enum's own
-   safety check. Dawn's `ValidateQueryType` (`QuerySet.cpp:53`) guards a value
-   off the wire; the port's guard has no such value, so the shard does not test
-   the error.
-3. An error set is not reachable by a caller. `QuerySet.create` returns the rule
-   and not the handle (`src/engine/query_set.zig:108`), so
-   `validateCanUseInSubmit`'s `unavailable` arm has no front-end caller and no
-   test can observe it. The shard asserts the tracked-object count instead
-   (`test/query_set.zig:1030`), which is the observable that is there.
+**Stable borrowed queue storage.** `Queue.init` (`src/engine/queue.zig:261`)
+returns one uniquely owned value. The caller may move it before the first
+native query registration. After `createPool` (`src/engine/vulkan_query_set.zig:51`),
+keep both queue and query-set storage alive and at the same addresses.
+Never copy the owning queue. `QuerySet.backend_queue`
+(`src/engine/query_set.zig:76`) borrows that exact queue storage.
+This obligation ends at deregistration or when `Queue.deinit`
+(`src/engine/queue.zig:378`) detaches the set. Destroy can defer deregistration
+until the last submission completes. It does not end the borrow immediately.
+
+**Boundary disclosures.** Typed descriptor input cannot express an unknown
+query enum without failing Zig's enum safety checks. No malformed-enum test
+is claimed. Failed creation returns an error, not the retained error-object
+handle (`src/engine/query_set.zig:95`). Direct queue CPU tests cover rejection
+of error and destroyed objects (`src/engine/queue.zig:964`).
+This does not make retained error objects reachable through public creation.
 
 #### M20 — surfaces and swap chains
 
@@ -7105,41 +7656,36 @@ handle type and refuses every other negative value
 (`src/platform/external_semaphore.zig:237`), which is what §1 M21's
 acceptance asks for and what the sentinel is for.
 
-**Open concerns.**
+**Current scope and evidence, 2026-10-07.** Parent artifact 211 passed the
+shared-memory shard. The OpaqueFD import uses the exported
+allocation size and memory-type index. Exporter and importer use compatible
+physical-device and driver properties. The import checks image requirements
+against those values. It does not call `vkGetMemoryFdPropertiesKHR`, which
+cannot query OPAQUE_FD handles.
 
-1. Neither service has an export entry point, because Dawn has none either:
-   `MemoryService` imports and creates images, and the export is the resource
-   side of the allocation, which is `ResourceMemoryAllocatorVk.cpp` and M11's.
-   `test/shared_memory.zig:exportImageMemory` builds that `pNext` chain for one
-   image, and the row for `MemoryServiceImplementationOpaqueFD.cpp:123` says
-   so where the asymmetry is visible.
-2. `importMemory` takes a `VkImage` because upstream does
-   (`MemoryServiceImplementationOpaqueFD.cpp:123`): the requirements query at
-   `:130` and the dedicated-allocation struct at `:150` both need one. A
-   buffer-backed shared allocation therefore cannot go through this entry
-   point, which is a claim about the port's shape and not about the
-   specification.
-3. `vulkan_device.Device.create` enables no device extension
-   (`src/engine/vulkan_device.zig:604`) and `loadDeviceProcs` leaves every
-   extension-gated block null for an extension the caller did not enable
-   (`src/vk/dispatch.zig:1044`), so `vkGetMemoryFdKHR` and
-   `vkImportSemaphoreFdKHR` are null on a device it creates. The acceptance
-   shard opens its own two devices with the two extensions named for that
-   reason; the field M9 does not fill belongs to M9's file, so it is reported
-   here and not changed.
+`Service.importMemory` (`src/platform/external_memory.zig:277`) takes the fd
+only after successful allocation. Failed import leaves it caller-owned.
+Its `VkImage` parameter supports image requirements and dedicated allocation.
+It does not establish a buffer-backed import path.
+
+The current lavapipe native semaphore result is capability-negative only.
+It does not prove a successful native semaphore fd round trip. The service
+seams cover fd ownership and the sync-fd `-1` sentinel. No foreign GPU run
+is claimed. Earlier missing-extension and unverified disclosures are historical,
+not the current parent-suite status.
 
 ### `src/dawn/native/vulkan/external_memory/MemoryService.cpp` — 9 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `:49` | `Service::CheckSupport` | `checkSupport` | `src/platform/external_memory.zig:154` | merge | A platform switch over AHardwareBuffer, Zircon, then OpaqueFD-or-DmaBuf (`:50`-`:57`). One family survives, so the whole chain is one extension bit, which is what `Service.init` (`:163`) reads. |
-| `:61` | `Service::Service` | `Service.init` | `src/platform/external_memory.zig:170` | merge | Installs one implementation per `ExternalImageType` into `mServiceImpls[83]` when the check passes. The array has one slot, so the port stores a `bool` beside the options instead of a `unique_ptr`. |
-| `:87` | `Service::SupportsImportMemory` | `Service.supportsImportMemory` | `src/platform/external_memory.zig:185` | merge | Forwards format, type, tiling, usage and flags through `GetServiceImplementation` (`:112`). The five travel together, so the port takes them as a `FormatQuery` (`:104`) and drops the virtual hop. |
-| `:99` | `Service::SupportsCreateImage` | `Service.supportsCreateImage` | `src/platform/external_memory.zig:235` | merge | The descriptor, format and usage reach the implementation and a `bool*` comes back (`:115`). The fd family is never disjoint, so the port keeps the boolean and names the second answer in the doc comment instead of paying for an out-parameter that can only be false. |
-| `:109` | `Service::GetMemoryImportParams` | `Service.getMemoryImportParams` | `src/platform/external_memory.zig:249` | merge | Reads `descriptor->GetType()` and forwards descriptor and image. With one family there is no other descriptor, so the type check at `MemoryServiceImplementationOpaqueFD.cpp:108` has nothing to read. |
-| `:118` | `Service::GetQueueFamilyIndex` | `queue_family_index` | `src/platform/external_memory.zig:63` | simplify | A virtual answered with `VK_QUEUE_FAMILY_EXTERNAL_KHR` by every implementation that reaches the driver. The port keeps it a constant because only one family exists and a constant cannot drift away from its only call site. |
-| `:125` | `Service::ImportMemory` | `Service.importMemory` | `src/platform/external_memory.zig:271` | merge | Asserts an implementation exists and forwards handle, params and image. The assertion is the vtable array, and the port's body is the one below. |
-| `:135` | `Service::CreateImage` | `Service.createImage` | `src/platform/external_memory.zig:324` | merge | Asserts an implementation and forwards the descriptor and the base create info. The body is `MemoryServiceImplementationOpaqueFD.cpp:162`. |
+| `:49` | `Service::CheckSupport` | `checkSupport` | `src/platform/external_memory.zig:160` | merge | A platform switch over AHardwareBuffer, Zircon, then OpaqueFD-or-DmaBuf (`:50`-`:57`). One family survives, so the whole chain is one extension bit, which is what `Service.init` (`:163`) reads. |
+| `:61` | `Service::Service` | `Service.init` | `src/platform/external_memory.zig:176` | merge | Installs one implementation per `ExternalImageType` into `mServiceImpls[83]` when the check passes. The array has one slot, so the port stores a `bool` beside the options instead of a `unique_ptr`. |
+| `:87` | `Service::SupportsImportMemory` | `Service.supportsImportMemory` | `src/platform/external_memory.zig:191` | merge | Forwards format, type, tiling, usage and flags through `GetServiceImplementation` (`:112`). The five travel together, so the port takes them as a `FormatQuery` (`:104`) and drops the virtual hop. |
+| `:99` | `Service::SupportsCreateImage` | `Service.supportsCreateImage` | `src/platform/external_memory.zig:241` | merge | The descriptor, format and usage reach the implementation and a `bool*` comes back (`:115`). The fd family is never disjoint, so the port keeps the boolean and names the second answer in the doc comment instead of paying for an out-parameter that can only be false. |
+| `:109` | `Service::GetMemoryImportParams` | `Service.getMemoryImportParams` | `src/platform/external_memory.zig:255` | merge | Reads `descriptor->GetType()` and forwards descriptor and image. With one family there is no other descriptor, so the type check at `MemoryServiceImplementationOpaqueFD.cpp:108` has nothing to read. |
+| `:118` | `Service::GetQueueFamilyIndex` | `queue_family_index` | `src/platform/external_memory.zig:64` | simplify | A virtual answered with `VK_QUEUE_FAMILY_EXTERNAL_KHR` by every implementation that reaches the driver. The port keeps it a constant because only one family exists and a constant cannot drift away from its only call site. |
+| `:125` | `Service::ImportMemory` | `Service.importMemory` | `src/platform/external_memory.zig:277` | merge | Asserts an implementation exists and forwards handle, params and image. The assertion is the vtable array, and the port's body is the one below. |
+| `:135` | `Service::CreateImage` | `Service.createImage` | `src/platform/external_memory.zig:335` | merge | Asserts an implementation and forwards the descriptor and the base create info. The body is `MemoryServiceImplementationOpaqueFD.cpp:162`. |
 | `:143` | `Service::GetServiceImplementation` | — | — | skip | The slot lookup and its null answer. With one slot and one type there is nothing to look up, so the port calls the one service. |
 
 ### `src/dawn/native/vulkan/external_memory/MemoryServiceImplementation.cpp` — 2 rows
@@ -7147,23 +7693,23 @@ acceptance asks for and what the sentinel is for.
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
 | `:34` | `ServiceImplementation::ServiceImplementation` | — | — | skip | Stores the `Device*` in `mDevice` for the five overrides to reach through. The port passes one `DeviceOptions` value (`src/platform/external_memory.zig:118`), which is what lets a `Service` be built and queried with no device behind it. |
-| `:37` | `ServiceImplementation::RequiresDedicatedAllocation` | `requiresDedicatedAllocation` | `src/platform/external_memory.zig:358` | port | A three-arm switch on `NeedsDedicatedAllocation` with a `DAWN_UNREACHABLE` at `:67`. The port takes the same enum, so the unreachable arm has no case to name, and `.detect` reads `prefersDedicatedAllocation` (`:63`) alone because the specification requires it whenever `requiresDedicatedAllocation` is set. |
+| `:37` | `ServiceImplementation::RequiresDedicatedAllocation` | `requiresDedicatedAllocation` | `src/platform/external_memory.zig:369` | port | A three-arm switch on `NeedsDedicatedAllocation` with a `DAWN_UNREACHABLE` at `:67`. The port takes the same enum, so the unreachable arm has no case to name, and `.detect` reads `prefersDedicatedAllocation` (`:63`) alone because the specification requires it whenever `requiresDedicatedAllocation` is set. |
 
 ### `src/dawn/native/vulkan/external_memory/MemoryServiceImplementationOpaqueFD.cpp` — 11 rows
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `:43` | `ServiceImplementationOpaqueFD` (ctor) | `Service.init` | `src/platform/external_memory.zig:170` | merge | Caches `CheckSupport` into `mSupported`. The port keeps the cached answer, which is what `isSupported` (`:171`) returns and what the negative-space tests read with no device behind the service. |
-| `:47` | `CheckSupport` | `checkSupport` | `src/platform/external_memory.zig:154` | port | One `HasExt(ExternalMemoryFD)` test (`:48`). The port is the same one bit. |
-| `:51` | `SupportsImportMemory` | `Service.supportsImportMemory` | `src/platform/external_memory.zig:185` | merge | Builds the `VkPhysicalDeviceImageFormatProperties2` chain with `OPAQUE_FD_BIT` at `:75`-`:85` and reads the importable feature bit at `:93`. `VK_ERROR_FORMAT_NOT_SUPPORTED` is a "no" and not a failure (`:88`), which the port keeps by classifying the result rather than comparing the code. |
-| `:97` | `SupportsCreateImage` | `Service.supportsCreateImage` | `src/platform/external_memory.zig:235` | simplify | Writes `false` through `supportsDisjoint` (`:99`) and returns `mSupported`. The port drops the out-parameter for the reason the `Service` row above gives. |
-| `:105` | `GetMemoryImportParams` | `Service.getMemoryImportParams` | `src/platform/external_memory.zig:249` | merge | Rejects a descriptor that is not OpaqueFD (`:108`), then copies size, type index and the dedicated flag. One family in the port, so the first check has nothing to read. |
-| `:121` | `GetQueueFamilyIndex` | `queue_family_index` | `src/platform/external_memory.zig:63` | simplify | `VK_QUEUE_FAMILY_EXTERNAL_KHR` on one line. A constant. |
-| `:123` | `ImportMemory` | `Service.importMemory` | `src/platform/external_memory.zig:271` | port | Rejects a negative handle (`:126`), rejects `requirements.size > params.allocation_size` (`:130`), and builds allocate, import, then dedicated (`:148`-`:152`) with the dedicated struct appended only when asked for (`:150`). The port takes ownership of the descriptor on success, because `vkAllocateMemory` does (`:156`), and its declared error set names the two refusals. |
-| `:162` | `CreateImage` | `Service.createImage` | `src/platform/external_memory.zig:324` | port | Copies the base `VkImageCreateInfo` (`:164`), then sets the alias flag (`:167`), optimal tiling (`:168`) and undefined initial layout (`:169`), and chains `VkExternalMemoryImageCreateInfo` with `OPAQUE_FD_BIT` (`:171`-`:176`). The port takes the create info by value, which is that same copy, and so does not hide it from the caller. |
-| `:187` | `Supported` | `Service.isSupported` | `src/platform/external_memory.zig:178` | simplify | Returns the cached flag. The port returns the same field through a named predicate. |
-| `:193` | `CheckOpaqueFDSupport` | `checkSupport` | `src/platform/external_memory.zig:154` | merge | A pure forwarder to `:47`, split out only because the class is private to its `.cpp`. One Zig function is both. |
-| `:196` | `CreateOpaqueFDService` | `Service.init` | `src/platform/external_memory.zig:170` | merge | A `make_unique` of the class above. The port's `Service` is a value that owns no handle, so it needs no factory and no `deinit`. |
+| `:43` | `ServiceImplementationOpaqueFD` (ctor) | `Service.init` | `src/platform/external_memory.zig:176` | merge | Caches `CheckSupport` into `mSupported`. The port keeps the cached answer, which is what `isSupported` (`:171`) returns and what the negative-space tests read with no device behind the service. |
+| `:47` | `CheckSupport` | `checkSupport` | `src/platform/external_memory.zig:160` | port | One `HasExt(ExternalMemoryFD)` test (`:48`). The port is the same one bit. |
+| `:51` | `SupportsImportMemory` | `Service.supportsImportMemory` | `src/platform/external_memory.zig:191` | merge | Builds the `VkPhysicalDeviceImageFormatProperties2` chain with `OPAQUE_FD_BIT` at `:75`-`:85` and reads the importable feature bit at `:93`. `VK_ERROR_FORMAT_NOT_SUPPORTED` is a "no" and not a failure (`:88`), which the port keeps by classifying the result rather than comparing the code. |
+| `:97` | `SupportsCreateImage` | `Service.supportsCreateImage` | `src/platform/external_memory.zig:241` | simplify | Writes `false` through `supportsDisjoint` (`:99`) and returns `mSupported`. The port drops the out-parameter for the reason the `Service` row above gives. |
+| `:105` | `GetMemoryImportParams` | `Service.getMemoryImportParams` | `src/platform/external_memory.zig:255` | merge | Rejects a descriptor that is not OpaqueFD (`:108`), then copies size, type index and the dedicated flag. One family in the port, so the first check has nothing to read. |
+| `:121` | `GetQueueFamilyIndex` | `queue_family_index` | `src/platform/external_memory.zig:64` | simplify | `VK_QUEUE_FAMILY_EXTERNAL_KHR` on one line. A constant. |
+| `:123` | `ImportMemory` | `Service.importMemory` | `src/platform/external_memory.zig:277` | port | Rejects a negative handle (`:126`), rejects `requirements.size > params.allocation_size` (`:130`), and builds allocate, import, then dedicated (`:148`-`:152`) with the dedicated struct appended only when asked for (`:150`). The port takes ownership of the descriptor on success, because `vkAllocateMemory` does (`:156`), and its declared error set names the two refusals. |
+| `:162` | `CreateImage` | `Service.createImage` | `src/platform/external_memory.zig:335` | port | Copies the base `VkImageCreateInfo` (`:164`), then sets the alias flag (`:167`), optimal tiling (`:168`) and undefined initial layout (`:169`), and chains `VkExternalMemoryImageCreateInfo` with `OPAQUE_FD_BIT` (`:171`-`:176`). The port takes the create info by value, which is that same copy, and so does not hide it from the caller. |
+| `:187` | `Supported` | `Service.isSupported` | `src/platform/external_memory.zig:184` | simplify | Returns the cached flag. The port returns the same field through a named predicate. |
+| `:193` | `CheckOpaqueFDSupport` | `checkSupport` | `src/platform/external_memory.zig:160` | merge | A pure forwarder to `:47`, split out only because the class is private to its `.cpp`. One Zig function is both. |
+| `:196` | `CreateOpaqueFDService` | `Service.init` | `src/platform/external_memory.zig:176` | merge | A `make_unique` of the class above. The port's `Service` is a value that owns no handle, so it needs no factory and no `deinit`. |
 
 ### `src/dawn/native/vulkan/external_memory/MemoryServiceImplementationDmaBuf.cpp` — 15 rows
 
@@ -7206,14 +7752,14 @@ acceptance asks for and what the sentinel is for.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `:45` | `Service::CheckSupport` | `checkSupport` | `src/platform/external_semaphore.zig:135` | merge | Dispatches on platform to the Zircon or the fd check (`:48`-`:53`). One family, so one function with one body, and `SupportOptions` (`:115`) carries the three values Dawn passes at `:205`. |
-| `:57` | `Service::Service` | `Service.init` | `src/platform/external_semaphore.zig:168` | merge | Creates the one implementation for the handle type it is handed and caches the support flag. |
-| `:68` | `Supported` | `Service.isSupported` | `src/platform/external_semaphore.zig:179` | simplify | The null-implementation guard plus a forward. The port's `Service` always has the operations on it, so the guard has no case. |
-| `:76` | `CloseHandle` | `closeHandle` | `src/platform/external_semaphore.zig:330` | port | Asserts an implementation, then forwards. The port skips the `-1` sentinel and hands any other descriptor to `std.Io.File.close`, which reports on its own, so there is no second check to make. |
-| `:81` | `ImportSemaphore` | `Service.importSemaphore` | `src/platform/external_semaphore.zig:238` | merge | Asserts an implementation and forwards the handle. The body is the fd row below. |
-| `:86` | `CreateExportableSemaphore` | `Service.createExportableSemaphore` | `src/platform/external_semaphore.zig:185` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:140`. |
-| `:91` | `ExportSemaphore` | `Service.exportSemaphore` | `src/platform/external_semaphore.zig:207` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:160`. |
-| `:96` | `DuplicateHandle` | `duplicateHandle` | `src/platform/external_semaphore.zig:315` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:177`, and a free function in the port because the caller owns the descriptor, not the service. |
+| `:45` | `Service::CheckSupport` | `checkSupport` | `src/platform/external_semaphore.zig:137` | merge | Dispatches on platform to the Zircon or the fd check (`:48`-`:53`). One family, so one function with one body, and `SupportOptions` (`:115`) carries the three values Dawn passes at `:205`. |
+| `:57` | `Service::Service` | `Service.init` | `src/platform/external_semaphore.zig:170` | merge | Creates the one implementation for the handle type it is handed and caches the support flag. |
+| `:68` | `Supported` | `Service.isSupported` | `src/platform/external_semaphore.zig:181` | simplify | The null-implementation guard plus a forward. The port's `Service` always has the operations on it, so the guard has no case. |
+| `:76` | `CloseHandle` | `closeHandle` | `src/platform/external_semaphore.zig:334` | port | Asserts an implementation, then forwards. The port skips the `-1` sentinel and hands any other descriptor to `std.Io.File.close`, which reports on its own, so there is no second check to make. |
+| `:81` | `ImportSemaphore` | `Service.importSemaphore` | `src/platform/external_semaphore.zig:244` | merge | Asserts an implementation and forwards the handle. The body is the fd row below. |
+| `:86` | `CreateExportableSemaphore` | `Service.createExportableSemaphore` | `src/platform/external_semaphore.zig:187` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:140`. |
+| `:91` | `ExportSemaphore` | `Service.exportSemaphore` | `src/platform/external_semaphore.zig:210` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:160`. |
+| `:96` | `DuplicateHandle` | `duplicateHandle` | `src/platform/external_semaphore.zig:319` | port | A pure forwarder to `SemaphoreServiceImplementationFD.cpp:177`, and a free function in the port because the caller owns the descriptor, not the service. |
 
 ### `src/dawn/native/vulkan/external_semaphore/SemaphoreServiceImplementation.cpp` — 1 row
 
@@ -7225,16 +7771,16 @@ acceptance asks for and what the sentinel is for.
 
 | `upstream_path:line` | `upstream_symbol` | `zig_symbol` | `zig_path` | `decision` | `note` |
 | --- | --- | --- | --- | --- | --- |
-| `:53` | `ServiceImplementationFD` (ctor) | `Service.init` | `src/platform/external_semaphore.zig:168` | merge | Caches the handle type (`:42` picks `SYNC_FD` on Android and ChromeOS, `OPAQUE_FD` elsewhere) and the support flag. |
-| `:63` | `CheckSupport` | `checkSupport` | `src/platform/external_semaphore.zig:135` | port | Two tests in sequence: the extension bit (`:66`) and the exportable-and-importable feature pair (`:82`-`:85`), which the port computes as one mask intersection (`:142`). |
-| `:89` | `Supported` | `Service.isSupported` | `src/platform/external_semaphore.zig:179` | simplify | Returns the cached flag. |
-| `:92` | `ImportSemaphore` | `Service.importSemaphore` | `src/platform/external_semaphore.zig:238` | merge | Creates the semaphore, duplicates the handle (`:107`) so the caller keeps its own, and imports it with `TEMPORARY` (`:109`-`:119`). The port keeps the duplicate and the temporary flag, and deviates once: `-1` for the sync handle type is the already-signalled sentinel rather than a refusal (`:93`). |
-| `:140` | `CreateExportableSemaphore` | `Service.createExportableSemaphore` | `src/platform/external_semaphore.zig:185` | port | Chains `VkExportSemaphoreCreateInfo` with the cached handle type (`:143`-`:148`). |
-| `:160` | `ExportSemaphore` | `Service.exportSemaphore` | `src/platform/external_semaphore.zig:207` | port | Seeds the out-parameter with `-2` (`:167`) and asserts the answer is either a real descriptor or `-1`. The port keeps the seed, because a driver that leaves it untouched then fails the assertion at `src/platform/external_semaphore.zig:216` instead of reading as the sentinel, and turns the assert into a declared error set. |
-| `:177` | `DuplicateHandle` | `duplicateHandle` | `src/platform/external_semaphore.zig:315` | port | Returns the sentinel before it reaches `dup` (`:178`) and asserts the duplicate otherwise (`:182`). The port returns `error.DuplicateFailed`, because a call that cannot fail cannot be tested, and `std.posix` at 0.16.0 wraps no `dup` so the syscall layer carries it (`:334`). |
-| `:186` | `CloseHandle` | `closeHandle` | `src/platform/external_semaphore.zig:330` | simplify | Returns for the sentinel (`:187`) and closes otherwise, asserting the result (`:190`-`:191`). The port keeps the short-circuit and drops the assert, because `std.Io.File.close` fails loudly on its own. |
+| `:53` | `ServiceImplementationFD` (ctor) | `Service.init` | `src/platform/external_semaphore.zig:170` | merge | Caches the handle type (`:42` picks `SYNC_FD` on Android and ChromeOS, `OPAQUE_FD` elsewhere) and the support flag. |
+| `:63` | `CheckSupport` | `checkSupport` | `src/platform/external_semaphore.zig:137` | port | Two tests in sequence: the extension bit (`:66`) and the exportable-and-importable feature pair (`:82`-`:85`), which the port computes as one mask intersection (`:142`). |
+| `:89` | `Supported` | `Service.isSupported` | `src/platform/external_semaphore.zig:181` | simplify | Returns the cached flag. |
+| `:92` | `ImportSemaphore` | `Service.importSemaphore` | `src/platform/external_semaphore.zig:244` | merge | Creates the semaphore, duplicates the handle (`:107`) so the caller keeps its own, and imports it with `TEMPORARY` (`:109`-`:119`). The port keeps the duplicate and the temporary flag, and deviates once: `-1` for the sync handle type is the already-signalled sentinel rather than a refusal (`:93`). |
+| `:140` | `CreateExportableSemaphore` | `Service.createExportableSemaphore` | `src/platform/external_semaphore.zig:187` | port | Chains `VkExportSemaphoreCreateInfo` with the cached handle type (`:143`-`:148`). |
+| `:160` | `ExportSemaphore` | `Service.exportSemaphore` | `src/platform/external_semaphore.zig:210` | port | Seeds the out-parameter with `-2` (`:167`) and asserts the answer is either a real descriptor or `-1`. The port keeps the seed, because a driver that leaves it untouched then fails the assertion at `src/platform/external_semaphore.zig:216` instead of reading as the sentinel, and turns the assert into a declared error set. |
+| `:177` | `DuplicateHandle` | `duplicateHandle` | `src/platform/external_semaphore.zig:319` | port | Returns the sentinel before it reaches `dup` (`:178`) and asserts the duplicate otherwise (`:182`). The port returns `error.DuplicateFailed`, because a call that cannot fail cannot be tested, and `std.posix` at 0.16.0 wraps no `dup` so the syscall layer carries it (`:334`). |
+| `:186` | `CloseHandle` | `closeHandle` | `src/platform/external_semaphore.zig:334` | simplify | Returns for the sentinel (`:187`) and closes otherwise, asserting the result (`:190`-`:191`). The port keeps the short-circuit and drops the assert, because `std.Io.File.close` fails loudly on its own. |
 | `:199` | `CreateFDService` | — | — | skip | A `make_unique` of the class above. The port's `Service` is a value. |
-| `:205` | `CheckFDSupport` | `checkSupport` | `src/platform/external_semaphore.zig:135` | merge | A pure forwarder to `:63`, split out only because the class is private to its `.cpp`. One Zig function is both. |
+| `:205` | `CheckFDSupport` | `checkSupport` | `src/platform/external_semaphore.zig:137` | merge | A pure forwarder to `:63`, split out only because the class is private to its `.cpp`. One Zig function is both. |
 
 ### `src/dawn/native/AHBFunctions.cpp` — 4 rows
 

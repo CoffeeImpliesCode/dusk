@@ -4,12 +4,8 @@
 //! Ports `src/dawn/native/Adapter.{h,cpp}`. `docs/40-plan.md` §3.3 `#### M8`
 //! holds the row table.
 //!
-//! **What this file does not claim.** It does not claim a queue. Upstream's
-//! `AdapterBase::CreateDeviceInternal` builds none: it calls the physical
-//! device's `CreateDevice` (`Adapter.cpp:308-309`), and the back end is what
-//! creates the descriptor's default queue (`vulkan/DeviceVk.cpp:152`) and
-//! hands it to `DeviceBase::Initialize` (`Device.cpp:401-403`,
-//! `vulkan/DeviceVk.cpp:205`). That queue lands at M9.
+//! Native queue construction belongs to `native_device_context.zig`. The adapter
+//! validates requests and preserves Dawn's successful-creation consumption latch.
 
 const std = @import("std");
 const constants = @import("../api/constants.zig");
@@ -19,6 +15,7 @@ const features = @import("features.zig");
 const instance_mod = @import("instance.zig");
 const limits = @import("limits.zig");
 const physical_device = @import("physical_device.zig");
+const root = @import("async_root_requests.zig");
 
 pub const FeatureLevel = api.FeatureLevel;
 pub const PowerPreference = api.PowerPreference;
@@ -56,9 +53,9 @@ pub const Error = std.mem.Allocator.Error || error{
 /// a level its physical device does not serve (`Adapter.cpp:64`).
 pub const Adapter = struct {
     instance: *instance_mod.Instance,
-    /// Points into the instance's own slice, so it never moves. Upstream holds
-    /// a `Ref<PhysicalDeviceBase>` for the same reason (`Adapter.h:111`).
-    physical_device: *const physical_device.PhysicalDevice,
+    /// Borrows physical storage from its owning list. The row and this adapter
+    /// must stay at their final addresses while a Device borrows them.
+    physical_device: *physical_device.PhysicalDevice,
     /// The level this adapter defaults to (`Adapter.h:89-90`). It is not the
     /// device's compatibility mode: a device is in compatibility mode when the
     /// core feature is absent from its enabled set (`Device.cpp:1840-1842`),
@@ -74,6 +71,11 @@ pub const Adapter = struct {
     /// pipeline, so the copy is the whole of it.
     limits: limits.CombinedLimits,
     is_consumed: bool = false,
+    /// Successful devices borrowing this adapter and its owning list.
+    live_device_count: u64 = 0,
+    /// Request pins and successful child counts share the Instance lifecycle gate.
+    active_root_requests: usize = 0,
+    root_record: root.RootRecord = .{ .kind = .adapter },
 
     pub const InitOptions = struct {
         feature_level: FeatureLevel,
@@ -84,7 +86,7 @@ pub const Adapter = struct {
     /// `DAWN_CHECK`s turned into the error the port reports.
     pub fn init(
         instance: *instance_mod.Instance,
-        device: *const physical_device.PhysicalDevice,
+        device: *physical_device.PhysicalDevice,
         options: InitOptions,
     ) Error!Adapter {
         if (!device.supportsFeatureLevel(options.feature_level)) {
@@ -132,10 +134,8 @@ pub const Adapter = struct {
         return self.limits;
     }
 
-    /// `AdapterBase::APIGetInfo` (`Adapter.cpp:120-158`). The null back end
-    /// answers through `PopulateBackendProperties` (`DeviceNull.cpp:118-134`);
-    /// the Vulkan one will answer the same fields from
-    /// `vkGetPhysicalDeviceProperties` at M9.
+    /// `AdapterBase::APIGetInfo` (`Adapter.cpp:120-158`), populated from the
+    /// selected backend's physical capability record.
     pub fn getInfo(self: *const Adapter) api.AdapterInfo {
         return .{
             .vendor = self.physical_device.vendor_name,
@@ -165,17 +165,16 @@ pub const Adapter = struct {
         return self.supported_features.isEnabled(features.fromApiName(name));
     }
 
-    /// `AdapterBase::CreateDeviceInternal` (`Adapter.cpp:238-322`).
-    ///
-    /// The three refusals it makes before it calls the physical device are the
-    /// three this function reports besides allocation. The consumption latch at
-    /// `:305` is read here and set at `:318`, so the latch closes on success
-    /// and not on failure, exactly as upstream does.
+    /// Validates and creates under one parent-pinned, serialized transaction.
+    /// Failure leaves the latch and parent counts unchanged and releases every creation pin.
     pub fn createDevice(
         self: *Adapter,
         allocator: std.mem.Allocator,
+        io: std.Io,
         options: device_mod.Device.CreateDeviceOptions,
-    ) Error!device_mod.Device {
+    ) (Error || device_mod.Device.InitError || root.RootWorkError)!device_mod.Device {
+        var permit = try self.instance.beginDeviceCreation(io, self, options.consume_adapter);
+        defer permit.deinit(io);
         // `SupportsAllRequiredFeatures` (`PhysicalDevice.cpp:158-167`) returns
         // a bool and not an error, so it is read and not `try`-ed; the port
         // widens that bool to a struct that names the first missing feature.
@@ -188,24 +187,22 @@ pub const Adapter = struct {
         if (options.required_limits) |required| {
             try self.validateRequiredLimits(required);
         }
-        // `Adapter.cpp:305-306`: the latch is read before the build at
-        // `:308-309`, because a failed build must not close it.
-        const consume_on_success = !self.instance.hasFeature(.multiple_devices_per_adapter);
-        if (self.is_consumed and consume_on_success) return error.AdapterConsumed;
 
         // `DeviceBase::DeviceBase` and `DeviceBase::Initialize`
         // (`Device.cpp:275-393`, `:401-452`) are members of `DeviceBase`, not
         // file-level functions, so the port's call names its own `Device`.
-        var created = try device_mod.Device.init(allocator, .{
+        var created = try device_mod.Device.init(allocator, io, .{
             .adapter = self,
             .label = options.label,
+            .default_queue_label = options.default_queue_label,
             .required_features = options.required_features,
+            .timestamp_quantization = options.timestamp_quantization,
             .feature_level = self.feature_level,
+            .required_limits = options.required_limits,
+            .object_mutex = options.object_mutex,
             .uncaptured_context = options.uncaptured_context,
             .uncaptured_callback = options.uncaptured_callback,
-        });
-        if (consume_on_success) self.is_consumed = true;
-        self.instance.addDevice();
+        }, &permit);
         // Write then read back: the device's level is the adapter's. Its
         // compatibility mode is not read back here, because no adapter state
         // decides it: `Device.cpp:1730-1732` turns the core feature on for a
@@ -213,6 +210,17 @@ pub const Adapter = struct {
         // request belongs to this adapter's caller, not to this adapter.
         std.debug.assert(created.getFeatureLevel() == self.feature_level);
         return created;
+    }
+
+    /// Native observation of the same owned high Device used by generated requests.
+    /// Consume a successful result once. Cancellation abandons only observation.
+    pub fn requestDeviceAsync(
+        self: *Adapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        descriptor: ?*const api.descriptors.DeviceDescriptorChain,
+    ) api.AsyncStartError!std.Io.Future(root.RootOutcome(*root.OwnedDevice)) {
+        return root.requestDeviceAsync(self, allocator, io, descriptor);
     }
 
     /// `Adapter.cpp:293` calls `ValidateLimits`, which is a `Limits.cpp` row and
@@ -233,7 +241,12 @@ pub const Adapter = struct {
             const asked: Field = @field(required, field.name);
             const have: Field = @field(offered, field.name);
             if (asked != undefinedLimit(Field)) {
-                if (asked > have) return error.RequiredLimitAboveAdapterLimit;
+                const minimum = comptime std.mem.startsWith(u8, field.name, "min_");
+                if (minimum) {
+                    if (asked < have) return error.RequiredLimitAboveAdapterLimit;
+                } else {
+                    if (asked > have) return error.RequiredLimitAboveAdapterLimit;
+                }
             }
         }
     }

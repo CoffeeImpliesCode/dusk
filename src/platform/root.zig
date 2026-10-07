@@ -152,7 +152,7 @@ pub const vulkan_bindings = vulkan;
 
 /// OpaqueFD external memory. Importing an image's memory into a second
 /// `VkDevice` through a file descriptor.
-pub const memory = external_memory.Service;
+pub const Memory = external_memory.Service;
 pub const MemoryDeviceOptions = external_memory.DeviceOptions;
 pub const MemoryImportParams = external_memory.MemoryImportParams;
 pub const MemoryDescriptor = external_memory.Descriptor;
@@ -175,7 +175,7 @@ pub fn requiresDedicatedAllocation(
 
 /// External synchronisation by file descriptor, including the `-1` sentinel
 /// the specification defines as already signalled.
-pub const semaphore = external_semaphore.Service;
+pub const Semaphore = external_semaphore.Service;
 pub const SemaphoreInitOptions = external_semaphore.InitOptions;
 pub const SemaphoreSupportOptions = external_semaphore.SupportOptions;
 pub const SemaphoreError = external_semaphore.Error;

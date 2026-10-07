@@ -10,6 +10,1148 @@ It adds no upstream claim of its own. Every statement about Dawn cites the
 pinned tree at `32f77c02294310054a660c393feded4bcb3f203c` with a `path:line`,
 or cites `docs/02-dawn-design.md`.
 
+### Present implementation and evidence limits
+
+The tree has a partial implementation, not just a design.
+The formerly missing M6, M7, M18, and M19 families have landed and passed local
+behavior tests. Nothing here establishes M1–M21 completion or WebGPU conformance.
+
+The historical 138-row census covered M6 (63), M7 (32), M18 (38), and M19 (five).
+It is neither a remaining count nor the whole backlog.
+The counts come from issues
+[#4](https://github.com/CoffeeImpliesCode/dusk/issues/4),
+[#2](https://github.com/CoffeeImpliesCode/dusk/issues/2),
+[#1](https://github.com/CoffeeImpliesCode/dusk/issues/1), and
+[#3](https://github.com/CoffeeImpliesCode/dusk/issues/3).
+M1's alternate symbol mappings and M19's two deliberate skips are separate.
+M14's 63/341 triage budget does not subtract implementation backlog.
+`docs/40-plan.md` owns selected remaining async, disk, persistent-cache, and
+specialization groups.
+
+#### Device weak canonical caches: 2026-10-08
+
+**Status: SourceReadyFrozen.** This result covers live native BGL, PL, sampler, shader, attachment, and pipeline cache contracts.
+It does not establish persisted `VkPipelineCache` data or driver-cache integration in pipeline creation.
+
+The final combined Debug/ReleaseSafe run (`artifact://853`) completed in 750.26 seconds.
+All 459 tests across 14 runs passed. The captured output contained no VUID or error report.
+
+The exercised command ran from the Dusk checkout:
+
+```sh
+devenv shell -- zig fmt src/engine/render_pass_cache.zig \
+  test/pipeline_canonical_layout.zig test/native_sampler.zig && \
+devenv shell -- zig build test-native-sampler test-pipeline-canonical-layout \
+  test-native-async-descriptors-release-safe test-native-async-pipeline-release-safe \
+  test-native-async-map-queue-release-safe test-native-async-scope-info-release-safe \
+  test-native-resource-store-release-safe test-native-sampler-release-safe \
+  test-native-attachment-state-release-safe test-native-full256-immediate-release-safe \
+  test-native-weak-index-release-safe test-native-attachment-store-release-safe \
+  test-native-render-state-release-safe test-pipeline-canonical-layout-release-safe -j2
+```
+
+| Exercised shard | Debug | Actual ReleaseSafe |
+| --- | ---: | ---: |
+| Native weak index | — | 23/23 |
+| Native resource store | — | 14/14 |
+| Native sampler | 15/15 | 15/15 |
+| Native scope/compilation info | — | 20/20 |
+| Native render state | — | 14/14 |
+| Native map/queue | — | 24/24 |
+| Attachment state | — | 12/12 |
+| Comprehensive native attachment store | — | 272/272 |
+| Native async pipeline | — | 12/12 |
+| Native async descriptors | — | 23/23 |
+| Low canonical layout | 7/7 | 7/7 |
+| Full256 readback | — | 1/1 |
+
+These tests exercise actual concurrent native dedup, lease-only hits, logical binding order, compatibility domains, and pending GPU roots.
+They also exercise pruning, missing cleanup procedures, reference overflow, fail-N rollback, and genuine native create/destroy counters.
+Real render-pass fail-N tests destroy created-but-uninserted handles and check actual create/destroy balance.
+These bounded counters and the tests' leak-detecting allocator are not a whole-program leak-absence or coverage proof.
+
+The sampler fixture reads raw floats, not requantized output bytes (`test/native_sampler.zig:360-376`).
+Its R/B midpoint property uses absolute tolerance `1/255`, derived from the UNORM8 source format.
+G=0 and A=1 remain exact. The oracle rejects nearest-filter endpoints and checks untouched `0xa5` padding.
+This fixture tolerance is not a universal Vulkan one-quantum guarantee.
+
+The out-of-tree published Debug consumer, BG205, exercised real native compute and graphics readbacks.
+Compute returned 113 with `0xa5` padding and completed serial.
+LocalSizeId `(4,2,1)` produced invocation count 8 and mask 255.
+RGBA8 graphics returned red, red, blue, blue with pitch 256 and `0xa5` padding.
+Full256 returned word-63 values 113 and 173, with red, green, green, blue graphics.
+The render bundle preserved its viewport. Cube-array creation used 12 layers.
+Device, adapter-list, and Instance teardown completed cleanly.
+BG205 exercised this published-module command:
+
+```sh
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  run -Doptimize=Debug -j2
+```
+
+BG210 subsequently completed the entire external consumer chain with exit 0 in 153.63 seconds:
+
+```sh
+devenv shell -- zig fmt /tmp/dusk-native-consumer/src/async_proof.zig && \
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  async-proof -Doptimize=Debug -j2 && \
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  run -Doptimize=ReleaseSafe -j2 && \
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  async-proof -Doptimize=ReleaseSafe -j2
+```
+
+Thus the published synchronous consumer also has actual ReleaseSafe evidence.
+The six-family async consumer passed in Debug and actual ReleaseSafe after the compilation-info alias-release oracle correction.
+It exercised scope pop, compilation info, queue completion, map completion, compute pipeline creation, and render pipeline creation.
+The compilation-info request survived public `Device.release` of its source alias before await.
+Its empty result had zero metadata count and null data. The consumer released its owned span.
+Pending compute creation settled the scope without a captured error. Cancellation delivered the cancelled callback result.
+Queue completion retired an actual accepted serial.
+Map readback returned 113 and red, red, blue, blue with pitch 256 and `0xa5` padding, then unmapped.
+Generated ProcessEvents compute and WaitAnyOnly render callbacks preserved userdata and produced actual readbacks.
+The consumer released their actual API aliases.
+Async Full256 produced 113 and 173, red, green, green, blue graphics, and preserved the bundle viewport.
+Alias, result, registry, Device, adapter-list, and Instance cleanup completed.
+BG210 alone does not establish Adapter request, Device request, or device-lost future execution.
+No utility GPU integration, platform completion, full gate, or protected-analyzer result is claimed here.
+
+**Native async source inventory.** Source inspection finds routes for all eight generated callback-future starts.
+The table records source presence, not additional exercised runtime results.
+
+| Family | Generated callback bridge | Separate typed observer route |
+| --- | --- | --- |
+| Adapter request | `async_root_requests.zig:531-549` | `async_root_requests.zig:772-800` |
+| Device request | `async_root_requests.zig:706-723` | `async_root_requests.zig:803-830` |
+| Buffer map | `native_async_map_queue.zig:373-400` | `native_async_map_queue.zig:486-495` |
+| Queue completion | `native_async_map_queue.zig:401` | `native_async_map_queue.zig:496-498` |
+| Compute pipeline | `native_async_pipeline.zig:311-313` | `native_async_pipeline.zig:317` |
+| Render pipeline | `native_async_pipeline.zig:314-316` | `native_async_pipeline.zig:320` |
+| Scope pop | `native_async_scope_info.zig:414-417` | `native_async_scope_info.zig:470` |
+| Compilation info | `native_async_scope_info.zig:203-208` | `native_async_scope_info.zig:235` |
+
+All paths above are under `src/engine/`.
+Device creation reserves request and loss cells together (`async_root_requests.zig:676-701`).
+`getLostFutureApi` accesses that reserved ID (`native_async_device.zig:197-207`).
+It is not a ninth operation start. Logging registration is callback control, not a future producer.
+The eight starts plus logging account for nine generated callback-info arguments.
+Typed observers use separate completion-cell routes. They do not adapt generated callbacks into std.Io.Future.
+Device request copies descriptors into owned storage and places the high Device at its final address before publication.
+Source inspection found no missing required native future family in these routes.
+The generated ProcTable remains a type contract, not a full C dispatch implementation.
+Wire and the browser forwarder remain outside this source inventory.
+The request-device callback lacks the request-adapter fixture's explicit three-mode loop.
+That test distinction does not establish an implementation gap or an additional runtime pass.
+
+**External root requests and device loss.** BG219 completed both actual modes with exit 0 in 189.74 seconds:
+
+```sh
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  root-async-proof -Doptimize=Debug -j1 && \
+devenv shell -- zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  root-async-proof -Doptimize=ReleaseSafe -j1
+```
+
+The typed route requested an owned Adapter, then an owned Device at its final high-owner address.
+It checked copied labels and limits after source mutation.
+Distinct generated callback routes transferred real Adapter and Device results through ProcessEvents and released their public receipts.
+Both modes printed:
+
+```text
+root-native-gpu: word63=113,173 guard-padding=0xa5 viewport-bundle=verified
+root-loss: reserved-future=stable userdata-calls=1 reason=destroyed immutable-diagnostic=verified
+root-canonical: process-events adapter=1 device=1 loss=1 real-gpu=verified owned-results=released
+root-cleanup: device-results,adapter-results,registry,instance released
+```
+
+Each mode printed the loss line twice, once for each distinct real Device route.
+The reserved loss Future ID remained stable after delivery and repeated destroy.
+BG210 and BG219 together exercise all eight native future-start families and the reserved loss notification in Debug and ReleaseSafe.
+This is bounded consumer evidence, not all callback-mode combinations, conformance, total coverage, or full C dispatch support.
+These commands do not identify a zero-layer selection. No zero-layer claim follows from this root result.
+Utility GPU integration and platform completion remain outside this proof.
+
+BG221 then passed the current-source ReleaseSafe registry, root-request, and native-device regression batch.
+The command exited 0 in 118.97 seconds:
+
+```sh
+devenv shell -- zig build test-async-registry-release-safe \
+  test-async-root-requests-release-safe test-native-async-device-release-safe -j1
+```
+
+| Shard | Actual ReleaseSafe result |
+| --- | ---: |
+| Async registry | 42/42 |
+| Async root requests | 29/29 |
+| Native async Device | 14/14 |
+| Total exercised scenarios | 85/85 |
+
+The root fixtures used actual Vulkan Adapter and Device creation, not a zero-device skip.
+They exercised fail-N preparation, atomic request/loss acceptance, final-address high ownership, hidden-owner cancellation cleanup, and consumed result receipts.
+The batch also exercised Adapter/loss callback modes, timed cancellation, duplicate IDs, reentry, shutdown, detached loss, and reference overflow.
+Request-device callback mode coverage remains distinct from the explicit Adapter/loss mode loops.
+The previous BG210 and BG219 consumer runs remain separate evidence, not extra scenarios in this 85-test count.
+This batch establishes no utility GPU completion, total coverage, full C dispatch, or platform completion.
+
+#### Bounded native utility Debug evidence
+
+BG222 ran the current native utility batch in 132.43 seconds and exited 1.
+Nine of twelve roots passed. This is not a complete batch pass or a published utility-consumer GPU result.
+
+```sh
+devenv shell -- zig fmt src/engine/adapter.zig src/engine/external_texture.zig \
+  test/native_timestamps.zig test/native_indirect.zig test/native_blit.zig \
+  test/native_external_texture.zig && \
+devenv shell -- zig build test-native-utilities-debug -j2
+```
+
+| Observed Debug root | Result |
+| --- | ---: |
+| Device policy | 2/2 |
+| Native kernel | 19/19 |
+| Combined reflection | 6/6 |
+| Frontend | 13/13 |
+| Derived state | 8/8 |
+| Capability | 6/6 |
+| Internal buffer | 17/17 |
+| Internal resources | 4/4 |
+| Timestamps | 9/9 |
+| Indirect | 4/6 |
+| Blit and external fixtures | Compilation failures |
+
+Timestamp tests compare GPU u32 limbs with an independent u128 oracle across valid-bit masks and periods.
+The 11,440-byte buffer case preserves `0xa5` guards. The batch includes fail-N and public CopySrc-only 352-byte-buffer paths.
+The latter restored actual CopyDestination initialization, not a fixture bypass.
+The two timestamp quantization policies had these observed frontend values:
+
+| Quantization | Period bits | Valid bits | Mantissa | Shift | Mask | Delta ticks |
+| --- | --- | ---: | ---: | ---: | --- | ---: |
+| Disabled | `0x3f800000` | 64 | 8388608 | -23 | `0xffffffff` | 138061 |
+| Enabled | `0x3f800000` | 64 | 8388608 | -23 | `0xffff0000` | 112580 |
+
+Both paths checked raw query availability, exact mapped GPU results against the u128 oracle, and padding.
+The Adapter-to-Device policy copy now preserves `timestamp_quantization`. Both device-policy regressions passed.
+Two indirect tests returned `ResourceDestroyed` before submit.
+Blit and external fixtures had compilation failures, not GPU passes.
+These observed failures keep utility completion open.
+The published utility Debug consumer had a temporary-root stride type compilation error.
+Its source correction is not an observed GPU smoke result.
+No whole utility batch, ReleaseSafe utility consumer, platform completion, or P6 closure follows from this result.
+
+**Superseding published utility consumer evidence.** BG229 subsequently passed in Debug and actual ReleaseSafe.
+The complete command exited 0 in 118.58 seconds:
+
+```sh
+devenv shell -- zig fmt /tmp/dusk-native-consumer/src/utilities_proof.zig && \
+devenv shell -- env -u VK_INSTANCE_LAYERS -u VK_LOADER_LAYERS_ENABLE \
+  -u VK_LOADER_LAYERS_ALLOW VK_LOADER_LAYERS_DISABLE=~all~ \
+  VK_LOADER_DEBUG=layer LP_NUM_THREADS=2 \
+  zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  utilities-proof -Doptimize=Debug -j1 && \
+devenv shell -- env -u VK_INSTANCE_LAYERS -u VK_LOADER_LAYERS_ENABLE \
+  -u VK_LOADER_LAYERS_ALLOW VK_LOADER_LAYERS_DISABLE=~all~ \
+  VK_LOADER_DEBUG=layer LP_NUM_THREADS=2 \
+  zig build --build-file /tmp/dusk-native-consumer/build.zig \
+  utilities-proof -Doptimize=ReleaseSafe -j1
+```
+
+Each mode verified four genuine GPU consumer families:
+
+1. Hardware timestamp queries, valid-bit/period handling, exact quantized output, and guard bytes.
+2. Selected indirect ranges with firstInstance disabled and enabled, exact pixels, unchanged arguments, and guards.
+3. Stencil offset-1 shader fallback with actual clear/copy, unchanged neighbors, and depth guards.
+4. Owned external/browser color conversion, gamma, gamut, flip, and independently derived color and guard checks.
+
+The external route survived caller-array mutation and original plane-alias release.
+It also exercised preaccept checks and ExternalTexture destruction after acceptance while pending child leases retained the GPU inputs.
+The loader output (`artifact://925`) showed four instance chains and four device chains without active VK_LAYER entries.
+The chains connected Application, Loader, and driver/device.
+KHRONOS validation was forced disabled in all four instance selections.
+The actual driver was llvmpipe LLVM 21.1.8, Mesa 26.2.2.
+`LP_NUM_THREADS=2` limited this driver's worker count for the run. It did not replace the Vulkan driver.
+This supersedes the earlier published utility compilation failure, not BG222's incomplete permanent batch.
+BG229 establishes zero-layer execution for this selected published consumer, not every utility path or platform.
+The validation-enabled external fixtures in BG230 had partial results. They do not establish a complete utility batch.
+No full utility batch, full gate, platform completion, or P6 closure is claimed here.
+
+**Current native blit regression evidence.** BG231 exited 0 in 148.50 seconds:
+
+```sh
+devenv shell -- zig fmt test/native_blit.zig && \
+devenv shell -- env LP_NUM_THREADS=2 zig build \
+  test-native-blit test-native-blit-release-safe -j1
+```
+
+Debug and actual ReleaseSafe each passed 21/21 tests, with zero skips and no captured VUID or error report.
+The four-sample depth32 case read 0.625 from all four samples.
+Readbacks also checked padded RGBA/BGRA pack/unpack, float/signed/unsigned clears, inactive holes, sparse unsigned slot 7, and preserved stencil/depth neighbors.
+Other cases checked offset-1 stencil fallback, offset-2 odd-width depth16, sampler RB swizzle, overlap staging, nonlinear alpha/flip, mip/layer selection, and sRGB formats.
+The accepted frontend path released source-creator aliases before fence completion, then checked precise texels and guard bytes.
+Fail-N cases exercised parameter/native-pipeline failure, recording poison, rollback, and refusal to accept a submission serial.
+Invalid signed bounds, aspects, and mismatched ranges emitted no commands.
+
+The nonconstant linear RGBA8-center oracle uses ideal values with tolerance `1/255 + 0.00002`.
+Nearest, constant, and background checks retain tolerance `0.00002`.
+This is a fixture quality policy, not a universal Vulkan one-quantum guarantee.
+The sampler fixture's separate raw-float midpoint policy remains `1/255` for R/B and exact G/A.
+The Vulkan push-constant validation errors were corrected by matching the actual all-stage range.
+Multisampled depth validation now follows the declared multisampled layout.
+This closes the observed blit shard failures, not the outstanding external fixtures or the entire utility batch.
+
+**Additional current ReleaseSafe utility regressions.** BG232 exited 0 in 506.16 seconds:
+
+```sh
+devenv shell -- env LP_NUM_THREADS=2 zig build \
+  test-native-kernels-release-safe test-native-indirect-release-safe \
+  test-native-timestamps-release-safe test-native-internal-buffers-release-safe \
+  test-native-derived-roots-release-safe test-native-internal-resources-release-safe \
+  test-native-utility-device-release-safe test-native-utility-capabilities-release-safe \
+  test-native-utility-frontend-release-safe test-native-combined-reflection-release-safe -j2
+```
+
+| Actual ReleaseSafe root | Result |
+| --- | ---: |
+| Native kernels | 19/19 |
+| Indirect | 6/6 |
+| Timestamps | 9/9 |
+| Internal buffers | 17/17 |
+| Derived roots | 8/8 |
+| Internal resources | 4/4 |
+| Device policy | 2/2 |
+| Capabilities | 6/6 |
+| Frontend | 13/13 |
+| Combined reflection | 6/6 |
+| Total | 90/90 |
+
+The captured output contained no VUID or error report.
+Together with BG231's 21/21 ReleaseSafe blit tests, these results cover eleven utility roots.
+They supersede the earlier indirect failures and add actual ReleaseSafe evidence, not a complete twelve-root batch pass.
+The hardware timestamp period bits remained `0x3f800000`, valid bits 64, mantissa 8388608, and shift -23.
+Observed deltas were 75513 with mask `0xffffffff` and 80401 with quantization mask `0xffff0000`.
+These values describe this run. They are not timing or throughput guarantees.
+
+The external fixture still had four logical failures outside this passing command.
+Previous mixed layouts with UINT_MAX auxiliary bindings returned actual `VkOutOfHostMemory`.
+The driver's internal allocation mechanism is an inference, not an observed fact.
+The selected bounded auxiliary ABI in `docs/30-port-design.md` preserves public bindings and unchanged caller SPIR-V.
+Its source cutover alone is not a generated-artifact or GPU pass.
+No whole twelve-root utility batch or P6 closure is claimed here.
+
+#### Native SPIR-V stage constants: 2026-10-08
+
+This evidence covers native `StageInput.constants`, not all M14 work or WebGPU conformance.
+Generated WebGPU Device ABI integration and async pipeline creation remain outside this result.
+No WGSL parser or uninitialized WGSL override behavior is claimed.
+
+The observed RED run, BG93, gave `SpecId` 7 values `2` and `3` the same compute key.
+The pipeline-cache shard passed 17/18 tests and failed the identity regression.
+BG94 passed SPIR-V 14/14 and shader-module 7/7 tests.
+Three other checks initially failed compilation because fixture device options and binding offsets needed fixes.
+Those compilation failures were not runtime passes.
+Before the final review fixes, BG95 passed all 10/10 build steps.
+Its pipeline-cache shard passed 24/24 tests, including the former RED regression.
+
+BG97 tested the reviewed shared-ID, host-read-barrier, and mixed-scalar-family implementation.
+The focused command passed all 16/16 build steps:
+
+```sh
+zig build test-spirv test-shader-module test-pipeline-cache \
+  test-compute-specialization test-compute-specialization-release-safe -j2 --summary all
+```
+
+SPIR-V passed 15/15 tests. Shader-module passed 7/7. Pipeline-cache passed 24/24.
+Host tests cover alias and order identity, scalar normalization, and compute, vertex, and fragment stage ABI payloads.
+They also cover invalid cached-input rejection, unaligned byte input, checked word counts, and fail-N key and factory rollback.
+Mixed-scalar-family coverage permits identical size and bits, and rejects differing sizes or bits, negative zero, and range failures.
+Native graphics stage information passed host inspection. No actual specialized graphics draw proof exists yet.
+
+Both compute shards passed 4/4 tests: Debug and actual ReleaseSafe.
+Each run contains two new compute scenarios and two existing imported triangle tests.
+It does not contain four new compute tests.
+Each mode performs ten actual dispatches and coherent readbacks.
+Both scenarios record through `cmd.compute_encoder`, then replay through `engine.command_buffer`.
+The dispatch-table `SHADER_WRITE` to `HOST_READ` barrier follows replay, before command-buffer completion.
+The scenarios submit Vulkan work, wait, and read coherent memory.
+
+| Scenario | Readbacks: default, named, numeric, reversed named, reversed numeric | Unique pipelines after each dispatch |
+| --- | --- | --- |
+| Distinct IDs | `113/25/35/25/35` | `1/2/3/3/3` |
+| Shared ID | `121/44/55/44/55` | `1/2/3/3/3` |
+
+The final two dispatches in each scenario reuse cached pipelines without changing their outputs.
+Different converted values create distinct pipelines.
+The shared-ID fixture gives two `uint32` shader result IDs one `SpecId` 7 and independent defaults.
+BG97 observed these outputs after the review fixes.
+The earlier BG95 results predate the host-read barrier and shared-ID corrections.
+
+Final style and cleanup changes followed BG97.
+BG99 passed 68/73 steps but failed root compilation in Debug and ReleaseSafe.
+The new `TooManyConstants` test used invalid slice structure syntax.
+This test-source error was not a production-code failure. Named GPU and host shards passed.
+The repair uses an explicit pointer slice and checks whether the byte range fits the target.
+The length rejection occurs before any dereference.
+BG102 then passed all 73/73 aggregate steps (`artifact://366`) in 312.62 seconds.
+Root tests passed 262/262 in Debug and 262/262 in actual ReleaseSafe.
+All 11 contained codec tests ran, including mixed families, oversized input, fail-N allocation, and rounding.
+Both GPU shards again passed 4/4, with ten real dispatch/readbacks per mode.
+BG98 initially reported 35 `ziglint` style findings.
+After fixes, BG100 passed `ziglint`, but `zlint` reported one unreachable-cleanup warning.
+The final cleanup fix replaces that unreachable path with a panic.
+Before the boundary-test repair, BG101 passed the selection of exactly 142 explicit files.
+`ziglint` reported zero diagnostics. `zlint --deny-warnings` reported zero errors and zero warnings.
+The reported durations were 7.05 seconds for `ziglint` and 208 ms for `zlint`.
+BG104 passed final source lint after the boundary-test repair, with exactly 142 explicit files.
+`ziglint` reported zero diagnostics in 8.52 seconds.
+`zlint --deny-warnings` reported zero errors and zero warnings in 295 ms.
+BG103 passed all three cross-test rows in 94.71 seconds.
+Each row executed 262 root tests: `x86_64-linux`, `aarch64-linux`, and big-endian `powerpc64-linux`.
+The summary reported `pass=3`, `fail=0`, `build_only=0`, and `partial=0`.
+The run ID is `20261008-002745-1243037-21180`.
+These rows prove foreign root-test execution, not foreign GPU execution.
+
+BG105 passed the zero-layer compute run in 1.88 seconds (`artifact://371`), with all 7/7 build steps.
+Debug and actual ReleaseSafe each passed 4/4 tests, with ten real dispatch/readbacks per mode.
+
+```sh
+env VK_INSTANCE_LAYERS= VK_LOADER_LAYERS_DISABLE='*' VK_LOADER_DEBUG=layer \
+  zig build test-compute-specialization test-compute-specialization-release-safe -j2 --summary all
+```
+
+All eight instance call stacks showed Application → Loader → Drivers.
+Device call stacks showed Application → Loader → Device, with lavapipe llvmpipe LLVM 21.1.8.
+The empty layer variable caused a loader warning about `""`, but no call stack inserted a validation layer.
+BG106 passed `devenv shell -- zig-gate --no-zbc` with exit code zero in 36.16 seconds.
+It printed `GATE PASSED`.
+Exactly five stages passed: `fmt --check`, build, test, ast-check, and `zlint`.
+It explicitly omitted `zbc`, had no `zwanzig` stage, and left coverage off.
+BG104 source lint and BG103 cross-tests supply separate supplemental evidence.
+This is not a full ten-stage green result.
+The full ten-stage contract remains unclaimed and outside the permitted analyzer boundary.
+No current clean analyzer result is claimed.
+The pre-feature analyzer snapshot does not establish a current warning count or clean analysis for the new source.
+Workers did not rerun `zwanzig` or `zbc`.
+
+#### Phase 1 current observations: 2026-10-08
+
+BG108 (`artifact://412`) executed generator regeneration and source formatting before the focused checks.
+The focused run passed 25/28 build steps in 263.91 seconds, then exited with code 1.
+Phase 1 remains RED. Test-source repair and reverification are pending.
+
+Pipeline-cache test compilation reported four errors, so that shard has no runtime result.
+One compute key descriptor omitted `limits`.
+Three device initializers omitted `uncaptured_context` and `uncaptured_callback`.
+These compilation errors do not negate the runtime passes in the other focused shards.
+
+| Focused shard | Observed result |
+| --- | --- |
+| API conformance, Debug | 14/14 tests passed |
+| SPIR-V, Debug | 28/28 tests passed |
+| Render pipeline, Debug and actual ReleaseSafe | 2/2 tests passed per mode |
+| Triangle, Debug and actual ReleaseSafe | 5/5 tests passed per mode |
+| Compute specialization, Debug and actual ReleaseSafe | 8/8 tests passed per mode |
+| Pipeline cache, Debug | Compilation failed with four errors |
+
+Each triangle shard contains five tests:
+
+1. Existing 2×2 triangle draw and sixteen-channel readback.
+2. Existing replayed blend-constant draw with clear and padding checks.
+3. New vertex-specialization GPU scene with changed coverage and canonical cache identity.
+4. New fragment-specialization GPU scene with changed color and canonical cache identity.
+5. New host fail-N test for graphics specialization-key allocation rollback.
+
+The specialized graphics scenes check changed pixels, preserved clear pixels and padding, and live pipeline reuse.
+Each compute shard contains three compute tests and imports all five triangle tests.
+Thus 8/8 is not eight new compute tests.
+The two existing scalar scenarios passed defaults, overrides, shared-ID behavior, and canonical cache reuse.
+The new workgroup scenario passed native invocation-count and coverage readbacks for `BuiltIn WorkgroupSize`, including shared IDs.
+
+| Workgroup fixture | Invocation counts across five cases | Coverage masks across five cases | Unique pipelines |
+| --- | --- | --- | --- |
+| Distinct IDs | `4/6/8/6/8` | `15/63/255/63/255` | `1/2/3/3/3` |
+| Shared ID | `4/9/16/9/16` | `15/511/65535/511/65535` | `1/2/3/3/3` |
+
+BG108 does not establish a current root aggregate, zero-layer run, lint result, cross-test result, or procedure ABI compatibility result.
+The API conformance pass does not establish C ABI compatibility.
+The BG102 aggregate and BG105 zero-layer records above remain historical evidence for their earlier source state.
+They do not establish those results for the Phase 1 source.
+The protected analyzer boundary remains unchanged. Workers did not run `zwanzig` or `zbc`.
+
+#### Phase 1 bounded GREEN, with review fixes pending: 2026-10-08
+
+After the BG108 compilation repairs, BG109 (`artifact://419`) passed 75/77 aggregate steps.
+Its pipeline-cache shard passed 28 tests and failed two.
+The zero-axis case expected `WorkgroupAxisZero`, but the resolver returned `SpirvMalformed`.
+The wrong-stage fixture retained an invalid workgroup mode, so decoding returned `SpirvMalformed` before the expected `StageMismatch`.
+The test expectation and fixture were corrected before BG110.
+
+BG110 (`artifact://426`) executed regeneration and formatting, then passed all 77/77 aggregate build steps.
+This is a bounded GREEN result for that source state, not Phase 1 closure.
+
+| Shard | BG110 aggregate result |
+| --- | --- |
+| API conformance, Debug | 15/15 tests passed |
+| SPIR-V, Debug | 29/29 tests passed |
+| Pipeline cache, Debug | 30/30 tests passed |
+| Root, Debug and actual ReleaseSafe | 262/262 tests passed per mode |
+| Triangle, Debug and actual ReleaseSafe | 5/5 tests passed per mode |
+| Compute specialization, Debug and actual ReleaseSafe | 8/8 tests passed per mode |
+| Render pipeline, Debug and actual ReleaseSafe | 2/2 tests passed per mode |
+
+The triangle and compute test counts retain the composition described in the BG108 record.
+They do not represent five new graphics tests or eight new compute tests.
+BG110 also passed all 13/13 steps of this explicit zero-layer selection:
+
+```sh
+env VK_INSTANCE_LAYERS= VK_LOADER_LAYERS_DISABLE='*' VK_LOADER_DEBUG=layer \
+  zig build test-triangle test-triangle-release-safe \
+  test-compute-specialization test-compute-specialization-release-safe -j2 --summary all
+```
+
+Triangle passed 5/5 and compute specialization passed 8/8 in each mode.
+Loader logs showed Application → Loader → Drivers and Application → Loader → Device call stacks.
+The filter explicitly disabled `VK_LAYER_KHRONOS_validation`.
+The driver was lavapipe, reported as llvmpipe LLVM 21.1.8.
+These logs establish zero-layer execution for this selection and source state.
+
+Source review then found six production issues with valid-input decoding, feature gates, and stage selection:
+
+1. A `WorkgroupSize` builtin could hide the presence of `LocalSizeId` from the feature gate.
+2. Entry selection needed both execution model and entry-point name.
+3. Integer expression evaluation needed wrapping arithmetic.
+4. Signed values needed bit-pattern handling.
+5. Expression validation needed opcode-specific type and width rules.
+6. `UDiv` and `UMod` needed unsigned interpretation.
+
+Those corrections and final reverification are pending.
+BG110 does not prove the corrected behavior or total coverage of the new implementation.
+No current full gate, lint, cross-test, procedure ABI compatibility, or protected-analyzer result is claimed.
+The protected analyzer boundary remains unchanged. Workers did not run `zwanzig` or `zbc`.
+
+#### Phase 1 semantic corrections verified, final checks pending: 2026-10-08
+
+BG111 (`artifact://436`) passed all 77/77 aggregate steps and exited with code zero in 287.82 seconds.
+All six production findings listed in the BG110 record were corrected.
+Their regressions passed after the corrections.
+The evidence consists of source-backed defects and passing-after tests.
+No failing-before execution was observed for these new review cases.
+
+| Shard | BG111 aggregate result |
+| --- | --- |
+| API conformance, Debug | 15/15 tests passed |
+| SPIR-V, Debug | 38/38 tests passed |
+| Pipeline cache, Debug | 32/32 tests passed |
+| Root, Debug and actual ReleaseSafe | 262/262 tests passed per mode |
+| Triangle, Debug and actual ReleaseSafe | 5/5 tests passed per mode |
+| Compute specialization, Debug and actual ReleaseSafe | 8/8 tests passed per mode |
+| Render pipeline, Debug and actual ReleaseSafe | 2/2 tests passed per mode |
+
+SPIR-V gained nine arithmetic and metadata tests compared with BG110.
+Pipeline cache gained two stage-selection and feature-gate tests.
+The graphics and compute counts retain the BG108 composition.
+BG111 repeated current GPU readbacks with this explicit zero-layer selection:
+
+```sh
+env VK_INSTANCE_LAYERS= VK_LOADER_LAYERS_DISABLE='*' \
+  zig build test-triangle test-triangle-release-safe \
+  test-compute-specialization test-compute-specialization-release-safe -j2 --summary all
+```
+
+All 13/13 selected steps passed.
+Triangle passed 5/5 and compute specialization passed 8/8 in Debug and actual ReleaseSafe.
+This run did not request a verbose loader trace.
+BG110 supplies the separate loader-call-stack evidence. BG111 supplies current execution and readback evidence under the explicit layer-disabling environment.
+An `ast-check` selection of five touched production, build, and generator files also passed.
+
+BG112 then reported 24 style findings across 13 explicit files.
+The style corrections landed after that RED result.
+The build now has three concrete ReleaseSafe regression selectors:
+`test-spirv-release-safe`, `test-pipeline-cache-release-safe`, and `test-api-conformance-release-safe`.
+BG113 aggregate, source lint, and formatting checks are pending.
+No BG113 result or Phase 1 closure is claimed here.
+No full gate, cross-test, procedure ABI compatibility, total-coverage, or protected-analyzer result is claimed.
+Workers did not run `zwanzig` or `zbc`.
+
+#### Phase 1 final bounded verification: 2026-10-08
+
+BG113 (`artifact://441`) passed all 83/83 aggregate steps.
+The added concrete ReleaseSafe shards executed their tests, not only compilation.
+
+| Shard | Debug | Actual ReleaseSafe |
+| --- | --- | --- |
+| API conformance | 15/15 | 15/15 |
+| SPIR-V | 38/38 | 38/38 |
+| Pipeline cache | 32/32 | 32/32 |
+| Root | 262/262 | 262/262 |
+| Triangle | 5/5 | 5/5 |
+| Compute specialization | 8/8 | 8/8 |
+| Render pipeline | 2/2 | 2/2 |
+
+All listed tests passed. The GPU counts retain the BG108 test composition and actual scene readbacks.
+BG113 source lint was still RED despite the aggregate pass.
+`ziglint` passed its 13-file selection, but `zlint` reported one `unsafe-undefined` field-default warning.
+The repair moved the undefined path storage into the explicit `Evaluation` constructor.
+BG114 then passed all 13/13 directed steps, with SPIR-V 38/38 and compute specialization 8/8 in both modes.
+The compute shards also executed their five imported triangle tests.
+BG114 remained RED because `zlint` required a safety comment.
+The final comment explains the initialized dependency prefix: each slot is written before descendants read it.
+
+The parent's final check command exited with code zero in 2.83 seconds.
+`ziglint` reported zero diagnostics across 13 explicit files.
+`zlint --deny-warnings` reported zero errors and zero warnings across those files in 16 ms.
+Formatting checks passed for 15 files, including the two generated objects and procedure files.
+Final `ast-check` passed for `workgroup.zig` and `build.zig`.
+BG111 supplies the earlier five-file production, generator, and build `ast-check` result for the other unchanged files.
+All changed-file LSP diagnostic checks passed.
+
+This evidence proves the specified Phase 1 behavior within the recorded native scenarios and host regressions.
+It does not claim a full gate, new cross-test coverage, total coverage, procedure ABI compatibility, or protected analysis.
+It does not establish `NoWrap` behavior or native wide-integer feature support.
+Phase 2 native integration is not implemented.
+Workers did not run `zwanzig` or `zbc`.
+
+#### Native integration prerequisites, bounded evidence: 2026-10-08
+
+These observations cover header generation and native callback binding prerequisites.
+They do not establish Phase 2 native integration success or native consumer execution.
+The earlier native procedure-table and optional-buffer evidence remains unchanged.
+
+BG117 failed the exact Vulkan header version 365 pin because the old development environment supplied version 357.
+Despite that failure, generation published version 357 output.
+The permanent environment fix fetches `CoffeeImpliesCode/vulkan-headers` at revision `8249cb829eb402c65cb7e3778c51b0f8edc4a4b6` as header data only.
+The environment now supplies `/nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan`.
+Its actual `VK_HEADER_VERSION` is 365.
+`UpdateSourceFiles` now depends transitively on `CheckFile`, so a failed pin check blocks publication.
+
+| Run | Observed prerequisite result |
+| --- | --- |
+| BG123 | An isolated five-file generation workspace with actual version 357 headers failed 3/6 steps, as expected. |
+| BG123 | `cmp` confirmed both copied outputs, `src/vulkan.zig` and `src/vk/dispatch.zig`, remained byte-identical afterward. |
+| BG124 | Normal generation without overrides passed 6/6 steps and corrected the checked-in output to version 365. |
+
+BG124 used the normal command:
+
+```sh
+devenv shell -- zig build generate -j2 --summary all
+```
+
+BG122 failed a real exported `api.LoggingCallback` definition and invocation.
+Its C calling convention could not accept the native `[]const u8` parameter.
+The generator now emits all 14 callback-function declarations with the native default calling convention.
+The separate Vulkan and foreign function-pointer branch is unchanged.
+Callback information, mode, userdata, and nullability are unchanged.
+BG126 regenerated and formatted the output, then repeated the same actual callback-binding smoke.
+Only the implementation's `.c` convention was removed.
+The smoke passed 1/1 in Debug and 1/1 in explicitly optimized ReleaseSafe.
+
+BG126's focused native, null, limits, worker, pipeline, and API selection remains RED.
+The 12-shard selection encountered an ambiguous `Device.InitError` and three native-test initializers that omitted required `power_preference`.
+The corrective owner is repairing these compilation blockers.
+These failures do not establish native runtime success or a native consumer result.
+No full gate or protected-analyzer result is claimed. Workers did not run `zwanzig` or `zbc`.
+
+#### Native prerequisites and worker drain follow-up: 2026-10-08
+
+BG127 passed 31/37 focused steps. The selection remains RED.
+The earlier `Device.InitError` alias and required `power_preference` initialization blockers were resolved.
+Native-device Debug and actual ReleaseSafe compilation then failed in `native_resources.validateFinished`.
+Its declared error union omitted command-iterator errors.
+The source correction landed after BG127 but has not yet compiled.
+Three native capability review findings also remain under correction.
+No native consumer execution is established.
+
+| BG127 shard | Debug | Actual ReleaseSafe |
+| --- | --- | --- |
+| API conformance | 18/18 passed | 18/18 passed |
+| Pipeline cache | 34/34 passed | 34/34 passed |
+| Limits | 13/13 passed | 13/13 passed |
+| Null device | 17/17 passed | 17/17 passed |
+| Worker pool | 2/2 passed | 2/2 passed |
+| Native device | Compilation blocked | Compilation blocked |
+
+API conformance covers all nine method callback-information records and all five logical descriptor members.
+The tests cover chain copies, mode, userdata, and nullable shape.
+The census remains 347 objects, 205 methods, and 571 members.
+Pipeline-cache tests include owned-hit aliasing and final destruction.
+
+The worker proof preserves an observed failing-before result.
+BG115's standalone accepted-task shutdown sentinel expected `1` but read `0`.
+After the drain repair, BG116 passed that standalone regression 1/1 in Debug and actual ReleaseSafe.
+BG127 passed both the ordinary 1,000-task test and the deterministic borrowed-context shutdown-drain regression in each mode.
+Successful posts borrow contexts until `task.run` returns. Rejected posts do not borrow them.
+Shutdown and exhaustion stop acceptance, then drain accepted tasks before worker exit.
+The normal iteration limit permits a bounded queued tail, not unbounded execution.
+The source contract does not establish an observed exhaustion-limit runtime test.
+
+These results do not implement new async futures, events, or requests. Async Phase 3 remains pending.
+No full gate, native consumer, or protected-analyzer result is claimed.
+Workers did not run `zwanzig` or `zbc`.
+
+#### Explicit worker Io and native safety RED evidence: 2026-10-08
+
+The explicit Task-Io cutover changed `Task.run` to `*const fn (io: std.Io, context: *anyopaque) void`.
+`QueuedTask` carries the exact `postTask` Io value through callback return.
+The caller keeps that Io's backend state and task context alive until the callback returns.
+Worker synchronization uses the explicit initialization Io passed at thread entry.
+Its caller-owned backend state remains alive until `join` returns.
+No global or pool-Io fallback supplies the callback Io.
+Accepted-task drain and rejection-before-acceptance guarantees remain unchanged.
+
+BG132 formatted the worker source, worker test, and standalone shutdown reproduction before executing the reproduction.
+The standalone reproduction passed 1/1 in Debug and 1/1 in explicitly optimized ReleaseSafe.
+The command exited with code zero in 31.58 seconds.
+This is current standalone shutdown evidence, not a new Io-wiring test.
+The full two-test worker shard after the Task-Io cutover remains pending.
+BG127's 2/2 results in both modes predate this cutover.
+
+BG131 ran five new native safety cases with `--test-filter 'native safety'` before production changes.
+Debug reported zero passed and five failed, with exit code 1.
+The observed failure classes were:
+
+1. Teardown did not refuse an active wait.
+2. A failed idle wait destroyed the owner.
+3. Replay admitted a staged unmap.
+4. A public wait raced low-level queue access.
+5. An implicit-submit wait raced low-level queue access.
+
+The native operation-safety owner is correcting production behavior.
+No passing repair result or native consumer result is claimed.
+Async Phase 3 remains pending. No full gate or protected-analyzer result is claimed.
+Workers did not run `zwanzig` or `zbc`.
+
+#### Native safety and owned-error component verification: 2026-10-08
+
+BG134 passed the current native safety selection 10/10 in Debug and 10/10 in explicitly optimized ReleaseSafe.
+The command exited with code zero in 113.56 seconds.
+All five BG131 failing-before cases now pass.
+The selection also covers queue leases, device loss, idle failure, and native mutex pins.
+The four production safety corrections landed before this run.
+
+`getQueue(io)` now returns `OperationError!QueueLease`.
+The lease owns the queue gate and a lifetime pin, but stores no Io.
+`deinit(io)` remains readable and is idempotent for the same lease.
+Nonterminal failures preserve the owner.
+`DeviceLost` permits lifetime-only retirement, with children destroyed before parents.
+This path does not report normal completed-serial progress.
+These selected tests do not establish full native consumer execution.
+At this point, BG135's full 12-shard selection and BG136's Debug consumer execution were pending.
+
+BG133 independently tested `test/error_sets.zig` through the exact exported core module.
+The module mapping used `-Mdusk=/tmp/dusk-owned-errors-root.zig` and `-Mcore=src/core/root.zig`.
+The temporary root contained `pub const core = @import("core");`.
+The Debug and explicitly optimized ReleaseSafe runs each passed 15/15 tests.
+The command exited with code zero in 38.99 seconds.
+Each run contains ten new ownership tests and five existing tests.
+
+The component supplies allocator-owned `ErrorDraft`, `ErrorReservation`, and `ErrorRef` nodes with immutable error views.
+Node and payload allocators can differ. Each allocation returns to its exact allocator.
+Reserved references and sealing require no allocation.
+Static out-of-memory, device-loss, and `@errorName` messages remain available.
+Retain uses bounded compare-and-swap. `releaseMany` consumes prepaid reference slots.
+Owned nodes clear borrowed trace data.
+`EssentialErrorData.init` now frees each owned context string if a later allocation fails.
+The existing mutable draft API remains available.
+
+These owning nodes are original Dusk glue, not an invented Dawn function port.
+BG133 is component proof only. It does not implement async completion, error scopes, a registry, or callback delivery.
+The current core scope still borrows error data. Its ownership cutover remains pending in Phase 3.
+Snapshot diagnostics checks are not yet observed.
+No full gate, native consumer, or protected-analyzer result is claimed.
+Workers did not run `zwanzig` or `zbc`.
+
+#### Post-cutover worker result and consumer compilation RED: 2026-10-08
+
+BG135 (`artifact://529`) passed all 37/37 focused steps and exited with code zero in 263.17 seconds.
+Each shard executed in Debug and actual ReleaseSafe:
+
+| Shard | Tests passed per mode |
+| --- | --- |
+| Native device | 13/13 |
+| Null device | 17/17 |
+| Limits | 21/21 |
+| Worker pool | 2/2 |
+| Pipeline cache | 34/34 |
+| API conformance | 18/18 |
+
+Native device includes three earlier tests and ten safety tests.
+Limits includes six budget and two hardware-admission regressions.
+The worker result follows the explicit Task-Io cutover.
+This focused proof predates the subsequent native-consumer contract corrections.
+
+BG136 attempted real published-consumer Debug compilation.
+It failed with four errors and exit code 1 in 19.68 seconds.
+The high-level `OperationError` omitted existing compute and render `pipeline.CreateError` members.
+`compatibleRenderPass` returned `RenderPassInfo` where the caller expected a Vulkan render-pass handle.
+The temporary consumer's `tempSetPipeline` options omitted `requirements`.
+The source fix composes the existing compute and render `pipeline.CreateError` sets into the finite `OperationError` set.
+The native render-pass fix extracts `RenderPassInfo.render_pass`.
+The temporary consumer now derives `requirements` from its actual empty layout.
+No GPU consumer execution or readback proof is established by this failed compile.
+The published consumer exposed lazy bodies that the focused shards had not compiled.
+BG135's passes do not establish that consumer contract.
+
+#### Owned shader diagnostics and consumer runtime RED: 2026-10-08
+
+BG138 tested the shader-module shard through the published root.
+`zig build test-shader-module` passed 4/4 Debug steps and 14/14 tests.
+The separate `zig test test/shader_module.zig -OReleaseSafe` invocation explicitly optimized the root, dusk, and Vulkan modules.
+That actual ReleaseSafe run passed 14/14 tests.
+The combined command exited with code zero in 67.11 seconds.
+Each run contains seven new ownership tests and seven earlier tests.
+The new tests cover source-text overwrite, source-array and module destruction, cloning, borrowed builder text, and every allocation-failure rollback.
+
+`snapshot(gpa, []Message)`, `Messages.clone(gpa, Messages)`, and `snapshotCompilationInfo(gpa, *ShaderModule)` produce owned snapshots.
+Each snapshot owns its message array and one contiguous text allocation.
+It preserves all metadata, including empty text.
+The error-module constructor now owns caller-supplied text.
+`getCompilationInfo` still returns an immutable module-lifetime borrow.
+These snapshots are original Dusk glue, not fabricated Dawn function ports or a new async implementation.
+
+BG137 compiled the published native consumer after the finite-error and `RenderPassInfo` source corrections.
+Execution then terminated with `SIGABRT`.
+The temporary consumer's deferred `pass.deinit`, at main line 196, reached double or poisoned `RenderEncoderBase.usage` cleanup.
+`RenderEncoderBase.end` always defers `self.deinit`, on both success and failure.
+That cleanup releases the lists and sets `self.* = undefined`.
+The consumer's unconditional deferred cleanup therefore read poisoned usage and attempted a second cleanup.
+This was a consumer ownership defect, not a library ABI defect.
+The temporary render scope now tracks `owns_pass`.
+It cleans up only when a recording step fails before `end`.
+Immediately before `end`, it relinquishes ownership because `end` consumes the pass on both outcomes.
+`ComputeEncoder.end` has a different contract: it transfers usage without deinitializing the encoder.
+The consumer retains its compute cleanup.
+BG137 did not establish a GPU consumer pass or complete readback result.
+
+#### Published native consumer execution verified: 2026-10-08
+
+BG139 ran the actual out-of-tree published-module consumer at `/tmp/dusk-native-consumer` after these fixes.
+Debug and actual ReleaseSafe each passed all 4/4 build steps.
+The combined command exited with code zero in 90.49 seconds.
+Both runs explicitly set `VK_INSTANCE_LAYERS` to an empty value and `VK_LOADER_LAYERS_DISABLE` to `~all~`.
+This records the selected zero-layer environment, not a new loader-call-stack inspection.
+
+The consumer reported these five proof lines in each mode:
+
+| Proof line | Observed result |
+| --- | --- |
+| Compute specialization and wait | Output `113`, preserved `A5` padding, and completed serial wait |
+| `LocalSizeId` specialization | Workgroup `4×2×1`, invocation count `8`, coverage mask `255`, and preserved `A5` padding |
+| Graphics specialization | RGBA8 pixels red/red/blue/blue, row pitch `256`, and preserved `A5` padding |
+| `imageCubeArray` | Queried and enabled feature, then created a 12-layer view |
+| Cleanup | Device, list, and instance cleanup completed |
+
+The consumer used the published module, not manual `VkDevice`, queue, or backend assembly.
+It used no fake runtime or GPU fallback and skipped no GPU case.
+BG139 supplies actual compute, graphics, feature-query, and cleanup evidence for this consumer.
+It does not replace the full affected-shard or aggregate checks after the source corrections.
+BG135's 37/37 result predates those corrections. BG133, BG134, and BG138 retain their separate component scope.
+Current full affected-shard, aggregate, and clean permitted-style results remain unobserved.
+No coverage result, full gate, `zbc`, or `zwanzig` result is claimed.
+This consumer does not prove async completion, driver-cache behavior, presentation, or mobile execution.
+Phases 3 and 4 remain pending. The retained-shell and shared-`GuardRc` proposals are not implemented by this proof.
+
+#### Post-consumer focused checks and style findings: 2026-10-08
+
+BG140 followed the finite-error-set and render-pass source corrections.
+It passed all 25/25 focused build steps and the default published build's 1/1 step.
+The combined command exited with code zero in 101.36 seconds.
+
+| Shard | BG140 result |
+| --- | --- |
+| Native device, Debug and actual ReleaseSafe | 13/13 tests passed per mode |
+| Limits, Debug and actual ReleaseSafe | 21/21 tests passed per mode |
+| Worker pool, Debug and actual ReleaseSafe | 2/2 tests passed per mode |
+| Error sets, Debug through the published root | 15/15 tests passed |
+| Shader module, Debug | Cached 14/14 passing result |
+
+BG140 adds published-root error-set evidence. BG133 used the isolated exported-core mapping in both modes.
+BG138 supplies the separate shader-module Debug and actual ReleaseSafe results.
+BG140 is a focused selection, not a full affected-shard or aggregate result.
+It precedes the subsequent source-style corrections.
+
+Six LSP diagnostic requests returned `OK`.
+They covered native device, context, capability, core errors, compilation messages, and native tests.
+This records diagnostic requests, not an AST or runtime test result.
+
+BG142 passed format checks for the explicit selection of 24 affected files.
+The subsequent `ziglint` command reported warnings and exited with code 1 in 1.68 seconds.
+The command used `&&`, so `zlint` did not execute.
+Source owners corrected the import, line-style, allocator, comptime, and Io-order findings before BG143.
+The exact false-positive contract report for the `Z030` deinitialization heuristics remains pending.
+Refused or stopped owners must retain their safety contract. A style fix must not poison them to silence a heuristic.
+No clean style, AST, full aggregate, coverage, full gate, or protected-analyzer result follows from these observations.
+
+#### Source-style corrections and repeated native execution: 2026-10-08
+
+BG143 formatted eight selected files, then repeated focused native checks and the actual published-module consumer.
+The formatter changed three source files and collapsed several manual line breaks.
+The focused selection passed all 21/21 build steps.
+
+| Shard | BG143 result |
+| --- | --- |
+| Native device, Debug and actual ReleaseSafe | 13/13 tests passed per mode |
+| Null device, Debug and actual ReleaseSafe | 17/17 tests passed per mode |
+| Limits, Debug and actual ReleaseSafe | 21/21 tests passed per mode |
+
+The actual consumer again passed all 4/4 steps in Debug and all 4/4 in actual ReleaseSafe.
+Each mode reported the same five proof lines recorded for BG139.
+The combined command exited with code zero in 185.25 seconds (`artifact://540`).
+This is a focused and consumer result, not a full aggregate result.
+
+BG144's directory-based `zlint` invocation reported zero errors and zero warnings across zero files.
+That invocation checked no source files and supplies no valid lint proof.
+BG145 reported `Z030`/`Z023` findings and eight remaining `Z024` long-line findings.
+The later BG150 classification identifies six semantic false positives, not the initially reported seven.
+Source owners corrected the remaining expressions without relying on manual line breaks that the formatter removes.
+BG144 and BG145 ran concurrently with BG143's formatter.
+Their outputs do not establish a stable post-format lint result.
+At this point, serial checks against explicit file paths remained necessary after the remaining corrections.
+No tool suppression or protected-analyzer change accompanies these results.
+No clean style, AST, full aggregate, coverage, or full-gate result is claimed.
+
+#### Serial format, AST, and explicit-file lint observations: 2026-10-08
+
+BG146 passed two stable file paths through standard input to `zlint`.
+It reported one unsafe-undefined warning. The owner corrected the location of the ownership `SAFETY` comment.
+BG147 formatted four files and passed format checks for five files.
+Its explicit-file `zlint` run checked 23 files and reported zero errors and seven warnings.
+Three warnings concerned caught unreachable instance paths.
+The other four concerned a Vulkan format-query comment, a `SafetyProbe` undefined default, queue initialization, and a contender-Io comment.
+Source owners corrected the actual invariants and safety comments.
+The fixture corrections attach the lifetime and use a literal queue, not `Queue.init`.
+
+BG148 passed selected AST checks for errors, device, shader messages, shader module, threads, and build files.
+The command exited with code zero in 3.11 seconds.
+BG149 formatted six files and passed format checks for the 24-file selection.
+Its AST checks passed for instance, native context, native resources, native capabilities, and native tests.
+The command exited with code zero in 4.27 seconds.
+These AST results cover the listed files, not the whole tree.
+
+BG151 ran `zlint` after formatting with 23 explicit file paths through standard input.
+It reported zero errors and zero warnings in 0.88 seconds.
+Unlike BG144, this command checked source files.
+This is a clean selected-file `zlint` result, not clean `ziglint` or a full-gate result.
+
+BG150 ran `ziglint` after formatting and exited with code 1 in 1.71 seconds.
+It reported six known semantic false positives and one new genuine Io-order finding in the static test initializer `initUnattached`.
+Five false positives are `Z030` findings for instance, native instance, high-level device, `QueueLease`, and native context.
+The sixth is a `Z023` finding for the nested `QueueLease`.
+The initializer correction stayed queued while the source remained frozen for BG152.
+No tool suppression, protected-analyzer change, coverage result, full aggregate, or full-gate result is claimed.
+
+#### Frozen-source native and consumer checks: 2026-10-08
+
+BG152 completed against the frozen source state and exited with code zero in 170.81 seconds.
+The six focused shards passed all 19/19 build steps.
+
+| Shard | BG152 result |
+| --- | --- |
+| Native device, Debug and actual ReleaseSafe | 13/13 tests passed per mode |
+| Null device, Debug and actual ReleaseSafe | 17/17 tests passed per mode |
+| Limits, Debug and actual ReleaseSafe | 21/21 tests passed per mode |
+
+The actual out-of-tree published-module consumer passed all 4/4 steps in Debug and all 4/4 in actual ReleaseSafe.
+Both runs explicitly set `VK_INSTANCE_LAYERS` to an empty value and `VK_LOADER_LAYERS_DISABLE` to `~all~`.
+Each mode reported five proof lines:
+
+| Proof line | BG152 observed result |
+| --- | --- |
+| Compute | Output `113` and preserved `0xa5` padding |
+| `LocalSizeId` | Workgroup `4,2,1`, invocation count `8`, coverage mask `255`, and preserved `0xa5` padding |
+| Graphics | Pixels red/red/blue/blue, row pitch `256`, and preserved `0xa5` padding |
+| Cube array | Enabled feature and created a 12-layer view |
+| Cleanup | Device, adapter list, and instance cleanup completed |
+
+This records actual GPU execution, not test scaffolding or a full-gate result.
+The owner then applied the test-only initializer Io-order correction.
+
+#### Phase 2 bounded native-integration completion: 2026-10-08
+
+BG153 followed the test-only initializer argument reorder.
+It formatted the test source, passed format and AST checks, and passed all 7/7 native-device build steps.
+Debug and actual ReleaseSafe each passed 13/13 native-device tests.
+The final `ziglint` step returned six known semantic findings, so the combined command exited with code 1 in 57.11 seconds.
+The genuine static-initializer Io-order finding no longer appeared.
+No genuine warning remained in this observed `ziglint` output.
+
+| Rule | Reported owner | Source line |
+| --- | --- | --- |
+| `Z030` | `Instance` | 254 |
+| `Z030` | `NativeInstance` | 16 |
+| `Z030` | High-level device | 227 |
+| `Z030` | `QueueLease` | 397 |
+| `Z030` | Native context | 447 |
+| `Z023` | Nested `QueueLease` | 397 |
+
+These six findings are semantic false positives, not a clean `ziglint` result.
+The ownership and teardown contracts remain intact. No suppression removes these findings.
+BG151's actual 23-file clean `zlint` result predates the test-only argument reorder.
+No post-reorder `zlint` result is claimed.
+
+This completes the bounded Phase 2 native-integration record before the Phase 3 core-guard cutover.
+BG152 supplies the frozen-source GPU consumer proof. BG153 supplies the subsequent test-only correction and native-device proof.
+Neither result establishes the Phase 3 or Phase 4 shared-`GuardRc` cutover.
+No full clean gate, full aggregate, coverage, async, driver-cache, presentation, or mobile proof is claimed.
+The protected `zbc` and `zwanzig` stages remain excluded.
+
+
+#### Historical pre-feature snapshots: 2026-10-07
+
+The following aggregate, gate, lint, cross-test, zero-layer, and analyzer records predate native stage constants.
+They remain evidence for that earlier source state only.
+
+On 2026-10-07, `devenv shell -- zig build test -j2 --summary all` passed 69/69 build steps.
+The initial captured summary is `artifact://116`. Later `artifact://133` also passed.
+`artifact://202` passed after safety, naming, and ring-constant placement changes.
+The historical `artifact://211` aggregate passed 69/69 steps with 250 root tests per mode.
+The pre-feature aggregate, `artifact://275`, passed 69/69 build steps.
+The root suite passed 251 tests in Debug and 251 in actual ReleaseSafe.
+The two added native-texture boundary regressions protect existing guards.
+They do not establish a new panic fix.
+The added render-bundle regression reproduced a real allocation-failure callback bug.
+In `artifact://273`, 250 root tests passed and one aborted.
+A custom allocator callback destroyed the encoder before allocation returned `OutOfMemory`.
+The failure recorder then accessed a null context.
+The fix preserves `OutOfMemory` and records failure only while the context remains live.
+The private validation helper returns the borrowed context.
+The fix adds no allocation or public API and does not prove general successful-operation reentrancy.
+All 30 command-tag fixtures retain presence checks and direct expected-value comparisons.
+Dispatch passed four tests in each mode. Separate acceptance shards run in Debug.
+Recorded shards include Dawn pin 3, dispatch drift 1, memory 27, formats 8,
+command replay 20, triangle 2, query-set 16, and shared-memory 3.
+The query count includes the imported triangle tests.
+The final private test-helper checks subsequently passed all 20 replay tests.
+The pre-feature source-style closure used exactly 139 explicit file arguments.
+Formatting, `ziglint`, and `zlint --deny-warnings` completed with exit code zero.
+`ziglint` reported zero diagnostics. `zlint` reported zero errors and zero warnings
+across 139 files in 85 ms.
+This result follows the final alias and encoder-constructor declaration changes.
+The pre-feature default analyzer run completed but was not clean.
+The historical legacy gate passed. That supplemented ten-stage snapshot was not green.
+The recorded `zbc` run analyzed 95 files and aborted on cleanup-depth handling
+for 44 files. It reported 53 findings.
+The user stopped further `zbc` source work and requested issue reports only.
+All 13 observed diagnostic groups were reported externally.
+The incomplete-depth evidence is tracked in [zbc #95](https://github.com/CoffeeImpliesCode/zbc/issues/95).
+Integration-family reports include [#96](https://github.com/CoffeeImpliesCode/zbc/issues/96)
+through [#101](https://github.com/CoffeeImpliesCode/zbc/issues/101).
+Repairs remain unverified. No fresh reproduction after the source freeze is claimed.
+The aborted run is not clean evidence, even when the legacy gate treats `zbc` as advisory.
+`zbc` is now report-only under the user boundary.
+The installed legacy gate ran once:
+`devenv shell -- zig-gate --no-zbc`.
+It completed with exit code 0 in 211.13 seconds and printed `GATE PASSED`.
+Its five printed stages passed: formatting, build, tests, ast-check, and `zlint`.
+The build and aggregate tests passed again after the last constructor-alias change.
+`--no-zbc` explicitly skipped `zbc` under the user's report-only boundary.
+It did not check `zbc` in advisory mode.
+The script's `ziglint` block remains commented out.
+It has no `zwanzig` or cross-test stage. Coverage remained off.
+Supplemental `ziglint`, cross-tests, and zero-layer checks supply their separate evidence.
+The pre-feature full default `zwanzig` result reported 107 warnings.
+Thus the historical legacy pass did not establish a green ten-stage contract.
+
+The historical `zwanzig` tool verification passed 976 tests: 924 unit tests and 52 fixtures.
+Its six test steps and four ReleaseFast installation steps passed.
+The actual default run (`artifact://303`) analyzed exactly 139 files with all 21
+rules and 4,981 engine runs.
+It reported 107 warnings, all `optional-unwrap`, with zero store errors and zero
+findings in every other class.
+No path exclusions, rule exclusions, or larger analysis budgets produced that result.
+The 107 warnings are a subset of the previously triaged 145 optional warnings.
+Exact diagnostic comparison found no new findings and removed 38 optional findings
+plus two style findings.
+The remaining findings are documented model limits, not a clean analyzer result.
+
+The CLI control run retained exactly six expected diagnostics: resource leak,
+double free, directory leak, double close, nullable argument, and trapping assertion.
+The safe-directory and safe-guard controls produced zero diagnostics.
+The unsafe-control command returned exit code 1 as expected.
+The earlier store-only run reported zero findings across 139 files.
+A store-only result does not replace full-rule evidence.
+Earlier default snapshots reported 92 warnings (`artifact://186`) and 145 optional
+warnings plus two aliases (`artifact://261`). All these counts are historical, not current feature counts.
+The historical directory-argument `zlint` attempt selected only two files.
+The corrected command passed exactly 139 explicit file paths to
+`devenv shell -- zlint --deny-warnings`.
+The validated, untruncated selection used the same hand-written source inventory.
+It reported zero errors and zero warnings.
+
+The triangle and query shards encode through the frontend and finish a `Finished` stream.
+The engine replays that stream into Vulkan before submission.
+Triangle readback checks pixels, blending, and untouched row padding.
+Query readback checks real covering/clipped sample counts of 4/0 and unavailable-slot zero fill.
+Shared memory proves GPU memory import.
+The runtime only proves typed unsupported-capability rejection for semaphore FD services.
+It does not prove successful native semaphore FD import.
+
+The current runtime uses lavapipe device Vulkan 1.4.354 and loader Vulkan 1.4.357.
+Admission requires Vulkan 1.1. The instance requests `min(loader, 1.3)`.
+The native shader path uses the device's effective API version.
+`docs/20-dependencies.md` records the loader `LD_LIBRARY_PATH` fix.
+The pre-feature selected cross-test matrix and explicit zero-layer GPU checks passed.
+The historical full default analyzer result was not clean.
+The historical legacy gate passed with `zbc` explicitly skipped.
+The stage-8 red run below also predates native stage constants.
+
+The explicit zero-layer command ran inside `devenv`:
+
+```sh
+env VK_INSTANCE_LAYERS= VK_LOADER_LAYERS_DISABLE='*' VK_LOADER_DEBUG=layer \
+  zig build test-triangle test-query-set test-buffer -j2 --summary all
+```
+
+The pre-feature zero-layer run, `artifact://278`, passed 10/10 build steps:
+triangle 2, query-set 16, and buffer 4 tests.
+Loader logs showed actual call chains without an inserted validation layer.
+This proves zero-layer execution for those shards, not every GPU test.
+
+Issue #1 now names M18 as verified. The issues remain open because the fixes
+are local, not published. Published bootstrap history through `4645d5d0` remains unchanged.
+The [issue #1 verification comment](https://github.com/CoffeeImpliesCode/dusk/issues/1#issuecomment-6043738680)
+records the local outcomes without closing the issue or claiming a published fix.
+Future phases use one green-phase commit, without history rewrites or force-pushes.
+The accepted work does not authorize a commit or push.
+See the [issue #6 policy decision](https://github.com/CoffeeImpliesCode/dusk/issues/6#issuecomment-6042784874).
+
+Use named build steps to select acceptance shards:
+
+```sh
+zig build test-memory
+zig build test-formats
+zig build test-triangle
+zig build test-query-set
+zig build test-dawn-pin
+```
+
+`zig build test` runs the aggregate suite.
+The former `b.args` forwarding did not filter tests by arguments after `--`.
+A command such as `zig build test -- test-memory` is not shard selection.
+
+### Recreating source references
+
+`tools/dawn_pin.zon` records the repository, exact revision, and sparse paths.
+Use the explicit network step:
+
+```sh
+zig build fetch-dawn
+zig build fetch-dawn -Ddawn-dir=/absolute/path/to/research/dawn
+```
+
+The destination order is `-Ddawn-dir`, `DUSK_DAWN_SRC`,
+`buildhost_SCRATCH_ROOT/research/dawn`, then
+`$HOME/.cache/dusk-research/research/dawn`.
+The fetch validates the exact revision and the `src`/`include` sparse set.
+It refuses dirty checkouts without discarding local files.
+This source-only step does not build or depend on Dawn C++ or Tint.
+Ordinary builds do not depend on it.
+
+The prerequisite checks recorded three passing source-tool tests, an exact
+checkout HEAD and sparse set, and a clean idempotent fetch.
+The dirty-checkout check returned `DirtyCheckout` and preserved the untracked
+file and HEAD. The default build and development-shell evaluation also passed.
+These checks do not replace the full gate or verify the analyzer repair.
+The machine measurements, dates, and scratch paths below remain historical
+evidence. They are not claims about the present workstation or required paths.
+
 ## Grades
 
 Every claim in this document carries a grade.
@@ -515,11 +1657,24 @@ A suite must cover three.
 
 | Mode | Purpose | Environment |
 | --- | --- | --- |
-| `none` | prove the library runs with no layer | `VK_LOADER_LAYERS_DISABLE=*` |
+| `none` | prove the library runs with no layer | Remove `VK_INSTANCE_LAYERS`, `VK_LOADER_LAYERS_ENABLE`, and `VK_LOADER_LAYERS_ALLOW`. Set `VK_LOADER_LAYERS_DISABLE=~all~` for this process. |
 | `validation` | prove the layer reports nothing | `VK_INSTANCE_LAYERS` removed, `VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation` |
 | `validation_sync` | prove the barrier and queue hazards are absent | as above, plus the inherited `VK_LAYER_VALIDATE_SYNC=1` |
 
-Per-process selection works, grade A:
+The process-scoped zero-layer recipe is:
+
+```sh
+env -u VK_INSTANCE_LAYERS -u VK_LOADER_LAYERS_ENABLE -u VK_LOADER_LAYERS_ALLOW \
+  VK_LOADER_LAYERS_DISABLE=~all~ VK_LOADER_DEBUG=layer \
+  zig build test-native-utilities-debug -j2
+```
+
+Keep the default validation configuration for permanent tests.
+The [official loader filtering rules](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md#layer-filtering)
+state that forced enable and allow variables can override disable filters.
+An empty application `enabledLayerCount` alone does not prove zero layers.
+Inspect the actual loader call chain before a zero-layer execution claim.
+The historical output below only records that invocation's observed forced-disable warning:
 
 ```
 $ VK_LOADER_LAYERS_DISABLE='*' vulkaninfo --summary 2>&1 | sed -n '/^Instance Layers/,/^$/p'
@@ -575,8 +1730,8 @@ Nothing in the parent mutates the shell environment. `devenv.nix:116-119`
 requires exactly this: the zero-layer path sets its variable per process rather
 than in the shared shell.
 
-The gate therefore covers all three modes in one `zig build test` run, without a
-shell wrapper and without a second task.
+This is the layer-matrix contract, not evidence that the current aggregate runs
+all three modes. The explicit zero-layer run above verifies three selected GPU shards.
 
 ### 4.4 How a suite asserts the layer reported nothing
 
@@ -815,9 +1970,9 @@ visible failure rather than a silent one.
 
 ### 6.3 The drift check
 
-The gate step regenerates every fixture into a scratch directory and compares it
-to the committed `.spv`. The comparison is a byte comparison, not a semantic
-one.
+The fixture contract requires regeneration into a scratch directory and comparison
+with committed `.spv` files. The comparison is byte-for-byte, not semantic.
+The installed legacy gate has no fixture regeneration stage.
 
 ```bash
 for wgsl in test/fixtures/*.wgsl; do
@@ -886,7 +2041,7 @@ Targets:
   SPIR-V 1.6 (under Vulkan 1.4 semantics)
 ```
 
-The gate step runs it on every fixture before the test binary loads it:
+The fixture contract requires this supplemental validation before loading fixtures:
 
 ```bash
 spirv-val --target-env vulkan1.3 test/fixtures/*.spv
@@ -940,8 +2095,8 @@ port replaces the library with Zig and keeps the corpus.
 
 ### 7.3 What this is not
 
-`spirv-val` is not a build input. It never runs inside `zig build`. It runs in
-the fixture step of the gate, and a fixture that it rejects fails the gate.
+`spirv-val` is not a build input. It never runs inside `zig build`.
+It needs a supplemental fixture check. The installed legacy gate does not run it.
 
 ---
 
@@ -949,7 +2104,8 @@ the fixture step of the gate, and a fixture that it rejects fails the gate.
 
 ### 8.1 The ten stages
 
-Grade A. `zig-gate --help` prints the order:
+The ten-stage contract and historical help transcript specify this order.
+This is not the help output of the currently installed legacy script.
 
 ```
 sections (in order)
@@ -965,42 +2121,50 @@ sections (in order)
  10 zig-cov     coverage, opt-in via --cov                  (advisory)
 ```
 
-The block above is the tool's own help text, quoted as printed. Two of its
-labels do not match what the stage does. Stage 6 is `zlint -S`, and `-S` is
-stdin mode, not strict mode; the gate feeds it the file list on stdin and no
-`--deny-warnings`, so a warning does not change `zlint`'s exit status and the
-stage counts errors and warnings together from its summary line. Stage 8
-asserts every class it prints: `zig-gate` counts the findings in each class,
-prints the count with `(asserted)`, and fails the stage when the total is above
-zero. `devenv.nix` sets no `ZWANZIG_ARGS`, so no rule is excluded and no class
-is advisory. §8.5 records what the stage does with the one class it reports.
+The block above records the historical ten-stage interface.
+On 2026-10-07, `~/.local/bin/zig-gate` is a 213-line legacy script.
+It runs fmt, build, tests, ast-check, stdin-mode `zlint`, and advisory `zbc`.
+Its `ziglint` block is commented out. It has no `zwanzig` or cross-test stage.
+Coverage is optional and off by default. The script does not assert all nine
+non-coverage contract stages, full foreign execution, fixture artifacts, or coverage.
 
-What each one proves:
+Missing stages require supplemental `ziglint`, `zwanzig`, and `cross-test` commands.
+Use the same hand-written source selection for each analyzer.
+Assert every `zwanzig` finding class without suppression.
+The user revised `zbc` handling to report-only and stopped further tool source work.
+Retain explicit diagnostic counts and incomplete-analysis evidence.
+Do not hide aborted files or claim unverified repairs as clean analysis.
+Numeric warnings alone do not establish source bugs.
+Run `cross-test` with `./cross-test.profile.sh` and retain its per-row status.
+Run fixture regeneration and `spirv-val` separately when claiming fixture evidence.
+The 2026-10-07 pre-feature legacy gate passed its five active stages.
+That supplemented ten-stage snapshot was not green because it reported 107 optional-unwrap warnings.
+BG106 passed the current legacy `zig-gate --no-zbc` run, with exactly five active stages.
+BG104 passed final 142-file source lint with zero diagnostics, errors, or warnings.
+The full ten-stage contract remains unclaimed and outside the permitted analyzer boundary.
 
-| Stage | Proves | Does not prove |
+What the ten-stage contract requires, not what the installed script proves:
+
+| Stage | Required evidence | Does not prove |
 | --- | --- | --- |
 | 1 `fmt` | every project file parses and is formatted | that it compiles |
 | 2 `build` | the published module compiles for the host in Debug | that any test passes |
-| 3 `test` | the Debug and ReleaseSafe shards run and every registered test passes | anything about ReleaseFast or ReleaseSmall |
+| 3 `test` | root library and dispatch tests run in Debug and ReleaseSafe, with acceptance shards in Debug | both modes for every acceptance shard |
 | 4 `ast-check` | every project file parses on its own, including a file the build graph does not reference | any semantics |
 | 5 `ziglint` | the stage fails when `ziglint` reports one finding over the selected source | that the rules are the right ones |
 | 6 `zlint -S` | the stage fails when `zlint` reports one error or one warning over the selected source | that the two sets are complete |
-| 7 `zbc` | 0 errors over the 123 selected files, and 21 warnings that do not fail the stage | the absence of a use-after-free; the two `heap-leak` findings it once raised were not defects (§8.5.2) |
-| 8 `zwanzig` | the stage fails on one finding in any class. It reports 9, all `store-violations-engine`, so it is red | that its rules cover the module |
-| 9 `cross-test` | the Debug shard builds and runs in every matrix row | the Vulkan half, which is native-only (§10) |
+| 7 `zbc` | report-only under the user boundary, with explicit findings and incomplete-analysis disclosure | clean complete analysis or verified repairs |
+| 8 `zwanzig` | the supplemental check must fail on any finding class | a current clean result. The pre-feature snapshot reported 107 optional-unwrap warnings. |
+| 9 `cross-test` | the selected foreign Debug shard executes each profile row, with explicit partial status for omissions | full foreign Vulkan execution (§10) |
 | 10 `zig-cov` | a coverage figure, when `--cov` is passed | anything: it is advisory and off by default |
 
-The lint stages read the project's hand-written source. `devenv.nix:95-101`
-excludes `src/vulkan.zig` and `src/api/` from every source-selection stage:
-`src/vulkan.zig` is `zig translate-c` output over the pinned header, and
-`src/api/` comes from `tools/gen_api.zig`. Both carry a "do not edit" banner,
-so a finding in either is a finding in its generator, and a hand fix is erased
-by the next `zig build generate`. A finding in either file is therefore fixed
-in `tools/gen_api.zig` or in the `translate-c` invocation in `build.zig`, never
-in the generated file.
-
-`devenv.nix:208-209` runs `zig-gate` as `gate:dusk`. `devenv.nix:206-207`
-records that `zbc` errors fail even with `ZBC_STRICT=0`.
+`devenv.nix` defines `GATE_EXCLUDE` for generated SDK/API files and cache directories.
+`src/vulkan.zig` and `src/api/` are generated. Fix their generators, not the output.
+`src/vk/dispatch.zig` remains selected despite its generated declarations.
+Its protected generated region requires the dispatch drift check.
+`devenv.nix` runs the legacy script as `gate:dusk`.
+`zbc` is advisory unless `ZBC_STRICT=1`.
+The historical measurements below do not change this installed-script behavior.
 
 ### 8.2 The two safety modes
 
@@ -1028,18 +2192,20 @@ fast, visible failure instead of a machine-wide problem.
    test must pass an explicit `std.testing.allocator` to anything it wants
    watched.
 
-A green gate is evidence that the tree compiles, that the registered tests pass
-in two safety modes on the host, that the analyser stages found nothing to fail
-on, and that three foreign targets build and run the Debug shard. It is not
-evidence of coverage, of robustness against malformed input, or of memory
-correctness.
+A green gate would show that the tree compiles, the registered tests pass,
+and the analyzer stages found nothing to fail on.
+The aggregate test step runs library tests in Debug and ReleaseSafe.
+Its separate acceptance shards run in Debug.
+The historical cross-test result covers the selected Debug shard, not full foreign execution.
+None of this establishes coverage, malformed-input robustness, or memory correctness.
 
-The gate is not green as the tree stands. Stage 8 reports 9
-`store-violations-engine` findings and asserts all of them (§8.5.1), so a run
-ends red there. Stage 7 reports 0 errors and passes. A red stage is a fact
-about the gate, not about the code: §8.5 records the one class that is a
-measured limit of the analyser rather than a defect in this tree, and it is
-still asserted.
+The historical gate run ended red at stage 8 with nine asserted
+`store-violations-engine` findings (§8.5.1). Its stage 7 reported zero errors.
+That record predates the 2026-10-07 local acceptance run.
+Analyzer repair does not by itself establish a new green gate.
+The 2026-10-07 pre-feature supplemented result was not clean: it reported 107 optional-unwrap warnings.
+The historical legacy gate passed with `zbc` explicitly skipped.
+Neither result verifies the native stage-constant changes.
 
 ### 8.4 One run is a snapshot, not a gate
 
@@ -1082,6 +2248,10 @@ run is named; where the tree was moving, the sentence records the measurement
 and not the conclusion drawn from it.
 
 ### 8.5 Two analyser findings that are limits, not defects
+
+**Historical evidence, retained on 2026-10-07.** The counts, line anchors, tool
+behavior, and per-site exemptions below describe the earlier measured tree.
+They do not describe current analyzer results or authorize new suppressions.
 
 Two stages of the gate report findings that measurement, not argument, shows
 to be limits of the analysers rather than defects in this tree. One is
@@ -1353,10 +2523,30 @@ reports the bit missing.
 
 ## 10. Cross-test
 
+**Current native stage-constant snapshot, 2026-10-08.** BG103 passed all three selected rows with 262 root tests each.
+The summary reported `pass=3`, `fail=0`, `build_only=0`, and `partial=0`.
+The run ID is `20261008-002745-1243037-21180`.
+The summary file is `~/.cache/dusk/cross-test/cross-test-summary.json`.
+This proves foreign root-test execution, not foreign GPU execution.
+
+**Historical pre-feature snapshot, 2026-10-07.** The selected matrix passed all three rows:
+`x86_64-linux`, `aarch64-linux`, and big-endian `powerpc64-linux`.
+Each row executed 251 tests in that run.
+The summary reported `pass=3`, `fail=0`, `build_only=0`, and `partial=0`.
+The run ID is `20261007-223439-864143-20044`.
+The historical run `20261007-211754-709407-22206` executed 250 tests per row.
+The earlier run `20261007-171440-356118-5366` executed 248 tests per row.
+
+```sh
+devenv shell -- cross-test --profile ./cross-test.profile.sh \
+  --output ~/.cache/dusk/cross-test --require-runners
+```
+
+This result covers the selected matrix, not full foreign execution of every subsystem.
+
 ### 10.1 The matrix
 
-`cross-test.profile.sh:46-50` sets it, and `cross-test.profile.sh:54` sets
-`CROSS_REQUIRE_RUNNERS=1`.
+`cross-test.profile.sh` defines `CROSS_MATRIX` and sets `CROSS_REQUIRE_RUNNERS=1`.
 
 | Row | What it is |
 | --- | --- |
@@ -1364,9 +2554,9 @@ reports the bit missing.
 | `aarch64-linux` | foreign 64-bit little-endian, the phone and embedded ABI |
 | `powerpc64-linux` | foreign 64-bit **big-endian** |
 
-`cross-test.profile.sh:22-24` gives the reason for `CROSS_REQUIRE_RUNNERS=1`:
-a missing runner must fail rather than silently degrade execution coverage into
-compile-only coverage. A broken qemu install must not look green.
+`CROSS_REQUIRE_RUNNERS=1` makes a missing runner fail.
+A missing runner must not silently turn execution coverage into compile-only coverage.
+A broken QEMU installation must not look green.
 
 `build.zig` wires the step as `cross-test`, which runs the Debug shard through
 the build system's own runner selection, native for the host and `qemu_user` for
@@ -1375,17 +2565,15 @@ executes no test and would otherwise report coverage it never produced.
 
 ### 10.2 What a foreign row proves
 
-`cross-test.profile.sh:35-41` states the split, and this document repeats it:
+`cross-test.profile.sh` states the native/foreign split:
 
-- A foreign row **can** prove that `src/core`, `src/math`, the wire encoding
-  and the C ABI struct packing execute correctly under a foreign ABI. The
-  `powerpc64-linux` row is the only big-endian execution evidence in the
-  project, and those are byte layouts, so a byte order or an alignment bug is
-  only visible there.
-- A foreign row **cannot** prove anything about Vulkan. No foreign architecture
-  on this host has a Vulkan loader or an ICD. `src/vulkan/**` and every
-  milestone that opens a `VkInstance` stay native-only and are proven by a
-  native run against the host loader.
+- A foreign row exercises selected core, memory, format, and frontend code,
+  plus fake Vulkan fixture state. It can check byte layout and ABI behavior.
+  `powerpc64-linux` supplies the selected big-endian execution path.
+  This is not full foreign execution of every library subsystem.
+- A foreign row does not execute real GPU work. No foreign row has a Vulkan
+  loader or ICD here. Generated declarations in `src/vulkan.zig` do not change
+  that limit. Native runtime tests supply the real Vulkan evidence.
 
 The consequence for this document: the readback pipeline in §2, the layer matrix
 in §4, and the driver matrix in §5 are native-only evidence. The cross-test
@@ -1394,15 +2582,14 @@ try.
 
 ### 10.3 Budgets
 
-`cross-test.profile.sh:59-62` sets `CROSS_JOBS=2`, `CROSS_BUILD_JOBS=2`,
-`CROSS_BUILD_TIMEOUT=3600` and `CROSS_TIMEOUT=600`. The build budget is
+`cross-test.profile.sh` sets `CROSS_JOBS=2`, `CROSS_BUILD_JOBS=2`,
+`CROSS_BUILD_TIMEOUT=3600`, and `CROSS_TIMEOUT=600`. The build budget is
 generous because a foreign row builds every Zig dependency from source under
 `qemu_user`.
 
 `cross-test --help` names the evidence layout: `PREFIX/runs/RUN_ID/{build,run}-TARGET.log`
 and `summary.json`, with `PREFIX/cross-test-summary.json` as the current-run
-summary. `devenv.nix:92-93` points `GATE_CROSS_OUTPUT` at local disk, because the
-checkout is on NFS.
+summary. `devenv.nix` defines `GATE_CROSS_OUTPUT` for the local evidence directory.
 
 ---
 
@@ -1584,11 +2771,10 @@ This document does not claim any of the following.
 11. **`tint`'s exact interface.** It is not installed, so §6.2 names the shape
     of the step and not its flags.
 12. **The `linearTilingFeatures` bits of the two optional formats.** See §2.5.
-13. **A leak or a double free found by `store-violations-engine`.** The rule
-    does not model `errdefer`, so its 9 findings are not evidence of a defect
-    here. The stage still fails on them. See §8.5.1.
-14. **A leak found by `zbc`'s `heap-leak`.** Two arena destructors were
-    exempted per site after a leak-detector run reported none. See §8.5.2.
+13. **A current defect inferred from the historical analyzer counts.** Section
+    8.5 records earlier detector limits and exemptions, not the current final gate.
+14. **A current clean analyzer result.** The historical pre-feature default run reported 107 optional-unwrap warnings.
+    No new analyzer run establishes a current count for native stage constants.
 15. **Any machine-level fact from a run taken while the tree was moving.** A
     single run is a snapshot. See §8.4.
 

@@ -61,9 +61,8 @@ pub const worst_case_additional_size: usize = 20;
 /// (`src/dawn/common/Constants.h:51`).
 pub const immediate_element_byte_size: u32 = 4;
 
-/// The bytes of immediate data one pass may hold
-/// (`src/dawn/common/Constants.h:58`).
-pub const max_immediate_data_bytes: u32 = 64;
+/// The full user immediate range. Native admission applies the effective device limit.
+pub const max_immediate_data_bytes: u32 = 256;
 
 /// The bytes one `DrawIndirect` reads: four `u32`
 /// (`src/dawn/common/Constants.h:77`).
@@ -81,6 +80,14 @@ pub const dispatch_indirect_size: u64 = 12;
 /// The bytes one pixel-local-storage slot occupies
 /// (`src/dawn/common/Constants.h:103`).
 pub const pls_slot_byte_size: u32 = 4;
+
+/// The fixed pixel-local-storage capacity (`src/dawn/common/Constants.h:102-104`).
+pub const max_pls_slots: u32 = 4;
+pub const max_pls_size: u32 = max_pls_slots * pls_slot_byte_size;
+
+/// Shared bounds for frontend and native render-bundle traversal.
+pub const max_bundle_depth: usize = 16;
+pub const max_bundle_command_count: usize = 1 << 24;
 
 /// The draws one pass may issue when its descriptor does not say otherwise
 /// (`src/dawn/native/RenderPassEncoder.h:121`). Dawn's `RenderPassMaxDrawCount`

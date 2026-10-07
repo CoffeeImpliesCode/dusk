@@ -12,7 +12,7 @@
 //! private entries an external texture grows into
 //! (`BindGroupLayoutInternal.h:100`-`:104`). The entry count is therefore two
 //! numbers: `Layout.queryBindingCount()` bounds the vector, and
-//! `Layout.api_binding_map` holds only the entries a caller wrote.
+//! `Layout.api_binding_map` resolves stored public and private binding numbers.
 //!
 //! **What this file does not claim.** It does not claim Dawn's content-hash
 //! dedup cache (`BindGroupLayoutInternal.cpp:835`, `:884`): M14 owns the cache,
@@ -25,11 +25,51 @@ const errors = @import("../core/errors.zig");
 /// `kMaxBindGroups` (`src/dawn/common/Constants.h:36`).
 pub const max_bind_groups: u32 = 4;
 
-/// `kMaxBindingsPerBindGroup` (`src/dawn/common/Constants.h:37`). A binding
-/// number at or above this is refused, which is what keeps the private entries
-/// an external texture grows into — numbered down from `maxInt(u32)` at
-/// `BindGroupLayoutInternal.cpp:531` — out of a caller's reach.
+/// The public binding namespace. External texture roles use a disjoint fixed block.
 pub const max_bindings_per_bind_group: u32 = 1000;
+
+const external_binding_role_count: u32 = 4;
+const first_external_binding_number: u32 = max_bindings_per_bind_group;
+const external_binding_number_end: u32 =
+    first_external_binding_number + external_binding_role_count * max_bindings_per_bind_group;
+
+comptime {
+    std.debug.assert(max_bindings_per_bind_group > 0);
+    std.debug.assert(external_binding_role_count == 4);
+    std.debug.assert(first_external_binding_number == max_bindings_per_bind_group);
+    std.debug.assert(first_external_binding_number < external_binding_number_end);
+    std.debug.assert(external_binding_number_end == 5 * max_bindings_per_bind_group);
+    std.debug.assert(external_binding_number_end <= std.math.maxInt(u32));
+}
+
+pub const ExternalBindingNumberOptions = struct {
+    binding_number: u32,
+    needs_static_sampler: bool = false,
+};
+
+pub const ExternalBindingNumbers = struct {
+    plane0: u32,
+    plane1: u32,
+    metadata: u32,
+    static_sampler: ?u32,
+};
+
+/// Allocates no state. Every public external slot has one permanent private role block.
+pub fn externalBindingNumbers(
+    options: ExternalBindingNumberOptions,
+) error{BindingNumberAboveLimit}!ExternalBindingNumbers {
+    if (options.binding_number >= max_bindings_per_bind_group) {
+        return error.BindingNumberAboveLimit;
+    }
+    const base = first_external_binding_number +
+        external_binding_role_count * options.binding_number;
+    return .{
+        .plane0 = base,
+        .plane1 = base + 1,
+        .metadata = base + 2,
+        .static_sampler = if (options.needs_static_sampler) base + 3 else null,
+    };
+}
 
 /// `kMaxDynamicStorageBuffersPerPipelineLayout` (`Constants.h:114`). Dawn caps
 /// the per-layout dynamic storage buffer limit at it
@@ -90,6 +130,8 @@ pub const Error = errors.ValidationError || std.mem.Allocator.Error || error{
     /// More storage buffers than `maxStorageBuffersInFragmentStage`
     /// (`BindingInfo.cpp:300`).
     StorageBuffersPerShaderStageInFragmentStage,
+    InternalBindingNotAllowed,
+    InvalidStaticSamplerBinding,
 };
 
 /// One stage named as a tag rather than as a bit. `ShaderStages` below is a
@@ -167,13 +209,13 @@ pub const BindingTypeOrder = enum(u32) {
     pub const range_count = @typeInfo(BindingTypeOrder).@"enum".fields.len;
 };
 
-/// `wgpu::BufferBindingType`, minus the two internal kinds Dawn adds at
-/// `BindGroupLayoutInternal.cpp:118`-`:121`. The port builds those two entries
-/// itself, so a caller cannot name them.
+/// Public and private buffer permissions remain distinct canonical kinds.
 pub const BufferBindingType = enum {
     uniform,
     storage,
     read_only_storage,
+    internal_storage,
+    internal_read_only_storage,
 };
 
 /// `wgpu::SamplerBindingType`.
@@ -245,17 +287,24 @@ pub const StaticSamplerBinding = struct {
     /// null for a freestanding one. Dawn rewrites the field into an index
     /// after the sort (`BindGroupLayoutInternal.cpp:643`-`:647`).
     sampled_texture_binding: ?u32,
+    /// The actual retained sampler header address, never a native handle.
+    sampler_identity: usize = 0,
+    combined_image_sampler_descriptor_count: u32 = 1,
 };
 
 pub const SampledTextureBinding = struct {
     sample_type: TextureSampleType,
     view_dimension: TextureViewDimension,
     multisampled: bool,
+    internal: bool = false,
+    /// Private float-image ABI for a view whose actual format is depth.
+    depth_view: bool = false,
 };
 
 pub const StorageTextureBinding = struct {
     access: StorageTextureAccess,
     view_dimension: TextureViewDimension,
+    internal: bool = false,
 };
 
 pub const TexelBufferBinding = struct {
@@ -341,9 +390,7 @@ pub const Binding = struct {
     index_in_array: u32,
     layout: BindingLayout,
 
-    /// Whether a caller named this binding. The private entries an external
-    /// texture grows into are not in `api_binding_map`
-    /// (`BindGroupLayoutInternal.cpp:653`-`:661`).
+    /// Private expansion roles stay outside the public binding namespace.
     pub fn isUserFacing(self: Binding) bool {
         return self.binding_number < max_bindings_per_bind_group;
     }
@@ -431,14 +478,20 @@ pub const BindingCounts = struct {
                 switch (binding.layout) {
                     .buffer => |buffer| switch (buffer.binding_type) {
                         .uniform => self.uniform_buffers_per_stage[stage_index] += 1,
-                        .storage, .read_only_storage => {
+                        .storage, .read_only_storage, .internal_storage, .internal_read_only_storage => {
                             self.storage_buffers_per_stage[stage_index] += 1;
                         },
                     },
                     .sampled_texture => self.sampled_textures_per_stage[stage_index] += 1,
                     .storage_texture => self.storage_textures_per_stage[stage_index] += 1,
                     .sampler => self.samplers_per_stage[stage_index] += 1,
-                    .static_sampler => self.samplers_per_stage[stage_index] += 1,
+                    .static_sampler => |sampler| {
+                        const count = sampler.combined_image_sampler_descriptor_count;
+                        self.samplers_per_stage[stage_index] += count;
+                        if (sampler.use == .single_texture_ycbcr) {
+                            self.sampled_textures_per_stage[stage_index] += count;
+                        }
+                    },
                     .texel_buffer => self.texel_buffers_per_stage[stage_index] += 1,
                     .input_attachment => self.input_attachments_per_stage[stage_index] += 1,
                     // One external texture is two sampled textures and one
@@ -465,6 +518,7 @@ pub const ValidateOptions = struct {
     /// device says the placeholder sampler will not do
     /// (`BindGroupLayoutInternal.cpp:579`).
     needs_static_sampler_for_external_texture: bool = false,
+    allow_internal_bindings: bool = false,
 };
 
 /// The packed layout. `BindGroupLayoutInternalBase`
@@ -478,7 +532,7 @@ pub const Layout = struct {
     /// Dawn builds at `BindGroupLayoutInternal.cpp:751`-`:756`, so the range of
     /// one order is `[type_start[order], type_start[order + 1])`.
     type_start: [BindingTypeOrder.range_count]u32,
-    /// The binding-number-to-index map, holding the user-facing entries alone.
+    /// Resolves every stored public and private binding number to its packed index.
     api_binding_map: std.AutoHashMapUnmanaged(u32, BindingIndex),
     /// The counts `ValidatePipelineLayoutDescriptor` reads at
     /// `PipelineLayout.cpp:127`-`:128`. Computed from the descriptor, not from
@@ -512,10 +566,6 @@ pub const Layout = struct {
         var expanded = std.ArrayList(Binding).empty;
         defer expanded.deinit(allocator);
 
-        // Dawn counts private binding numbers down from the maximum
-        // (`BindGroupLayoutInternal.cpp:531`), which is what keeps them out of
-        // `api_binding_map`.
-        var next_internal_binding_number: u32 = std.math.maxInt(u32);
         var expansions = std.ArrayList(ExternalExpansion).empty;
         defer expansions.deinit(allocator);
         var sampler_links = std.ArrayList(SamplerLink).empty;
@@ -528,12 +578,13 @@ pub const Layout = struct {
             var entry_binding = try convertToBinding(entry);
 
             if (entry_binding.layout == .external_texture) {
-                const plane0_number = next_internal_binding_number;
-                next_internal_binding_number -= 1;
-                const plane1_number = next_internal_binding_number;
-                next_internal_binding_number -= 1;
-                const metadata_number = next_internal_binding_number;
-                next_internal_binding_number -= 1;
+                const roles = try externalBindingNumbers(.{
+                    .binding_number = entry.binding_number,
+                    .needs_static_sampler = options.needs_static_sampler_for_external_texture,
+                });
+                const plane0_number = roles.plane0;
+                const plane1_number = roles.plane1;
+                const metadata_number = roles.metadata;
 
                 // Dawn pushes the private entries before the external texture
                 // itself (`BindGroupLayoutInternal.cpp:561`-`:596`), and the
@@ -572,10 +623,8 @@ pub const Layout = struct {
                     } },
                 });
 
-                var static_sampler_number: ?u32 = null;
-                if (options.needs_static_sampler_for_external_texture) {
-                    static_sampler_number = next_internal_binding_number;
-                    next_internal_binding_number -= 1;
+                const static_sampler_number = roles.static_sampler;
+                if (static_sampler_number != null) {
                     try expanded.append(allocator, .{
                         .binding_number = static_sampler_number.?,
                         .visibility = entry_binding.visibility,
@@ -634,7 +683,9 @@ pub const Layout = struct {
         var stored_index: u32 = 0;
         while (stored_index < stored_count) : (stored_index += 1) {
             const stored = expanded.items[stored_index];
-            try binding_map.put(allocator, stored.binding_number, .fromInt(stored_index));
+            const result = try binding_map.getOrPut(allocator, stored.binding_number);
+            if (result.found_existing) return error.DuplicateBindingNumber;
+            result.value_ptr.* = .fromInt(stored_index);
         }
 
         // Dawn points each external texture at its private entries after the
@@ -661,11 +712,8 @@ pub const Layout = struct {
         while (link_index < link_count) : (link_index += 1) {
             const link = sampler_links.items[link_index];
             const sampler = lookupIndex(&binding_map, link.sampler_binding);
-            const use = expanded.items[sampler.toInt()].layout.static_sampler.use;
-            expanded.items[sampler.toInt()].layout = .{ .static_sampler = .{
-                .use = use,
-                .sampled_texture_binding = link.texture_binding,
-            } };
+            expanded.items[sampler.toInt()].layout.static_sampler.sampled_texture_binding =
+                link.texture_binding;
         }
 
         var counts: [BindingTypeOrder.range_count]u32 = @splat(0);
@@ -771,6 +819,25 @@ pub const Layout = struct {
         return self.binding(index);
     }
 
+    /// Reads actual stored role indices, not a second expansion calculation.
+    pub fn queryExternalBindingNumbers(
+        self: *const Layout,
+        binding_number: u32,
+    ) ?ExternalBindingNumbers {
+        const entry = self.findBindingByNumber(binding_number) orelse return null;
+        if (entry.layout != .external_texture) return null;
+        const external = entry.layout.external_texture;
+        return .{
+            .plane0 = self.binding(external.plane0).binding_number,
+            .plane1 = self.binding(external.plane1).binding_number,
+            .metadata = self.binding(external.metadata).binding_number,
+            .static_sampler = if (external.static_sampler) |index|
+                self.binding(index).binding_number
+            else
+                null,
+        };
+    }
+
     /// Every entry of one order, which is the slice the prefix sum at
     /// `BindGroupLayoutInternal.cpp:751`-`:756` carves out.
     pub fn bindingsOfType(self: *const Layout, order: BindingTypeOrder) []const Binding {
@@ -834,12 +901,18 @@ fn eqlBinding(left: Binding, right: Binding) bool {
             buffer.min_binding_size == right.layout.buffer.min_binding_size,
         .sampler => |sampler| sampler.binding_type == right.layout.sampler.binding_type,
         .static_sampler => |sampler| sampler.use == right.layout.static_sampler.use and
-            sampler.sampled_texture_binding == right.layout.static_sampler.sampled_texture_binding,
+            sampler.sampled_texture_binding == right.layout.static_sampler.sampled_texture_binding and
+            sampler.sampler_identity == right.layout.static_sampler.sampler_identity and
+            sampler.combined_image_sampler_descriptor_count ==
+                right.layout.static_sampler.combined_image_sampler_descriptor_count,
         .sampled_texture => |texture| texture.sample_type == right.layout.sampled_texture.sample_type and
             texture.view_dimension == right.layout.sampled_texture.view_dimension and
-            texture.multisampled == right.layout.sampled_texture.multisampled,
+            texture.multisampled == right.layout.sampled_texture.multisampled and
+            texture.internal == right.layout.sampled_texture.internal and
+            texture.depth_view == right.layout.sampled_texture.depth_view,
         .storage_texture => |texture| texture.access == right.layout.storage_texture.access and
-            texture.view_dimension == right.layout.storage_texture.view_dimension,
+            texture.view_dimension == right.layout.storage_texture.view_dimension and
+            texture.internal == right.layout.storage_texture.internal,
         .texel_buffer => |texel| texel.access == right.layout.texel_buffer.access,
         .input_attachment => |attachment| attachment.sample_type ==
             right.layout.input_attachment.sample_type,
@@ -887,16 +960,22 @@ fn hashBindingLayout(hash: *std.hash.Wyhash, layout: BindingLayout) void {
         .sampler => |sampler| hash.update(std.mem.asBytes(&@intFromEnum(sampler.binding_type))),
         .static_sampler => |sampler| {
             hash.update(std.mem.asBytes(&@intFromEnum(sampler.use)));
-            hash.update(std.mem.asBytes(&sampler.sampled_texture_binding));
+            hash.update(std.mem.asBytes(&@as(bool, sampler.sampled_texture_binding != null)));
+            if (sampler.sampled_texture_binding) |number| hash.update(std.mem.asBytes(&number));
+            hash.update(std.mem.asBytes(&sampler.sampler_identity));
+            hash.update(std.mem.asBytes(&sampler.combined_image_sampler_descriptor_count));
         },
         .sampled_texture => |texture| {
             hash.update(std.mem.asBytes(&@intFromEnum(texture.sample_type)));
             hash.update(std.mem.asBytes(&@intFromEnum(texture.view_dimension)));
             hash.update(std.mem.asBytes(&texture.multisampled));
+            hash.update(std.mem.asBytes(&texture.internal));
+            hash.update(std.mem.asBytes(&texture.depth_view));
         },
         .storage_texture => |texture| {
             hash.update(std.mem.asBytes(&@intFromEnum(texture.access)));
             hash.update(std.mem.asBytes(&@intFromEnum(texture.view_dimension)));
+            hash.update(std.mem.asBytes(&texture.internal));
         },
         .texel_buffer => |texel| hash.update(std.mem.asBytes(&@intFromEnum(texel.access))),
         .input_attachment => |attachment| hash.update(
@@ -977,18 +1056,29 @@ fn validateDescriptor(
     const max_entry_count = descriptor.entries.len;
     var entry_index: usize = 0;
     while (entry_index < max_entry_count) : (entry_index += 1) {
-        try validateEntry(descriptor.entries[entry_index]);
+        try validateEntry(descriptor.entries[entry_index], options);
     }
 
     // The binding numbers must be distinct across the whole descriptor, and
     // the expansion runs afterwards, so this is checked before it.
     var sampler_texture_numbers = std.ArrayList(u32).empty;
     defer sampler_texture_numbers.deinit(allocator);
+    var public_numbers = std.StaticBitSet(max_bindings_per_bind_group).initEmpty();
     entry_index = 0;
     while (entry_index < max_entry_count) : (entry_index += 1) {
         const entry = descriptor.entries[entry_index];
         if (entry.binding_number >= max_bindings_per_bind_group) {
             return error.BindingNumberAboveLimit;
+        }
+        const array_size = @max(1, entry.array_size);
+        if (array_size > max_bindings_per_bind_group - entry.binding_number) {
+            return error.BindingNumberAboveLimit;
+        }
+        var element_index: u32 = 0;
+        while (element_index < array_size) : (element_index += 1) {
+            const number = entry.binding_number + element_index;
+            if (public_numbers.isSet(number)) return error.DuplicateBindingNumber;
+            public_numbers.set(number);
         }
         switch (entry.kind) {
             .static_sampler => |sampler| {
@@ -1066,14 +1156,21 @@ fn validateDescriptor(
 
 /// `ValidateBindGroupLayoutEntry` (`BindGroupLayoutInternal.cpp:105`): the one
 /// entry, after the kind count has already been refused elsewhere.
-fn validateEntry(entry: Entry) Error!void {
+fn validateEntry(entry: Entry, options: ValidateOptions) Error!void {
     if (entry.visibility.isEmpty()) return error.BindingVisibilityEmpty;
     const array_size = @max(1, entry.array_size);
 
     switch (entry.kind) {
         .buffer => |buffer| {
             const value = buffer orelse return error.NoBindingKindInEntry;
-            if (value.binding_type == .storage and entry.visibility.vertex) {
+            const internal = value.binding_type == .internal_storage or
+                value.binding_type == .internal_read_only_storage;
+            if (internal and !options.allow_internal_bindings) {
+                return error.InternalBindingNotAllowed;
+            }
+            if ((value.binding_type == .storage or value.binding_type == .internal_storage) and
+                entry.visibility.vertex)
+            {
                 return error.StorageBufferInVertexStage;
             }
             if (array_size > 1) return error.BindingArraySizeNotOne;
@@ -1081,11 +1178,34 @@ fn validateEntry(entry: Entry) Error!void {
         .sampler => {
             if (array_size > 1) return error.BindingArraySizeNotOne;
         },
-        .static_sampler => {
+        .static_sampler => |sampler| {
+            const value = sampler orelse return error.NoBindingKindInEntry;
+            if (value.use == .single_texture_ycbcr) {
+                if (!options.allow_internal_bindings) return error.InternalBindingNotAllowed;
+                if (value.sampler_identity == 0 or
+                    value.combined_image_sampler_descriptor_count == 0 or
+                    value.combined_image_sampler_descriptor_count > 3 or
+                    value.sampled_texture_binding != null)
+                {
+                    return error.InvalidStaticSamplerBinding;
+                }
+            } else if (value.combined_image_sampler_descriptor_count != 1) {
+                return error.InvalidStaticSamplerBinding;
+            }
             if (array_size > 1) return error.BindingArraySizeNotOne;
         },
         .sampled_texture => |texture| {
             const value = texture orelse return error.NoBindingKindInEntry;
+            if ((value.internal and !options.allow_internal_bindings) or
+                (value.depth_view and !value.internal))
+            {
+                return error.InternalBindingNotAllowed;
+            }
+            if (value.depth_view and
+                value.sample_type != .float_unfilterable)
+            {
+                return error.MultisampledTextureBindingUnsupported;
+            }
             if (!value.multisampled) return;
             if (value.view_dimension != .two_d) {
                 return error.MultisampledTextureBindingUnsupported;
@@ -1096,6 +1216,9 @@ fn validateEntry(entry: Entry) Error!void {
         },
         .storage_texture => |texture| {
             const value = texture orelse return error.NoBindingKindInEntry;
+            if (value.internal and !options.allow_internal_bindings) {
+                return error.InternalBindingNotAllowed;
+            }
             if (value.view_dimension == .cube or value.view_dimension == .cube_array) {
                 return error.StorageTextureViewDimensionUnsupported;
             }
@@ -1114,4 +1237,381 @@ fn validateEntry(entry: Entry) Error!void {
             if (array_size > 1) return error.BindingArraySizeNotOne;
         },
     }
+}
+
+test "private layout kinds require explicit internal admission" {
+    const options: ValidateOptions = .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+    };
+    const kinds = [_]EntryKind{
+        .{ .buffer = .{
+            .binding_type = .internal_storage,
+            .has_dynamic_offset = false,
+            .min_binding_size = 4,
+        } },
+        .{ .buffer = .{
+            .binding_type = .internal_read_only_storage,
+            .has_dynamic_offset = false,
+            .min_binding_size = 4,
+        } },
+        .{ .sampled_texture = .{
+            .sample_type = .float_unfilterable,
+            .view_dimension = .two_d,
+            .multisampled = false,
+            .internal = true,
+        } },
+        .{ .storage_texture = .{
+            .access = .write_only,
+            .view_dimension = .two_d,
+            .internal = true,
+        } },
+    };
+    for (kinds) |kind| {
+        const entries = [_]Entry{.{
+            .binding_number = 0,
+            .visibility = .{ .compute = true },
+            .kind = kind,
+        }};
+        try std.testing.expectError(error.InternalBindingNotAllowed, Layout.init(
+            std.testing.allocator,
+            .{ .entries = &entries },
+            options,
+        ));
+        var internal_options = options;
+        internal_options.allow_internal_bindings = true;
+        var accepted = try Layout.init(
+            std.testing.allocator,
+            .{ .entries = &entries },
+            internal_options,
+        );
+        accepted.deinit(std.testing.allocator);
+    }
+}
+
+test "combined conversion identity and physical cost remain semantic" {
+    var owner_identity: u8 = 0;
+    var other_identity: u8 = 0;
+    const entries = [_]Entry{.{
+        .binding_number = 0,
+        .visibility = .{ .fragment = true },
+        .kind = .{ .static_sampler = .{
+            .use = .single_texture_ycbcr,
+            .sampled_texture_binding = null,
+            .sampler_identity = @intFromPtr(&owner_identity),
+            .combined_image_sampler_descriptor_count = 3,
+        } },
+    }};
+    const options: ValidateOptions = .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+        .allow_internal_bindings = true,
+    };
+    var public_options = options;
+    public_options.allow_internal_bindings = false;
+    try std.testing.expectError(error.InternalBindingNotAllowed, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &entries },
+        public_options,
+    ));
+    var first = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), first.queryBindingCount());
+    try std.testing.expectEqual(@as(u32, 3), first.validation_counts.samplers_per_stage[1]);
+    try std.testing.expectEqual(@as(u32, 3), first.validation_counts.sampled_textures_per_stage[1]);
+    var changed = entries;
+    changed[0].kind.static_sampler.?.sampler_identity = @intFromPtr(&other_identity);
+    var second = try Layout.init(std.testing.allocator, .{ .entries = &changed }, options);
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expect(!Layout.eql(&first, &second));
+    changed = entries;
+    changed[0].kind.static_sampler.?.combined_image_sampler_descriptor_count = 2;
+    var third = try Layout.init(std.testing.allocator, .{ .entries = &changed }, options);
+    defer third.deinit(std.testing.allocator);
+    try std.testing.expect(!Layout.eql(&first, &third));
+    changed = entries;
+    changed[0].kind.static_sampler.?.sampler_identity = 0;
+    try std.testing.expectError(error.InvalidStaticSamplerBinding, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &changed },
+        options,
+    ));
+    changed = entries;
+    changed[0].kind.static_sampler.?.combined_image_sampler_descriptor_count = 0;
+    try std.testing.expectError(error.InvalidStaticSamplerBinding, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &changed },
+        options,
+    ));
+    changed = entries;
+    changed[0].kind.static_sampler.?.sampled_texture_binding = 1;
+    try std.testing.expectError(error.InvalidStaticSamplerBinding, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &changed },
+        options,
+    ));
+    changed = entries;
+    changed[0].kind.static_sampler.?.combined_image_sampler_descriptor_count = 4;
+    try std.testing.expectError(error.InvalidStaticSamplerBinding, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &changed },
+        options,
+    ));
+    changed[0].kind.static_sampler.?.combined_image_sampler_descriptor_count =
+        std.math.maxInt(u32);
+    var oversized = [_]Entry{ changed[0], changed[0] };
+    oversized[1].binding_number = 1;
+    try std.testing.expectError(error.InvalidStaticSamplerBinding, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &oversized },
+        options,
+    ));
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        combinedLayoutAllocationRoundTrip,
+        .{ @as([]const Entry, &entries), options },
+    );
+}
+
+test "private texture permission and depth view change logical identity" {
+    var entries = [_]Entry{.{
+        .binding_number = 0,
+        .visibility = .{ .compute = true },
+        .kind = .{ .sampled_texture = .{
+            .sample_type = .float_unfilterable,
+            .view_dimension = .two_d,
+            .multisampled = false,
+        } },
+    }};
+    const options: ValidateOptions = .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+        .allow_internal_bindings = true,
+    };
+    var public = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer public.deinit(std.testing.allocator);
+    entries[0].kind.sampled_texture.?.internal = true;
+    var private = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer private.deinit(std.testing.allocator);
+    try std.testing.expect(!Layout.eql(&public, &private));
+    entries[0].kind.sampled_texture.?.depth_view = true;
+    var depth = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer depth.deinit(std.testing.allocator);
+    try std.testing.expect(!Layout.eql(&private, &depth));
+    entries[0].kind.sampled_texture.?.internal = false;
+    try std.testing.expectError(error.InternalBindingNotAllowed, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &entries },
+        options,
+    ));
+}
+
+fn combinedLayoutAllocationRoundTrip(
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+    options: ValidateOptions,
+) !void {
+    var internal = try Layout.init(allocator, .{ .entries = entries }, options);
+    defer internal.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), internal.queryBindingCount());
+}
+
+test "private storage texture permission remains a separate logical key" {
+    var entries = [_]Entry{.{
+        .binding_number = 0,
+        .visibility = .{ .compute = true },
+        .kind = .{ .storage_texture = .{
+            .access = .write_only,
+            .view_dimension = .two_d,
+        } },
+    }};
+    const options: ValidateOptions = .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+        .allow_internal_bindings = true,
+    };
+    var public = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer public.deinit(std.testing.allocator);
+    entries[0].kind.storage_texture.?.internal = true;
+    var private = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+    defer private.deinit(std.testing.allocator);
+    try std.testing.expect(!Layout.eql(&public, &private));
+}
+
+test "private depth image ABI supports matching multisampled views" {
+    const entries = [_]Entry{.{
+        .binding_number = 0,
+        .visibility = .{ .fragment = true },
+        .kind = .{ .sampled_texture = .{
+            .sample_type = .float_unfilterable,
+            .view_dimension = .two_d,
+            .multisampled = true,
+            .internal = true,
+            .depth_view = true,
+        } },
+    }};
+    var internal = try Layout.init(std.testing.allocator, .{ .entries = &entries }, .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+        .allow_internal_bindings = true,
+    });
+    defer internal.deinit(std.testing.allocator);
+    try std.testing.expect(internal.entries[0].layout.sampled_texture.depth_view);
+    try std.testing.expect(internal.entries[0].layout.sampled_texture.multisampled);
+}
+
+test "external binding blocks cover the bounded private namespace" {
+    var occupied = std.StaticBitSet(5 * max_bindings_per_bind_group).initEmpty();
+    for (0..max_bindings_per_bind_group) |number| {
+        const binding_number: u32 = @intCast(number);
+        const roles = try externalBindingNumbers(.{
+            .binding_number = binding_number,
+            .needs_static_sampler = true,
+        });
+        const without_sampler = try externalBindingNumbers(.{ .binding_number = binding_number });
+        try std.testing.expectEqual(1000 + 4 * binding_number, roles.plane0);
+        try std.testing.expectEqual(roles.plane0 + 1, roles.plane1);
+        try std.testing.expectEqual(roles.plane0 + 2, roles.metadata);
+        try std.testing.expectEqual(roles.plane0 + 3, roles.static_sampler.?);
+        try std.testing.expectEqual(roles.plane0, without_sampler.plane0);
+        try std.testing.expectEqual(roles.plane1, without_sampler.plane1);
+        try std.testing.expectEqual(roles.metadata, without_sampler.metadata);
+        try std.testing.expect(without_sampler.static_sampler == null);
+        for ([_]u32{ roles.plane0, roles.plane1, roles.metadata, roles.static_sampler.? }) |role| {
+            try std.testing.expect(role >= max_bindings_per_bind_group);
+            try std.testing.expect(role < 5 * max_bindings_per_bind_group);
+            try std.testing.expect(!occupied.isSet(role));
+            occupied.set(role);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4000), occupied.count());
+    try std.testing.expectError(error.BindingNumberAboveLimit, externalBindingNumbers(.{
+        .binding_number = max_bindings_per_bind_group,
+    }));
+    try std.testing.expectError(error.BindingNumberAboveLimit, externalBindingNumbers(.{
+        .binding_number = std.math.maxInt(u32),
+    }));
+}
+
+test "external expansion identity and actual roles are independent of descriptor order" {
+    const entries = [_]Entry{
+        .{
+            .binding_number = 999,
+            .visibility = .{ .fragment = true },
+            .kind = .{ .external_texture = true },
+        },
+        .{
+            .binding_number = 217,
+            .visibility = .{ .fragment = true },
+            .kind = .{ .buffer = .{
+                .binding_type = .uniform,
+                .has_dynamic_offset = false,
+                .min_binding_size = 16,
+            } },
+        },
+        .{
+            .binding_number = 0,
+            .visibility = .{ .fragment = true },
+            .kind = .{ .external_texture = true },
+        },
+    };
+    const reversed = [_]Entry{ entries[2], entries[1], entries[0] };
+    for ([_]bool{ false, true }) |needs_sampler| {
+        const options: ValidateOptions = .{
+            .max_storage_buffers_in_vertex_stage = 8,
+            .max_storage_buffers_in_fragment_stage = 8,
+            .needs_static_sampler_for_external_texture = needs_sampler,
+        };
+        try std.testing.checkAllAllocationFailures(
+            std.testing.allocator,
+            externalExpansionAllocationRoundTrip,
+            .{ @as([]const Entry, &entries), options },
+        );
+        var first = try Layout.init(std.testing.allocator, .{ .entries = &entries }, options);
+        defer first.deinit(std.testing.allocator);
+        var second = try Layout.init(std.testing.allocator, .{ .entries = &reversed }, options);
+        defer second.deinit(std.testing.allocator);
+        try std.testing.expectEqual(first.content_hash, second.content_hash);
+        try std.testing.expect(Layout.eql(&first, &second));
+        try std.testing.expectEqual(@as(u32, 217), first.findBindingByNumber(217).?.binding_number);
+        try std.testing.expect(first.queryExternalBindingNumbers(217) == null);
+        try std.testing.expect(first.queryExternalBindingNumbers(218) == null);
+        for ([_]u32{ 0, 999 }) |number| {
+            const expected = try externalBindingNumbers(.{
+                .binding_number = number,
+                .needs_static_sampler = needs_sampler,
+            });
+            const actual = first.queryExternalBindingNumbers(number).?;
+            const other = second.queryExternalBindingNumbers(number).?;
+            try std.testing.expect(std.meta.eql(expected, actual));
+            try std.testing.expect(std.meta.eql(actual, other));
+            const external = first.findBindingByNumber(number).?.layout.external_texture;
+            try std.testing.expectEqual(actual.plane0, first.binding(external.plane0).binding_number);
+            try std.testing.expectEqual(actual.plane1, first.binding(external.plane1).binding_number);
+            try std.testing.expectEqual(actual.metadata, first.binding(external.metadata).binding_number);
+            if (external.static_sampler) |index| {
+                try std.testing.expectEqual(actual.static_sampler.?, first.binding(index).binding_number);
+            } else {
+                try std.testing.expect(actual.static_sampler == null);
+            }
+        }
+    }
+}
+
+test "duplicate public and overlapping physical entries fail before publication" {
+    const options: ValidateOptions = .{
+        .max_storage_buffers_in_vertex_stage = 8,
+        .max_storage_buffers_in_fragment_stage = 8,
+    };
+    const external: Entry = .{
+        .binding_number = 0,
+        .visibility = .{ .fragment = true },
+        .kind = .{ .external_texture = true },
+    };
+    const duplicate = [_]Entry{ external, external };
+    try std.testing.expectError(error.DuplicateBindingNumber, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &duplicate },
+        options,
+    ));
+    const sampled: Entry = .{
+        .binding_number = 10,
+        .visibility = .{ .fragment = true },
+        .array_size = 2,
+        .kind = .{ .sampled_texture = .{
+            .sample_type = .float_filterable,
+            .view_dimension = .two_d,
+            .multisampled = false,
+        } },
+    };
+    var overlapping = [_]Entry{ sampled, sampled };
+    overlapping[1].binding_number = 11;
+    overlapping[1].array_size = 1;
+    try std.testing.expectError(error.DuplicateBindingNumber, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &overlapping },
+        options,
+    ));
+    overlapping[1].binding_number = 12;
+    var valid = try Layout.init(std.testing.allocator, .{ .entries = &overlapping }, options);
+    defer valid.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 2), valid.findBindingByNumber(10).?.array_size);
+    try std.testing.expectEqual(@as(u32, 1), valid.findBindingByNumber(11).?.index_in_array);
+    overlapping[0].binding_number = 999;
+    try std.testing.expectError(error.BindingNumberAboveLimit, Layout.init(
+        std.testing.allocator,
+        .{ .entries = &overlapping },
+        options,
+    ));
+}
+
+fn externalExpansionAllocationRoundTrip(
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+    options: ValidateOptions,
+) !void {
+    var internal = try Layout.init(allocator, .{ .entries = entries }, options);
+    defer internal.deinit(allocator);
+    try std.testing.expect(internal.queryExternalBindingNumbers(0) != null);
+    try std.testing.expect(internal.queryExternalBindingNumbers(999) != null);
 }

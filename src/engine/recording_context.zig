@@ -71,6 +71,7 @@ pub const CommandRecordingContext = struct {
     /// (`CommandRecordingContextVk.h:55`). M9's queue creates it and owns it;
     /// the replay only writes to it.
     command_buffer: vulkan.VkCommandBuffer = null,
+    active_render_pass: ?vulkan.VkRenderPass = null,
 
     /// `mappableBuffersForEagerTransition` (`:75`): buffers whose layout must
     /// move before the submit and back after it.

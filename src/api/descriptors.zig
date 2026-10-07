@@ -75,8 +75,8 @@ pub const DeviceDescriptor = struct {
     required_features: ?[]const enums.FeatureName = null,
     required_limits: ?*const Limits = null,
     default_queue: QueueDescriptorChain,
-    device_lost_callback: ?*const callbacks.DeviceLostCallback = null,
-    uncaptured_error_callback: ?*const callbacks.UncapturedErrorCallback = null,
+    device_lost_callback_info: callbacks.DeviceLostCallbackInfo,
+    uncaptured_error_callback_info: callbacks.UncapturedErrorCallbackInfo,
 };
 
 /// The chain for "device descriptor". The root's own fields, plus one optional per
@@ -89,8 +89,8 @@ pub const DeviceDescriptorChain = struct {
     required_features: ?[]const enums.FeatureName = null,
     required_limits: ?*const Limits = null,
     default_queue: QueueDescriptorChain,
-    device_lost_callback: ?*const callbacks.DeviceLostCallback = null,
-    uncaptured_error_callback: ?*const callbacks.UncapturedErrorCallback = null,
+    device_lost_callback_info: callbacks.DeviceLostCallbackInfo,
+    uncaptured_error_callback_info: callbacks.UncapturedErrorCallbackInfo,
     dawn_consume_adapter_descriptor: ?DawnConsumeAdapterDescriptor = null,
     dawn_toggles_descriptor: ?DawnTogglesDescriptor = null,
     dawn_cache_device_descriptor: ?DawnCacheDeviceDescriptor = null,
@@ -120,8 +120,8 @@ pub const DawnTogglesDescriptor = struct {
 /// A chained struct. Its roots are 1 in `chained.zig`.
 pub const DawnCacheDeviceDescriptor = struct {
     isolation_key: []const u8,
-    dawn_load_cache_data_callback: ?*const callbacks.DawnLoadCacheDataCallback = null,
-    dawn_store_cache_data_callback: ?*const callbacks.DawnStoreCacheDataCallback = null,
+    dawn_load_cache_data_callback_info: callbacks.DawnLoadCacheDataCallbackInfo,
+    dawn_store_cache_data_callback_info: callbacks.DawnStoreCacheDataCallbackInfo,
 };
 
 /// Generated from dawn.json "dawn device allocator control" (src/dawn/dawn.json:315).
@@ -790,7 +790,7 @@ pub const SharedBufferMemoryFromWindowsHandleDescriptor = struct {
 pub const SharedBufferMemoryHostPointerDescriptor = struct {
     pointer: ?*anyopaque = null,
     size: u64,
-    dispose_callback: ?*const callbacks.DisposeCallback = null,
+    dispose_callback_info: callbacks.DisposeCallbackInfo,
 };
 
 /// Generated from dawn.json "shared texture memory properties" (src/dawn/dawn.json:2107).

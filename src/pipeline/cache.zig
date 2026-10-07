@@ -7,17 +7,14 @@
 //! `LRUCache` (`src/dawn/common/LRUCache.h:89`), the two containers the
 //! pipeline path reaches, plus the value the second one holds.
 //!
-//! **What this file does not claim.** It does not claim Dawn's reference
-//! counting. Dawn's cache holds a `WeakRef` per entry and erases the entry when
-//! the object dies; the port's objects live in the device arena
-//! (`src/core/object.zig:395-400`) until `Device.deinit`, so the port holds a
-//! plain pointer and removes the entry from the pipeline's own `destroy` hook.
-//! That is the same lifetime the caller observes, and it removes the promotion
-//! step Dawn needs `mTemporaryRefs` for (`ContentLessObjectCache.h:236-242`).
+//! The object index is weak: it owns keys, not object references. Its owner
+//! removes each entry before retiring the corresponding payload. GuardedCache
+//! binds that index to the caller's stable ObjectList and existing mutex.
 
 const std = @import("std");
 const vulkan = @import("vulkan");
 const vk = @import("../vk/dispatch.zig");
+const core = @import("../core/root.zig");
 
 const cache_key = @import("cache_key.zig");
 
@@ -61,14 +58,6 @@ pub fn Cache(comptime T: type) type {
 
         pub const Error = std.mem.Allocator.Error;
 
-        // `find` reads liveness to stand in for Dawn's weak-ref promotion, so
-        // a type that does not answer it cannot be cached at all.
-        comptime {
-            if (!@hasDecl(T, "isAlive")) {
-                @compileError("a cached object must answer isAlive");
-            }
-        }
-
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
         }
@@ -83,67 +72,22 @@ pub fn Cache(comptime T: type) type {
             self.entry_count = 0;
         }
 
-        /// The object `key` names, or null.
-        ///
-        /// Dawn's cache holds a `WeakRef` and promotes it
-        /// (`ContentLessObjectCache.h:164`), so an object that died cannot be
-        /// found. The port's objects live in the arena and leave the map
-        /// through nothing, because `destroy` has no `io` to take the lock
-        /// with; reading liveness is what replaces the promotion.
-        ///
-        /// The key is borrowed for the comparison and retained by nothing, so
-        /// the caller's `defer key.deinit` stays correct across this call.
+        /// Borrows the indexed object. The owner must evict before destroying
+        /// payload storage; this container never reads object liveness.
+        /// The comparison key is borrowed only for this call.
         pub fn find(self: *Self, key: *const CacheKey) ?*T {
             const bucket = self.buckets.getPtr(key.contentHash()) orelse return null;
             for (bucket.items) |*entry| {
-                if (!entry.object.isAlive()) continue;
                 if (CacheKey.eql(&entry.key, key)) return entry.object;
             }
             return null;
         }
 
-        /// Drops every entry whose object the arena has destroyed, and returns
-        /// how many it dropped.
-        ///
-        /// The caller holds the lock. Dawn erases from `Uncache`
-        /// (`ContentLessObjectCacheable.h:53-61`), which a cacheable calls
-        /// from its `DeleteThis`; the port defers the sweep to the create
-        /// call, which is the only place that already holds it.
-        ///
-        /// The sweep runs from the end downwards because `swapRemove` moves the
-        /// last entry into the hole it leaves, and that entry's own test has
-        /// already run; ascending would test it twice and free it twice. The
-        /// `removed` copy is the one that names the key, because `swapRemove`
-        /// took the entry out of the bucket.
-        pub fn prune(self: *Self) usize {
-            var dropped: usize = 0;
-            var bucket_iterator = self.buckets.valueIterator();
-            while (bucket_iterator.next()) |bucket| {
-                var index = bucket.items.len;
-                while (index > 0) {
-                    index -= 1;
-                    if (bucket.items[index].object.isAlive()) continue;
-                    var removed = bucket.swapRemove(index);
-                    removed.key.deinit(self.allocator);
-                    self.entry_count -= 1;
-                    dropped += 1;
-                }
-            }
-            return dropped;
-        }
-
         /// Records `object` under `key`. The key's bytes are moved in, so the
         /// caller keeps nothing alive for the cache.
         ///
-        /// `key` is a pointer because a `CacheKey` holds an unmanaged
-        /// `std.ArrayList`, and passing it by value copies the struct and
-        /// leaves the buffer named twice: the entry would read bytes the
-        /// caller's `defer key.deinit` had already freed. This function
-        /// therefore empties the caller's key on every path, which makes that
-        /// `defer` a no-op whether the call returned an entry or an error.
-        /// The reset cannot be left to the deinit, because `CacheKey.deinit`
-        /// leaves `bytes` undefined (`cache_key.zig:41`) and a second free
-        /// would read it.
+        /// `key` owns its bytes until insertion succeeds; success moves them
+        /// into the index and leaves `key` empty. Failure leaves `key` intact.
         pub fn insert(self: *Self, key: *CacheKey, object: *T) Error!void {
             const hash = key.contentHash();
             const bucket = try self.buckets.getOrPut(self.allocator, hash);
@@ -153,13 +97,6 @@ pub fn Cache(comptime T: type) type {
                     bucket.value_ptr.deinit(self.allocator);
                     _ = self.buckets.remove(hash);
                 }
-            }
-            // A failed append leaves the buffer in the caller's key and in no
-            // entry, so it is freed here, once, and the caller's key is left
-            // empty by the reset that follows.
-            errdefer {
-                key.deinit(self.allocator);
-                key.bytes = .empty;
             }
             try bucket.value_ptr.append(self.allocator, .{
                 .key = .{ .bytes = key.bytes },
@@ -207,6 +144,77 @@ pub fn Cache(comptime T: type) type {
                 for (bucket.items) |entry| total += entry.key.byteCount();
             }
             return total;
+        }
+    };
+}
+
+/// Weak object index serialized by the caller's ObjectGuard.
+///
+/// The stable external list and allocator outlive the index. Initialization
+/// captures no self pointer; the owning store must stay stable once callbacks
+/// refer to it. Every operation requires the guard for exactly `objects`.
+pub fn GuardedCache(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        objects: *core.ObjectList,
+        entries: Cache(T),
+
+        /// Creates an empty index borrowing only the caller's stable list.
+        pub fn init(gpa: std.mem.Allocator, objects: *core.ObjectList) Self {
+            return .{ .objects = objects, .entries = Cache(T).init(gpa) };
+        }
+
+        /// Frees backing storage after all retirement hooks have evicted.
+        /// A nonempty index is a caller lifecycle error, not a forced sweep.
+        pub fn deinit(self: *Self, guard: *const core.ObjectGuard) void {
+            guard.assertOwns(self.objects);
+            std.debug.assert(self.entries.isEmpty());
+            self.entries.deinit();
+            self.* = undefined;
+        }
+
+        /// Borrows a live indexed object while the guard remains held.
+        pub fn find(self: *Self, guard: *const core.ObjectGuard, key: *const CacheKey) ?*T {
+            guard.assertOwns(self.objects);
+            return self.entries.find(key);
+        }
+
+        /// Moves key ownership on success; no object reference is retained.
+        pub fn insert(
+            self: *Self,
+            guard: *const core.ObjectGuard,
+            key: *CacheKey,
+            object: *T,
+        ) std.mem.Allocator.Error!void {
+            guard.assertOwns(self.objects);
+            std.debug.assert(object.header.tracking == self.objects);
+            try self.entries.insert(key, object);
+        }
+
+        /// Evicts by identity and frees the victim key with the index allocator.
+        pub fn remove(self: *Self, guard: *const core.ObjectGuard, object: *T) void {
+            guard.assertOwns(self.objects);
+            std.debug.assert(object.header.tracking == self.objects);
+            self.entries.remove(object);
+        }
+
+        /// Reports whether every weak membership has been evicted.
+        pub fn isEmpty(self: *const Self, guard: *const core.ObjectGuard) bool {
+            guard.assertOwns(self.objects);
+            return self.entries.isEmpty();
+        }
+
+        /// Counts indexed payloads, not retained retired headers.
+        pub fn queryEntryCount(self: *const Self, guard: *const core.ObjectGuard) usize {
+            guard.assertOwns(self.objects);
+            return self.entries.queryEntryCount();
+        }
+
+        /// Reports currently owned key bytes.
+        pub fn queryKeyByteCount(self: *const Self, guard: *const core.ObjectGuard) usize {
+            guard.assertOwns(self.objects);
+            return self.entries.queryKeyByteCount();
         }
     };
 }
@@ -473,19 +481,76 @@ fn assertNoLeak(state: *std.heap.DebugAllocator(.{})) void {
     std.debug.assert(state.deinit() == .ok);
 }
 
+test "guarded weak eviction precedes payload cleanup and late alias release" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var arena = core.ObjectArena.init(gpa, .{ .object_mutex = &mutex });
+    var guard = core.ObjectGuard.lockUncancelable(io, arena.objectList());
+    defer guard.unlock(io);
+    defer arena.deinit(gpa, &guard) catch unreachable;
+
+    const Probe = struct {
+        const Self = @This();
+        header: core.Object,
+        index: *GuardedCache(Self),
+        cleanup_count: *u32,
+
+        pub fn destroy(
+            self: *Self,
+            held: *const core.ObjectGuard,
+            _: std.Io,
+            _: core.DestroyReason,
+        ) void {
+            held.assertOwns(self.header.tracking);
+            std.debug.assert(self.index.queryEntryCount(held) == 0);
+            std.debug.assert(self.index.queryKeyByteCount(held) == 0);
+            self.cleanup_count.* += 1;
+        }
+
+        fn evict(context: *anyopaque, held: *const core.ObjectGuard, header: *core.Object) void {
+            const index: *GuardedCache(Self) = @ptrCast(@alignCast(context));
+            const self: *Self = @fieldParentPtr("header", header);
+            index.remove(held, self);
+        }
+    };
+    var index = GuardedCache(Probe).init(gpa, arena.objectList());
+    defer index.deinit(&guard);
+    var cleanup_count: u32 = 0;
+    const object = try arena.create(gpa, &guard, Probe, .{
+        .kind = .pipeline,
+        .initial_reference = .lease,
+    });
+    object.index = &index;
+    object.cleanup_count = &cleanup_count;
+    object.header.attach(&guard, io);
+
+    var key = CacheKey.init();
+    defer key.deinit(gpa);
+    try key.appendKind(gpa, .compute_pipeline);
+    try key.appendBytes(gpa, "guarded pipeline");
+    try index.insert(&guard, &key, object);
+    object.header.setCacheRemovalLocked(&guard, &index, Probe.evict);
+    try std.testing.expectEqual(@as(usize, 1), index.queryEntryCount(&guard));
+    try object.header.acquireUserLocked(&guard);
+    object.header.retirePayloadLocked(&guard, io, .early_destroy);
+    try std.testing.expect(index.isEmpty(&guard));
+    try std.testing.expectEqual(@as(u32, 1), cleanup_count);
+    try std.testing.expectEqual(@as(u32, 2), object.header.reference_count);
+
+    try object.header.releaseUserLocked(&guard, io);
+    object.header.releaseLeaseLocked(&guard, io);
+    try std.testing.expectEqual(@as(u32, 1), cleanup_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.queryTrackedCount(&guard));
+}
+
 test "a duplicate returns the object the first call recorded" {
     var allocator_state: std.heap.DebugAllocator(.{}) = .{};
     defer assertNoLeak(&allocator_state);
     const allocator = allocator_state.allocator();
 
     const Probe = struct {
-        const Self = @This();
-
         value: u64 = 0,
-        alive: bool = true,
-        pub fn isAlive(self: *const Self) bool {
-            return self.alive;
-        }
     };
     var cache = Cache(Probe).init(allocator);
     defer cache.deinit();
@@ -515,17 +580,14 @@ test "a duplicate returns the object the first call recorded" {
     try std.testing.expect(!cache.isEmpty());
     try std.testing.expect(cache.queryKeyByteCount() > 0);
 
-    // A destroyed object is invisible to a later lookup, and the next prune
-    // drops the entry. That is the port's stand-in for Dawn's failed
-    // `WeakRef` promotion.
-    first.alive = false;
+    // The owner evicts before its payload dies. Lookup never probes payload
+    // liveness or leaves dead keys for a later factory to prune.
+    cache.remove(&first);
     try std.testing.expect(cache.find(&rebuilt) == null);
-    try std.testing.expectEqual(@as(usize, 1), cache.prune());
     try std.testing.expectEqual(@as(usize, 0), cache.queryEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), cache.queryKeyByteCount());
 
-    // A second insert under the same key is what a duplicate descriptor would
-    // do if the caller had not found the first one; the lookup still answers
-    // with the first live entry.
+    // A new object can occupy the same content key after eager eviction.
     var duplicate = CacheKey.init();
     defer duplicate.deinit(allocator);
     try duplicate.appendKind(allocator, .render_pipeline);
@@ -541,12 +603,7 @@ test "two keys that differ in their layout bytes name different entries" {
     const allocator = allocator_state.allocator();
 
     const Probe = struct {
-        const Self = @This();
-
         value: u64 = 0,
-        pub fn isAlive(_: *const Self) bool {
-            return true;
-        }
     };
     var cache = Cache(Probe).init(allocator);
     defer cache.deinit();

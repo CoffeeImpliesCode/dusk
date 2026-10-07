@@ -50,6 +50,17 @@ pub const resource_heap = @import("resource_heap.zig");
 /// heaps through a vtable, so a test can drive it with heaps of its own.
 pub const resource_heap_allocator = @import("resource_heap_allocator.zig");
 
+/// Fixed-size heap recycling with a bounded retained pool.
+pub const heap_pool = @import("heap_pool.zig");
+/// Buddy sub-allocations with per-heap ownership and reference counts.
+pub const buddy_memory_allocator = @import("buddy_memory_allocator.zig");
+/// Serial-delayed reclamation of upload-ring byte ranges.
+pub const ring_allocator = @import("ring_allocator.zig");
+/// Intrusive byte-block recycling and tick-based eviction.
+pub const block_pool = @import("block_pool.zig");
+/// Typed object slots backed by a caller-owned block pool.
+pub const slab_allocator = @import("slab_allocator.zig");
+
 // --- what was handed out ----------------------------------------------------
 
 /// `resource_memory_allocation.zig`: one allocation record, its info and the

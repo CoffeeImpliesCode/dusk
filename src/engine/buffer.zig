@@ -30,6 +30,7 @@ const api = @import("../api/api.zig");
 const core = @import("../core/root.zig");
 const platform = @import("../platform/root.zig");
 const recording_context = @import("recording_context.zig");
+const RingAllocator = @import("../memory/ring_allocator.zig").RingAllocator;
 const vk = @import("../vk/dispatch.zig");
 const vulkan = @import("vulkan");
 const vulkan_device = @import("vulkan_device.zig");
@@ -42,6 +43,12 @@ pub const MapMode = api.MapMode;
 pub const ShaderStage = api.ShaderStage;
 /// The caller's descriptor (`src/api/descriptors.zig:397`).
 pub const BufferDescriptor = api.BufferDescriptor;
+
+/// Library-only creation flags use the engine mask, not Vulkan usage values.
+pub const InternalBufferDescriptor = struct {
+    size: u64,
+    native_usage: u32,
+};
 /// An execution serial. The same type as `platform.Serial`, taken from there
 /// rather than restated so the serial timeline has one authority.
 pub const Serial = platform.Serial;
@@ -100,10 +107,14 @@ pub const internal_copy_src_buffer: u32 = 1 << 29;
 pub const indirect_buffer_for_backend_resource_tracking: u32 = 1 << 28;
 pub const read_only_texel_buffer: u32 = 1 << 27;
 
+const internal_creation_usages: u32 = usage_copy_src | usage_copy_dst | usage_uniform |
+    usage_indirect | internal_storage_buffer | read_only_storage_buffer |
+    internal_copy_src_buffer;
+
 /// `kReadOnlyBufferUsages` (`Buffer.h:57`).
 pub const read_only_buffer_usages: u32 = usage_map_read | usage_copy_src | usage_index |
     usage_vertex | usage_uniform | read_only_texel_buffer | read_only_storage_buffer |
-    usage_indirect | indirect_buffer_for_backend_resource_tracking;
+    usage_indirect | indirect_buffer_for_backend_resource_tracking | internal_copy_src_buffer;
 /// `kMappableBufferUsages` (`Buffer.h:63`).
 pub const mappable_buffer_usages: u32 = usage_map_read | usage_map_write;
 /// `kShaderBufferUsages` (`Buffer.h:66`).
@@ -155,11 +166,11 @@ pub fn stateName(state: State) []const u8 {
 /// because `src/core/errors.zig` is not this milestone's file.
 pub const Rule = error{
     BufferUsageEmpty,
+    InternalBufferUsageInvalid,
     BufferUsageMapReadWithOtherUsages,
     BufferUsageMapWriteWithOtherUsages,
     BufferUsageMissingCopyDst,
     BufferUsageMissingCopySrc,
-    BufferMappedAtCreationWithoutMapWrite,
     BufferMappedAtCreationSizeNotAligned,
     BufferSizeAboveLimit,
     BufferAllocationOverflow,
@@ -182,7 +193,8 @@ pub const Rule = error{
     BufferWriteOutsideBuffer,
     UploadRingRequestTooLarge,
     UploadRingExhausted,
-    UploadRingReleaseMismatch,
+    UploadRingReservationNotLast,
+    UploadRingDeviceMismatch,
     ZeroSizedCopy,
 };
 
@@ -192,7 +204,8 @@ pub const Rule = error{
 /// §3.1 requires: a dispatch field the loader left null reaches a caller as a
 /// typed error and never as a panic.
 pub const Error = Rule || core.ValidationError || vk.Error || vk.LoadError ||
-    std.mem.Allocator.Error;
+    std.mem.Allocator.Error || RingAllocator.AllocateError ||
+    error{ MapGenerationExhausted, BufferMapAborted };
 
 /// The error set `create` reports. It is `Error`; the alias names the call site
 /// rather than widening the set for it.
@@ -204,14 +217,22 @@ pub const MapError = Error;
 /// The error set an unmap reports.
 pub const UnmapError = Error;
 
+/// Ownership returned by a successful unmap. A recorded staging upload must
+/// remain alive until its submission completes or native work is safely abandoned.
+/// Reserve queue ownership capacity before unmap, then adopt this buffer without
+/// a fallible intervening step. A failed unmap leaves staging owned by the buffer.
+pub const UnmapResult = struct {
+    staging_upload: ?*Buffer = null,
+};
+
 /// The error set `writeBuffer` reports.
 pub const WriteError = Error;
 
 /// The error set a ring reservation reports.
 pub const ReserveError = Error;
 
-/// The error set a ring release reports.
-pub const ReleaseError = Rule;
+/// Only the newest unsubmitted reservation can be cancelled.
+pub const CancelReservationError = error{UploadRingReservationNotLast};
 
 /// `ruleName` names every `Rule` member. The switch has no `else`, so a member
 /// added without a name here is a compile error, and `test/buffer.zig` calls it
@@ -220,10 +241,10 @@ pub fn ruleName(rule: Rule) []const u8 {
     return switch (rule) {
         error.BufferUsageMissingCopyDst => "buffer usage is missing copy dst",
         error.BufferUsageEmpty => "buffer usages must not be 0",
+        error.InternalBufferUsageInvalid => "the internal buffer usage mask is invalid",
         error.BufferUsageMapReadWithOtherUsages => "map read allows only copy dst beside it",
         error.BufferUsageMapWriteWithOtherUsages => "map write allows only copy src beside it",
         error.BufferUsageMissingCopySrc => "buffer usage is missing copy src",
-        error.BufferMappedAtCreationWithoutMapWrite => "a buffer mapped at creation needs map write",
         error.BufferMappedAtCreationSizeNotAligned => {
             return "a buffer mapped at creation needs a size that is a multiple of 4";
         },
@@ -247,8 +268,9 @@ pub fn ruleName(rule: Rule) []const u8 {
         error.BufferWriteSizeNotAligned => "the write size must be a multiple of 4",
         error.BufferWriteOutsideBuffer => "the write range is outside the buffer",
         error.UploadRingRequestTooLarge => "the upload request is larger than the ring",
-        error.UploadRingExhausted => "the upload ring has no free space until the pending copies are submitted",
-        error.UploadRingReleaseMismatch => "the released byte count does not match a taken reservation",
+        error.UploadRingExhausted => "the upload ring has no free space before GPU completion",
+        error.UploadRingReservationNotLast => "only the newest ring reservation can be cancelled",
+        error.UploadRingDeviceMismatch => "the upload ring belongs to a different Vulkan device",
         error.ZeroSizedCopy => "a buffer copy must cover at least one byte",
     };
 }
@@ -265,6 +287,8 @@ pub const Device = struct {
     /// The three-tier table. `AGENTS.md` §3.1 makes it the only door to Vulkan.
     dispatch: vk.Dispatch,
     vk_device: vulkan.VkDevice,
+    /// Borrowed physical-device identity for native format capability queries.
+    physical_device: vulkan.VkPhysicalDevice = null,
     /// The memory-type table the allocation reads
     /// (`vulkan_device.findMemoryTypeIndex`).
     memory_properties: *const vulkan.VkPhysicalDeviceMemoryProperties,
@@ -340,6 +364,10 @@ pub fn computeInternalBufferUsages(usage: BufferUsage) u32 {
     // storage buffer, so it needs the internal storage bit and not the public
     // one.
     if (usage.query_resolve) internal |= internal_storage_buffer;
+    // Sanitizers read arguments and stage records across descriptor-window boundaries.
+    if (usage.indirect) internal |= read_only_storage_buffer | internal_copy_src_buffer;
+    // Packed blits preserve destination bytes without public copy-source permission.
+    if (usage.copy_dst) internal |= internal_copy_src_buffer;
     return internal;
 }
 
@@ -370,7 +398,6 @@ pub fn validateBufferDescriptor(
 ) Rule!void {
     try validateBufferUsageCombinations(descriptor.usage);
     if (descriptor.mapped_at_creation) {
-        if (!descriptor.usage.map_write) return error.BufferMappedAtCreationWithoutMapWrite;
         if (descriptor.size % mapped_at_creation_size_alignment != 0) {
             return error.BufferMappedAtCreationSizeNotAligned;
         }
@@ -423,7 +450,7 @@ pub fn vulkanPipelineStage(
         if (shader_stage.fragment) flags |= @intCast(vulkan.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         if (shader_stage.compute) flags |= @intCast(vulkan.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
-    if (usage & indirect_buffer_for_backend_resource_tracking != 0) {
+    if (usage & (usage_indirect | indirect_buffer_for_backend_resource_tracking) != 0) {
         flags |= @intCast(vulkan.VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
     }
     if (usage & usage_query_resolve != 0) flags |= @intCast(vulkan.VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -449,7 +476,7 @@ pub fn vulkanAccessFlags(usage: u32) vulkan.VkAccessFlags {
     if (usage & (read_only_storage_buffer | read_only_texel_buffer) != 0) {
         flags |= @intCast(vulkan.VK_ACCESS_SHADER_READ_BIT);
     }
-    if (usage & indirect_buffer_for_backend_resource_tracking != 0) {
+    if (usage & (usage_indirect | indirect_buffer_for_backend_resource_tracking) != 0) {
         flags |= @intCast(vulkan.VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     if (usage & usage_query_resolve != 0) flags |= @intCast(vulkan.VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -499,6 +526,11 @@ pub const Buffer = struct {
     /// `GetInternalUsage` (`Buffer.h:133`).
     internal_usage: u32,
     state: State,
+    /// Monotonic map identity. Exhaustion refuses before changing the buffer.
+    map_generation: u64 = 0,
+    /// Immutable usage target of the current generation; native callers supply
+    /// only the serial that actually passed queue submission.
+    map_usage_serial: Serial = 0,
     /// `MapMode` (`Buffer.cpp:751`).
     map_mode: MapMode,
     /// `MapOffset` (`Buffer.cpp:755`).
@@ -546,7 +578,32 @@ pub const Buffer = struct {
         descriptor: BufferDescriptor,
     ) CreateError!*Buffer {
         try validateBufferDescriptor(device, descriptor);
+        return createRaw(allocator, device, descriptor, computeInternalBufferUsages(descriptor.usage));
+    }
 
+    /// Creates unmapped library storage with no public usage permissions or queue work.
+    /// The caller owns the returned allocation and releases it with destroy.
+    pub fn createInternal(
+        allocator: std.mem.Allocator,
+        device: Device,
+        options: InternalBufferDescriptor,
+    ) CreateError!*Buffer {
+        if (options.native_usage == 0 or options.native_usage & ~internal_creation_usages != 0) {
+            return error.InternalBufferUsageInvalid;
+        }
+        if (options.size > device.max_buffer_size) return error.BufferSizeAboveLimit;
+        return createRaw(allocator, device, .{
+            .size = options.size,
+            .usage = .none,
+        }, options.native_usage);
+    }
+
+    fn createRaw(
+        allocator: std.mem.Allocator,
+        device: Device,
+        descriptor: BufferDescriptor,
+        native_usage: u32,
+    ) CreateError!*Buffer {
         const self = try allocator.create(Buffer);
         errdefer allocator.destroy(self);
         self.* = .{
@@ -557,7 +614,7 @@ pub const Buffer = struct {
             .size = descriptor.size,
             .allocated_size = 0,
             .usage = descriptor.usage,
-            .internal_usage = computeInternalBufferUsages(descriptor.usage),
+            .internal_usage = native_usage,
             .state = .unmapped,
             .map_mode = .none,
             .map_offset = 0,
@@ -576,7 +633,17 @@ pub const Buffer = struct {
 
         try self.initialize();
         if (descriptor.label) |label| self.setLabel(label);
-        if (descriptor.mapped_at_creation) try self.mapAtCreation();
+        if (descriptor.mapped_at_creation) self.mapAtCreation() catch |err| {
+            // Native initialization has already acquired both handles. A failed
+            // creation-stage allocation must unwind them before the outer
+            // allocator errdefer returns the parent descriptor storage.
+            if (self.staging) |staging| {
+                try staging.destroy(self.device.allocator);
+                self.staging = null;
+            }
+            try self.destroyVulkan(try procs(self.device));
+            return err;
+        };
         return self;
     }
 
@@ -596,7 +663,10 @@ pub const Buffer = struct {
         size = @max(size, minimum_allocated_size);
 
         self.allocated_size = std.mem.alignForward(u64, size, fill_alignment);
-        if (self.usage.uniform) {
+        if (self.internal_usage & usage_uniform != 0) {
+            if (size > std.math.maxInt(u64) - (uniform_allocated_alignment - 1)) {
+                return error.BufferAllocationOverflow;
+            }
             self.allocated_size = std.mem.alignForward(u64, size, uniform_allocated_alignment);
         }
         // Drivers add constants to the size they are given and align it, so a
@@ -680,18 +750,12 @@ pub const Buffer = struct {
         // `HOST_CACHED` is a preference in Dawn's selector, not a requirement:
         // requiring it would refuse a driver that exposes no cached type for a
         // buffer whose readback is served by an invalidate instead.
-        var forbidden_flags: vulkan.VkMemoryPropertyFlags = 0;
-        if (kind.host_readable or kind.host_writable) {
-            // A mappable buffer that is device local cannot be mapped, so the
-            // kind that asked for host access must not be device local.
-            forbidden_flags |= @intCast(vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        }
 
         const type_index = vulkan_device.findMemoryTypeIndex(
             self.device.memory_properties,
             requirements.memoryTypeBits,
             required_flags,
-            forbidden_flags,
+            0,
         ) catch |err| switch (err) {
             error.NoMemoryType => return error.BufferHostVisibleExpected,
         };
@@ -1217,6 +1281,7 @@ pub const Buffer = struct {
     /// or the staging buffer's. A buffer with no mapping has no map usage, and
     /// every caller of this runs only once a mapping exists.
     pub fn mappedSpan(self: *const Buffer) []u8 {
+        if (self.staging) |staging| return staging.mappedSpan();
         const base = self.mapped orelse unreachable;
         return base[self.allocation.offset..][0..self.allocation.size];
     }
@@ -1254,7 +1319,8 @@ pub const Buffer = struct {
         self.map_size = self.size;
         self.is_mapped_at_creation = true;
         try self.finalizeMap(.mapped_at_creation);
-        if (self.staging != null) return;
+        // Staging was itself created mapped and zeroed across the full allocated
+        // range. Mark either path initialized so no later clear overwrites it.
 
         // Sub-path A: the caller is about to write this allocation directly, so
         // it holds the initial bytes. The whole allocated range is zeroed, not
@@ -1262,7 +1328,7 @@ pub const Buffer = struct {
         // padding (`Buffer.cpp:688` through `:696`). Marking it initialized
         // stops a later clear from overwriting what the caller writes
         // (`Buffer.cpp:702`).
-        if (self.size != 0) @memset(self.mappedSpan()[0..self.allocated_size], 0);
+        if (self.staging == null and self.size != 0) @memset(self.mappedSpan()[0..self.allocated_size], 0);
         self.is_data_initialized = true;
         return;
     }
@@ -1315,6 +1381,7 @@ pub const Buffer = struct {
         offset: u64,
         size: u64,
     ) Rule!void {
+        if (mode.toFlags() != 1 and mode.toFlags() != 2) return error.BufferMapModeMismatch;
         if (offset > self.size) return error.BufferMapRangeOutsideBuffer;
         if (offset % map_offset_alignment != 0) return error.BufferMappedRangeNotAligned;
         if (size % map_size_alignment != 0) return error.BufferMappedRangeNotAligned;
@@ -1397,31 +1464,29 @@ pub const Buffer = struct {
         size: u64,
         writable: bool,
     ) MapError![]u8 {
+        if (offset > self.size) return error.BufferMappedRangeOutsideBuffer;
         const wanted = if (size == whole_map_size) self.size - offset else size;
         try self.canGetMappedRange(writable, offset, wanted);
+        if (wanted == 0) return &.{};
         const span = self.mappedSpan();
-        return span[self.map_offset + offset ..][0..wanted];
+        return span[offset..][0..wanted];
     }
 
-    /// `MapAsyncOptions`.
-    pub const MapAsyncOptions = struct {
+    /// Byte range for a pending map. `whole_map_size` maps to the buffer end.
+    pub const MapBeginOptions = struct {
         mode: MapMode,
         offset: u64 = 0,
         size: u64 = whole_map_size,
-        /// What Dawn reads off the queue at `Buffer.cpp:1169`. The port takes it
-        /// as a parameter so the buffer reads no clock and holds no queue
-        /// pointer.
-        completed_serial: Serial = 0,
+        /// Null preserves standalone raw pending-use semantics. Native admission
+        /// supplies its actual accepted target under queue gate + ObjectGuard.
+        submitted_usage_serial: ?Serial = null,
     };
+    pub const MapCompletion = enum { mapped, aborted };
 
-    /// `APIMapAsync` (`Buffer.cpp:796`) and the state half of
-    /// `ValidateCanUseOnQueueNow` (`Buffer.cpp:769`).
-    ///
-    /// Dawn parks a `MapAsyncEvent` and resolves the map from the device tick
-    /// against a future; the port resolves it here, after the caller has waited
-    /// for the serial it names. A caller that has not waited gets the error
-    /// rather than a buffer mapped over a copy in flight.
-    pub fn mapAsync(self: *Buffer, options: MapAsyncOptions) MapError!void {
+    /// Validates and reserves a generation, leaving the buffer pending, not mapped.
+    /// Caller holds the owning ObjectGuard and queue admission gate.
+    /// No GPU serial is completed here. On failure the prior state is unchanged.
+    pub fn beginMap(self: *Buffer, options: MapBeginOptions) MapError!u64 {
         const offset = options.offset;
         var size = options.size;
         if (size == whole_map_size and offset <= self.size) size = self.size - offset;
@@ -1435,15 +1500,33 @@ pub const Buffer = struct {
             .unmapped => {},
         }
         try self.validateMapAsync(options.mode, offset, size);
-        if (self.last_usage_serial > options.completed_serial) return error.BufferUseWhileInUse;
-
-        try self.transitionState(.unmapped, .in_use);
+        if (self.map_generation == std.math.maxInt(u64)) return error.MapGenerationExhausted;
+        self.map_generation += 1;
         self.map_mode = options.mode;
         self.map_offset = offset;
         self.map_size = size;
+        self.map_usage_serial = options.submitted_usage_serial orelse self.last_usage_serial;
         self.state = .pending_map;
+        return self.map_generation;
+    }
+
+    /// Completes only the matching alive pending generation after real fence completion.
+    /// Unmap, destruction, or a later map makes an old generation permanently aborted.
+    pub fn completeMap(self: *Buffer, generation: u64, completed_serial: Serial) MapError!MapCompletion {
+        if (self.state != .pending_map or self.map_generation != generation) return .aborted;
+        if (self.map_usage_serial > completed_serial) return error.BufferUseWhileInUse;
         try self.finalizeMap(.mapped);
-        return;
+        return .mapped;
+    }
+
+    /// Cancels only the named pending generation. Staging ownership is unchanged.
+    pub fn cancelMap(self: *Buffer, generation: u64) bool {
+        if (self.state != .pending_map or self.map_generation != generation) return false;
+        self.state = .unmapped;
+        self.map_mode = .none;
+        self.map_offset = 0;
+        self.map_size = 0;
+        return true;
     }
 
     /// `ValidateUnmap` (`Buffer.cpp:1156`). A host-mapped buffer is the only one
@@ -1454,29 +1537,40 @@ pub const Buffer = struct {
         return {};
     }
 
-    /// `Unmap` (`Buffer.cpp:957`) without the pending-map event machinery, which
-    /// is M4's future. A pending map is the caller's to resolve.
-    pub fn unmap(self: *Buffer, recording: Recording) UnmapError!void {
+    /// Cancels a pending map or ends a mapped range without retiring staged GPU bytes.
+    ///
+    /// The caller owns the returned staging upload. Recording a copy does not
+    /// submit it or end its lifetime; transfer it to the queue's reserved slot.
+    pub fn unmap(self: *Buffer, recording: Recording) UnmapError!UnmapResult {
         try self.validateUnmap();
+        var result: UnmapResult = .{};
         switch (self.state) {
-            .destroyed, .unmapped => return {},
-            .pending_map, .in_use => return error.BufferUseWhileInUse,
+            .destroyed, .unmapped => return result,
+            .pending_map => {
+                const canceled = self.cancelMap(self.map_generation);
+                std.debug.assert(canceled);
+                return result;
+            },
+            .in_use => return error.BufferUseWhileInUse,
             .shared_memory_no_access => return error.BufferUseWithoutSharedMemoryAccess,
             .mapped => {
                 try self.transitionState(.mapped, .in_use);
+                errdefer self.state = .mapped;
                 try self.unmapImpl(.mapped);
             },
             .mapped_at_creation => {
                 try self.transitionState(.mapped_at_creation, .in_use);
-                self.is_mapped_at_creation = false;
-                if (self.staging != null) try self.copyFromStagingBuffer(recording);
-                if (self.size != 0 and self.isCpuWritableAtCreation()) {
+                errdefer self.state = .mapped_at_creation;
+                if (self.staging != null) {
+                    result.staging_upload = try self.copyFromStagingBuffer(recording);
+                } else if (self.size != 0 and self.isCpuWritableAtCreation()) {
                     try self.unmapImpl(.mapped_at_creation);
                 }
+                self.is_mapped_at_creation = false;
             },
         }
         self.state = .unmapped;
-        return;
+        return result;
     }
 
     /// `UnmapImpl` (`BufferVk.cpp:623`). CPU-visible memory stays mapped for
@@ -1488,12 +1582,17 @@ pub const Buffer = struct {
     }
 
     /// `CopyFromStagingBuffer` (`Buffer.cpp:933`): the staged bytes reach the
-    /// destination as one recorded `vkCmdCopyBuffer`.
-    fn copyFromStagingBuffer(self: *Buffer, recording: Recording) Error!void {
-        const staging = self.staging orelse return;
+    /// destination as one recorded `vkCmdCopyBuffer`. Ownership transfers only
+    /// after recording succeeds; the caller retires the upload by submission serial.
+    fn copyFromStagingBuffer(self: *Buffer, recording: Recording) Error!*Buffer {
+        const staging = self.staging.?;
+        // The CPU keeps the staging mapping while a failed recording can retry.
+        // Flush its actual writes before recording; ownership transfers only
+        // after the native copy succeeds, not after public usage validation.
+        try staging.unmapImpl(.mapped_at_creation);
+        try self.recordCopyBufferNative(recording, staging, 0, 0, self.allocated_size);
         self.staging = null;
-        try self.recordCopyBuffer(recording, staging, 0, 0, self.allocated_size);
-        try staging.destroy(self.device.allocator);
+        return staging;
     }
 
     /// `WriteBufferOptions`.
@@ -1574,24 +1673,14 @@ pub const Buffer = struct {
         recording: Recording,
         options: WriteBufferOptions,
     ) WriteError!void {
-        const reservation = try ring.reserve(options.data.len);
-        // The undo runs on the way out and cannot report: Zig forbids `try`
-        // and `return` inside a `defer` expression. `release` refuses only
-        // `UploadRingReleaseMismatch`, and the count handed back is the one
-        // `reserve` just took, so the mismatch this undo cannot cause is
-        // named and every other member is a defect the panic states, which is
-        // the shape `pipeline.zig:438` uses for the same rollback.
-        errdefer ring.release(reservation.byte_count) catch |undo_error|
-            switch (undo_error) {
-                error.UploadRingReleaseMismatch => std.debug.panic(
-                    "buffer: the ring undo released a count the reservation does not hold",
-                    .{},
-                ),
-                else => std.debug.panic(
-                    "buffer: the ring undo failed with an error release cannot raise",
-                    .{},
-                ),
-            };
+        if (self.device.vk_device != ring.device.vk_device) return error.UploadRingDeviceMismatch;
+        const reservation = try UploadRing.reserve(
+            ring.device.allocator,
+            ring,
+            .{ .byte_count = options.data.len, .at_serial = recording.pending_serial },
+        );
+        errdefer ring.cancelLast(reservation) catch
+            @panic("buffer: failed to cancel the newest ring reservation");
         @memcpy(reservation.mapped[0..options.data.len], options.data);
         try self.recordCopyBuffer(
             recording,
@@ -1600,7 +1689,6 @@ pub const Buffer = struct {
             options.buffer_offset,
             options.data.len,
         );
-        try ring.release(reservation.byte_count);
         return;
     }
 
@@ -1659,13 +1747,50 @@ pub const Buffer = struct {
         byte_count: u64,
     ) Error!void {
         if (byte_count == 0) return error.ZeroSizedCopy;
-        if (!source.usage.copy_src and source.internal_usage & internal_copy_src_buffer == 0) {
+        if (!source.usage.copy_src) return error.BufferUsageMissingCopySrc;
+        if (!self.usage.copy_dst) return error.BufferUsageMissingCopyDst;
+        try self.recordCopyBufferNative(recording, source, source_offset, destination_offset, byte_count);
+    }
+
+    /// Copies library ranges using native engine permissions, not public usage grants.
+    /// The caller validates ranges and initializes the source before this operation.
+    pub fn recordCopyBufferInternal(
+        self: *Buffer,
+        recording: Recording,
+        source: *Buffer,
+        source_offset: u64,
+        destination_offset: u64,
+        byte_count: u64,
+    ) Error!void {
+        if (byte_count == 0) return error.ZeroSizedCopy;
+        if (source.internal_usage & (usage_copy_src | internal_copy_src_buffer) == 0) {
             return error.BufferUsageMissingCopySrc;
         }
-        if (!self.usage.copy_dst) return error.BufferUsageMissingCopyDst;
+        if (self.internal_usage & usage_copy_dst == 0) return error.BufferUsageMissingCopyDst;
+        try self.recordCopyBufferNative(recording, source, source_offset, destination_offset, byte_count);
+    }
+
+    /// Internal initialization uploads can write the native allocation without
+    /// granting public COPY_DST permission. Every native VkBuffer has that bit.
+    fn recordCopyBufferNative(
+        self: *Buffer,
+        recording: Recording,
+        source: *Buffer,
+        source_offset: u64,
+        destination_offset: u64,
+        byte_count: u64,
+    ) Error!void {
+        std.debug.assert(byte_count != 0);
+        const device_procs = try procs(self.device);
+        const cmd_copy_buffer = device_procs.cmd_copy_buffer orelse
+            return error.MissingDeviceProc;
 
         try self.ensureDataInitializedAsDestination(recording, destination_offset, byte_count);
-        try source.transitionUsageNow(recording, usage_copy_src, .none);
+        const source_usage = if (source.internal_usage & usage_copy_src != 0)
+            usage_copy_src
+        else
+            internal_copy_src_buffer;
+        try source.transitionUsageNow(recording, source_usage, .none);
         try self.transitionUsageNow(recording, usage_copy_dst, .none);
 
         const region: vulkan.VkBufferCopy = .{
@@ -1673,9 +1798,6 @@ pub const Buffer = struct {
             .dstOffset = destination_offset,
             .size = byte_count,
         };
-        const device_procs = try procs(self.device);
-        const cmd_copy_buffer = device_procs.cmd_copy_buffer orelse
-            return error.MissingDeviceProc;
         cmd_copy_buffer(
             recording.command_buffer,
             source.handle,
@@ -1695,31 +1817,21 @@ pub const Reservation = struct {
     mapped: [*]u8,
     /// Byte offset into `buffer`.
     offset: u64,
-    /// Bytes reserved: `byte_count` aligned up, and what `release` takes back.
     byte_count: u64,
+    ring_reservation: RingAllocator.Reservation,
 };
 
 /// `DynamicUploader` (`DynamicUploader.{h,cpp}`) with one ring buffer instead of
 /// a list of them.
 ///
-/// The ring holds one staging `VkBuffer` created `mapped_at_creation` and hands
-/// out aligned regions of it. A reservation is valid until the copies recorded
-/// against it have been submitted, so the caller releases after the submit.
-/// That is `OnStagingMemoryFreePendingOnSubmit` (`DynamicUploader.cpp:137`),
-/// which upstream ties to the serial; the port takes the release as an explicit
-/// call, because a serial-reclaim hook needs the memory module's reclaim queue
-/// and this milestone does not have one.
+/// A staging region remains live until the owner observes GPU completion and
+/// calls `reclaim`. Failed command recording cancels only the newest reservation.
 pub const UploadRing = struct {
     device: Device,
     /// The staging buffer, created on the first reservation
     /// (`DynamicUploader.cpp:110`).
     staging: ?*Buffer,
-    /// The next free offset, which moves forward within one pass.
-    cursor: u64,
-    /// Bytes reserved and not yet released. The ring refuses a request that does
-    /// not fit beside these, which is the bound that keeps a not-yet-submitted
-    /// copy from being overwritten.
-    pending: u64,
+    offsets: RingAllocator,
     ring_size: u64,
 
     pub const InitOptions = struct {
@@ -1733,8 +1845,7 @@ pub const UploadRing = struct {
         return .{
             .device = device,
             .staging = null,
-            .cursor = 0,
-            .pending = 0,
+            .offsets = RingAllocator.init(options.ring_size),
             .ring_size = options.ring_size,
         };
     }
@@ -1745,64 +1856,59 @@ pub const UploadRing = struct {
         if (self.staging) |staging| {
             try staging.destroy(self.device.allocator);
         }
+        self.offsets.deinit(self.device.allocator);
         // The ring is gone and nothing reads the value again, so the receiver is
         // poisoned rather than half reset.
         self.* = undefined;
     }
 
-    /// `DynamicUploader::Reserve` (`DynamicUploader.cpp:48`).
-    ///
-    /// Dawn appends a new ring when one does not fit and gives a request larger
-    /// than the whole ring its own staging buffer. The port reports both as
-    /// errors, because a caller that cannot bound its upload has a bug the error
-    /// names, and a silently separate allocation would make the free accounting
-    /// a second thing to get right.
-    pub fn reserve(self: *UploadRing, byte_count: u64) ReserveError!Reservation {
-        if (byte_count > self.ring_size) return error.UploadRingRequestTooLarge;
-        const reserved = std.mem.alignForward(u64, byte_count, upload_reservation_alignment);
-        const start = std.mem.alignForward(u64, self.cursor, upload_reservation_alignment);
-
-        if (start + reserved > self.ring_size) {
-            // The first pass reached the end of the ring. Wrapping is only legal
-            // once every byte handed out has been released, because the GPU is
-            // still reading those until the submit completes.
-            if (self.pending != 0) return error.UploadRingExhausted;
-            self.cursor = 0;
-            return self.reserveAt(byte_count, reserved, 0);
-        }
-        return self.reserveAt(byte_count, reserved, start);
-    }
-
-    /// The placement half of `reserve`, so the wrap case reads once.
-    fn reserveAt(
-        self: *UploadRing,
+    pub const ReserveOptions = struct {
         byte_count: u64,
-        reserved: u64,
-        start: u64,
+        at_serial: Serial,
+    };
+
+    /// Use `device.allocator`, which also frees these reservations at teardown.
+    pub fn reserve(
+        allocator: std.mem.Allocator,
+        self: *UploadRing,
+        options: ReserveOptions,
     ) ReserveError!Reservation {
-        if (self.pending + reserved > self.ring_size) return error.UploadRingExhausted;
-        const staging = try self.ensureStagingBuffer();
-        // The staging buffer is mapped at creation and never unmapped, so the
-        // span is a slice of its whole mapping rather than a validated API
-        // range: an internal ring offset is not a caller's map request.
+        if (options.byte_count > self.ring_size) return error.UploadRingRequestTooLarge;
+        const ring_reservation = RingAllocator.allocate(allocator, &self.offsets, .{
+            .byte_count = options.byte_count,
+            .at_serial = options.at_serial,
+            .alignment_byte_count = upload_reservation_alignment,
+        }) catch |err| switch (err) {
+            error.RingBufferFull => return error.UploadRingExhausted,
+            else => return err,
+        };
+        errdefer self.offsets.cancelLast(ring_reservation) catch
+            @panic("buffer: failed to undo the newest staging reservation");
+        const start = ring_reservation.offset_byte_count;
+        const staging = try ensureStagingBuffer(allocator, self);
         const span = staging.mappedSpan();
-        self.cursor = start + reserved;
-        self.pending += reserved;
-        std.debug.assert(span.len >= start + byte_count);
+        std.debug.assert(span.len >= start + options.byte_count);
         return .{
             .buffer = staging,
             .mapped = span[start..].ptr,
             .offset = start,
-            .byte_count = reserved,
+            .byte_count = options.byte_count,
+            .ring_reservation = ring_reservation,
         };
     }
 
     /// The lazily created `Dawn_DynamicUploaderStaging` of `Reserve`
     /// (`DynamicUploader.cpp:110`): a copy-source, map-write buffer mapped at
     /// creation, so its whole range is host memory for the ring to carve up.
-    fn ensureStagingBuffer(self: *UploadRing) ReserveError!*Buffer {
+    fn ensureStagingBuffer(
+        allocator: std.mem.Allocator,
+        self: *UploadRing,
+    ) ReserveError!*Buffer {
         if (self.staging) |staging| return staging;
-        const staging = try Buffer.create(self.device.allocator, self.device, .{
+        if (self.ring_size > std.math.maxInt(u64) - (mapped_at_creation_size_alignment - 1)) {
+            return error.BufferAllocationOverflow;
+        }
+        const staging = try Buffer.create(allocator, self.device, .{
             .label = "Dawn_DynamicUploaderStaging",
             .usage = .{ .copy_src = true, .map_write = true },
             .size = std.mem.alignForward(
@@ -1816,26 +1922,23 @@ pub const UploadRing = struct {
         return staging;
     }
 
-    /// `OnStagingMemoryFreePendingOnSubmit` (`DynamicUploader.cpp:137`). The
-    /// caller holds the reservation until the submit its copies were recorded in
-    /// has completed, because until then the GPU is still reading the bytes.
-    pub fn release(self: *UploadRing, byte_count: u64) ReleaseError!void {
-        if (byte_count == 0 or byte_count > self.pending) return error.UploadRingReleaseMismatch;
-        self.pending -= byte_count;
-        if (self.pending == 0) self.cursor = 0;
-        return {};
+    pub fn reclaim(
+        allocator: std.mem.Allocator,
+        self: *UploadRing,
+        completed_serial: Serial,
+    ) std.mem.Allocator.Error!void {
+        try RingAllocator.deallocate(allocator, &self.offsets, completed_serial);
+    }
+
+    pub fn cancelLast(self: *UploadRing, reservation: Reservation) CancelReservationError!void {
+        self.offsets.cancelLast(reservation.ring_reservation) catch
+            return error.UploadRingReservationNotLast;
     }
 
     /// The bytes the ring still holds, which is the observable a caller reads
     /// after a submit to know the ring is free again.
     pub fn pendingByteCount(self: *const UploadRing) u64 {
-        return self.pending;
-    }
-
-    /// The offset the next reservation takes, which is `cursor` unless the ring
-    /// has wrapped.
-    pub fn nextOffset(self: *const UploadRing) u64 {
-        return std.mem.alignForward(u64, self.cursor, upload_reservation_alignment);
+        return self.offsets.used_size_byte_count;
     }
 };
 

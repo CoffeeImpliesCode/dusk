@@ -300,12 +300,20 @@ fn awaitDeadline(io: std.Io, timeout_ns: u64) void {
 /// `std::function`; the port passes a plain function pointer and a context
 /// pointer, so a task costs no allocation.
 pub const Task = struct {
-    /// Runs on a pool thread. It never runs on the submitting thread.
-    run: *const fn (context: *anyopaque) void,
+    /// Runs on a pool thread with the exact `Io` supplied to `postTask`.
+    /// It never runs on the submitting thread or under the pool lock.
+    run: *const fn (io: std.Io, context: *anyopaque) void,
 
     /// Passed to `run`. The submitter owns it and keeps it alive until the task
-    /// completes.
+    /// returns. A successful post borrows it; a failed post does not. `join`
+    /// returns only after every accepted task has returned.
     context: *anyopaque,
+};
+
+/// Accepted input owns the `Io` value, not its backend state or task context.
+const QueuedTask = struct {
+    io: std.Io,
+    task: Task,
 };
 
 /// A fixed set of worker threads and a bounded queue in front of them.
@@ -328,7 +336,7 @@ pub const WorkerPool = struct {
     /// outstanding count broadcasts it.
     all_tasks_completed: std.Io.Condition = .init,
 
-    tasks: [max_queued_task_count]Task,
+    tasks: [max_queued_task_count]QueuedTask,
 
     /// Entries live in `tasks` from `next_task_index` forward.
     next_task_index: usize = 0,
@@ -357,7 +365,8 @@ pub const WorkerPool = struct {
     /// `max_worker_iteration_count` names the bound on one worker's loop. It is
     /// a runaway guard, not a quota: no honest pool reaches it. A worker that
     /// does sets `worker_exhausted`, and `postTask` then returns
-    /// `error.WorkerExhausted`.
+    /// `error.WorkerExhausted`. Workers drain the accepted queue before exiting,
+    /// with at most `max_queued_task_count` additional iterations each.
     pub const max_worker_iteration_count = 1 << 24;
 
     pub const InitOptions = struct {
@@ -385,7 +394,8 @@ pub const WorkerPool = struct {
         Canceled,
     };
 
-    /// Starts `options.worker_count` threads.
+    /// Starts `options.worker_count` threads with `io` for worker synchronization.
+    /// Its backend state must remain valid until `join` returns.
     pub fn init(io: std.Io, pool: *WorkerPool, options: InitOptions) InitError!void {
         if (options.worker_count == 0 or options.worker_count > max_worker_count) {
             return error.InvalidWorkerCount;
@@ -421,19 +431,22 @@ pub const WorkerPool = struct {
         }
     }
 
-    /// Stops the pool and joins every thread. Ports
-    /// `AsyncWorkerThreadPool::~AsyncWorkerThreadPool` (`WorkerThread.cpp:119-129`),
-    /// which cancels every job and then joins each one.
+    /// Stops accepting tasks, drains accepted work, and joins every thread.
+    /// Ports `AsyncWorkerThreadPool::~AsyncWorkerThreadPool`
+    /// (`WorkerThread.cpp:119-129`), with drain rather than job cancellation
+    /// because task contexts are borrowed and have no cancellation disposer.
     pub fn deinit(io: std.Io, pool: *WorkerPool) void {
         WorkerPool.join(io, pool);
     }
 
-    /// Stops the pool and joins every thread. Ports
-    /// `AsyncJobHandleImpl::Cancel` (`WorkerThread.cpp:94`) and
+    /// Stops accepting tasks, drains accepted work, and joins every thread.
+    /// Ports `AsyncJobHandleImpl::Cancel` (`WorkerThread.cpp:94`) and
     /// `AsyncJobHandleImpl::Join` (`:98`) for all workers at once.
     ///
-    /// The lock is taken uncancelable, because a pool that cannot be shut down
-    /// leaves a thread running with no owner.
+    /// Every accepted task has returned when this returns. Contexts remain
+    /// caller-owned; shutdown neither frees them nor abandons queued tasks.
+    /// Synchronization is uncancelable so canceled `Io` cannot prevent this
+    /// guarantee or leave a thread running with no owner.
     pub fn join(io: std.Io, pool: *WorkerPool) void {
         pool.mutex.lockUncancelable(io);
         pool.shutting_down = true;
@@ -450,6 +463,9 @@ pub const WorkerPool = struct {
 
     /// Queues `task`. Ports `AsyncWorkerThreadPool::PostWorkerTask`
     /// (`WorkerThread.cpp:131-162`).
+    /// Acceptance copies `io` into the queue and borrows `task.context`.
+    /// Keep its backend state and context alive until `task.run` returns.
+    /// Failure creates neither borrow and leaves both task counters unchanged.
     pub fn postTask(io: std.Io, pool: *WorkerPool, task: Task) PostError!void {
         pool.mutex.lock(io) catch return error.Canceled;
         defer pool.mutex.unlock(io);
@@ -459,7 +475,7 @@ pub const WorkerPool = struct {
         if (pool.queued_task_count == max_queued_task_count) return error.TaskQueueFull;
 
         const write_index = (pool.next_task_index + pool.queued_task_count) % max_queued_task_count;
-        pool.tasks[write_index] = task;
+        pool.tasks[write_index] = .{ .io = io, .task = task };
         pool.queued_task_count += 1;
         pool.posted_task_count += 1;
         pool.work_available.signal(io);
@@ -502,43 +518,42 @@ fn allTasksCompletedCallback(context: *anyopaque) bool {
     return pool.completed_task_count == pool.posted_task_count;
 }
 
-fn runWorker(io: std.Io, pool: *WorkerPool) void {
+fn runWorker(worker_synchronization_io: std.Io, pool: *WorkerPool) void {
+    // At the normal limit, stop further acceptance before draining the tail.
+    // The shared queue then contains at most max_queued_task_count tasks, so
+    // that many extra iterations suffice even if this worker drains it alone.
+    const max_worker_total_iteration_count =
+        WorkerPool.max_worker_iteration_count + WorkerPool.max_queued_task_count;
     var iteration_count: usize = 0;
-    while (iteration_count < WorkerPool.max_worker_iteration_count) : (iteration_count += 1) {
-        pool.mutex.lock(io) catch return;
-
-        var pending: ?Task = null;
-        while (pending == null and !pool.shutting_down) {
-            if (pool.queued_task_count > 0) {
-                pending = pool.tasks[pool.next_task_index];
-                pool.next_task_index = (pool.next_task_index + 1) % WorkerPool.max_queued_task_count;
-                pool.queued_task_count -= 1;
-                break;
-            }
-            pool.work_available.wait(io, &pool.mutex) catch {
-                pool.mutex.unlock(io);
-                return;
-            };
+    while (iteration_count < max_worker_total_iteration_count) : (iteration_count += 1) {
+        // Accepted contexts must reach run and completion, even on canceled Io.
+        pool.mutex.lockUncancelable(worker_synchronization_io);
+        if (iteration_count == WorkerPool.max_worker_iteration_count) {
+            pool.worker_exhausted = true;
+            pool.all_tasks_completed.broadcast(worker_synchronization_io);
+            pool.work_available.broadcast(worker_synchronization_io);
         }
 
-        const task = pending orelse {
-            pool.mutex.unlock(io);
+        while (pool.queued_task_count == 0 and !pool.shutting_down and !pool.worker_exhausted) {
+            pool.work_available.waitUncancelable(worker_synchronization_io, &pool.mutex);
+        }
+        // Both terminal flags stop acceptance, not previously accepted work.
+        if (pool.queued_task_count == 0) {
+            pool.mutex.unlock(worker_synchronization_io);
             return;
-        };
-        pool.mutex.unlock(io);
+        }
+        const queued_task = pool.tasks[pool.next_task_index];
+        pool.next_task_index = (pool.next_task_index + 1) % WorkerPool.max_queued_task_count;
+        pool.queued_task_count -= 1;
+        pool.mutex.unlock(worker_synchronization_io);
 
-        task.run(task.context);
+        queued_task.task.run(queued_task.io, queued_task.task.context);
 
-        pool.mutex.lock(io) catch return;
+        pool.mutex.lockUncancelable(worker_synchronization_io);
         pool.completed_task_count += 1;
         if (pool.completed_task_count == pool.posted_task_count) {
-            pool.all_tasks_completed.broadcast(io);
+            pool.all_tasks_completed.broadcast(worker_synchronization_io);
         }
-        pool.mutex.unlock(io);
+        pool.mutex.unlock(worker_synchronization_io);
     }
-
-    pool.mutex.lock(io) catch return;
-    pool.worker_exhausted = true;
-    pool.all_tasks_completed.broadcast(io);
-    pool.mutex.unlock(io);
 }

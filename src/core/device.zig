@@ -1,13 +1,9 @@
-//! The device: one arena, one error-scope stack, one failure injector.
+//! The guarded core device: one arena, error scopes, and a failure injector.
 //!
-//! **What this file is.** The M3 part of the device. `docs/10-architecture.md`
-//! "Object model" fixes the arena and the handle, and `docs/30-port-design.md`
-//! §1.1 fixes what a stale handle does.
-//!
-//! **What this file does not claim.** It does not claim a queue, a timeline or a
-//! tick. Those land with the platform module at milestone M4, and the device
-//! takes a device mutex at the same milestone. Nothing here locks, because
-//! nothing above `core` runs on two threads yet.
+//! Bind a stable caller-owned object mutex at initialization. Once the device
+//! is at its final address, bind an optional high owner under ObjectGuard and
+//! publish borrows/resources. Payload retirement preserves canonical headers
+//! and references. Final deinit refuses outstanding references unchanged.
 
 const std = @import("std");
 const errors = @import("errors.zig");
@@ -20,12 +16,18 @@ const object = @import("object.zig");
 /// crashed on: `docs/30-port-design.md` §1.1.
 pub const HandleError = errors.ValidationError;
 
+/// Immutable canonical locator, defined beside the borrowed Handle.
+pub const CoreDeviceBorrow = handle.CoreDeviceBorrow;
+
+/// One owner of arena storage; move only before the first resource or borrow.
+/// Its allocator and bound object mutex outlive all payloads and late aliases.
 pub const Device = struct {
     arena: object.ObjectArena,
     error_scopes: error_scope.ErrorScopeStack,
     injector: error_injector.ErrorInjector,
 
     pub const InitOptions = struct {
+        object_mutex: *std.Io.Mutex,
         /// Where an error that no scope took goes: Dawn forwards one to the
         /// uncaptured error callback (`src/dawn/native/ErrorScope.h:92-95`) and
         /// takes that callback from the descriptor at construction
@@ -41,8 +43,11 @@ pub const Device = struct {
     /// object.
     pub fn init(allocator: std.mem.Allocator, options: InitOptions) Device {
         return .{
-            .arena = object.ObjectArena.init(allocator),
+            .arena = object.ObjectArena.init(allocator, .{
+                .object_mutex = options.object_mutex,
+            }),
             .error_scopes = error_scope.ErrorScopeStack.init(.{
+                .allocator = allocator,
                 .uncaptured_context = options.uncaptured_context,
                 .uncaptured_callback = options.uncaptured_callback,
             }),
@@ -50,122 +55,198 @@ pub const Device = struct {
         };
     }
 
-    /// Destroys every object, closes every open scope and reclaims the arena.
-    /// After this a handle taken before it dangles and the receiver is poison.
-    pub fn deinit(self: *Device, allocator: std.mem.Allocator) void {
-        self.error_scopes.deinit(allocator);
-        self.arena.deinit();
-        // The device is gone and nothing reads this value again, so the receiver
-        // is poison rather than a half-reset device whose zero capacity is the
-        // only record of the reclamation.
+    /// Reclaims the host only with matching allocator and zero user/lease refs.
+    /// Refusal leaves arena, references, scopes, and payloads unchanged. Success
+    /// invalidates every borrow/handle and poisons the receiver; unlock uses the
+    /// guard's separately captured still-live mutex.
+    pub fn deinit(
+        self: *Device,
+        allocator: std.mem.Allocator,
+        guard: *const object.ObjectGuard,
+    ) object.LifetimeError!void {
+        try self.arena.checkAllocator(guard, allocator);
+        try self.arena.objects.preflightDeinitLocked(guard);
+        try self.error_scopes.preflightDeinit(guard);
+        try self.error_scopes.deinit(allocator, guard);
+        try self.arena.deinit(allocator, guard);
         self.* = undefined;
     }
 
-    /// Creates one object and returns it untracked. The reference count starts
-    /// at one, which is the reference the caller holds.
-    ///
-    /// The arena allocates the block and writes only the header
-    /// (`src/core/object.zig:330-334`), so the bytes after it are undefined until
-    /// the caller writes them. The caller then calls `Object.attach`, which is
-    /// the only thing that tracks, and `handleFor` for the handle.
-    pub fn create(
-        self: *Device,
-        comptime T: type,
-        options: object.CreateOptions(T),
-    ) std.mem.Allocator.Error!*T {
-        return self.arena.create(T, options);
+    /// Borrows the canonical list at the device's final address. Copying this
+    /// locator owns no reference and does not extend the device's lifetime.
+    pub fn borrow(self: *Device) CoreDeviceBorrow {
+        return .{ .objects = self.arena.objectList() };
     }
 
-    /// The handle that names `target`. This is the inverse of `resolve`: the
-    /// caller holds the object because it made it, and the handle is what it
-    /// hands out.
-    ///
-    /// **The target is a pointer, and the type says so.** `T` and `target` are
-    /// named separately rather than taken as one `anytype` because a by-value
-    /// object would make `&target.header` an address of this frame, and the
-    /// handle would outlive it. Naming the type is what turns that mistake into
-    /// a compile error at every call site instead of a dangling handle.
-    ///
-    /// The assert is the ownership check `resolveHeader` cannot make. The
-    /// header stores the list it belongs to, and the caller here already has
-    /// the object, so the only question left is whether this device owns it.
+    /// Binds immutable host metadata at the final address, before first create.
+    /// Rebinding to the same owner is harmless; changing a bound owner is invalid.
+    pub fn bindTrackingOwner(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        high_owner: *anyopaque,
+    ) void {
+        const objects = self.arena.objectList();
+        guard.assertOwns(objects);
+        self.error_scopes.bind(guard);
+        if (objects.high_owner) |bound| {
+            std.debug.assert(bound == high_owner);
+            return;
+        }
+        std.debug.assert(objects.total_reference_count == 0);
+        std.debug.assert(objects.tracked_count == 0);
+        std.debug.assert(!objects.marked_destroyed);
+        std.debug.assert(self.arena.queryCapacity(guard) == 0);
+        objects.high_owner = high_owner;
+    }
+
+    /// Returns an unpublished initial user/lease ref. Initialize every payload
+    /// field then attach, or clean temporaries and discardUnpublishedLocked.
+    pub fn create(
+        self: *Device,
+        allocator: std.mem.Allocator,
+        guard: *const object.ObjectGuard,
+        comptime T: type,
+        options: object.CreateOptions(T),
+    ) object.CreateError!*T {
+        return self.arena.create(allocator, guard, T, options);
+    }
+
+    /// Borrows the canonical header without acquiring another reference.
+    /// The pointer argument must belong to this device. Returning a handle
+    /// marks identity escaped, so publish only after fallible construction;
+    /// discardUnpublishedLocked is no longer permitted afterward.
     pub fn handleFor(
         self: *Device,
+        guard: *const object.ObjectGuard,
         comptime T: type,
         target: *T,
         kind: handle.Handle.Kind,
     ) handle.Handle {
-        // `assertHeader` puts the header first in every arena object
-        // (`src/core/object.zig:275-285`), so the object pointer and the
-        // header pointer are the same address and the field needs no cast.
-        // `@fieldParentPtr` cannot be used: it resolves the parent from the
-        // annotated result type, which here is the field type and not the
-        // parent, so it reports that `Object` has no `header` field.
+        // Name the actual header field, without assuming the owner's auto layout.
         const header: *object.Object = &target.header;
+        guard.assertOwns(self.arena.objectList());
         std.debug.assert(header.tracking == self.arena.objectList());
+        header.reference_escaped = true;
         // `@as` and not `@alignCast`: `ObjectPtr` carries the alignment the
         // header already has, and `object.zig` asserts the two agree.
         return .{ .ptr = @as(handle.ObjectPtr, header), .kind = kind };
     }
 
-    /// Marks the object destroyed and runs its teardown.
-    ///
-    /// The memory stays in the arena, so a second destroy on the same handle
-    /// reports `error.StaleHandle` and not a read of freed memory.
-    pub fn destroy(self: *Device, target: handle.Handle) HandleError!void {
-        const header = try self.resolveHeader(target);
-        header.destroy(.early_destroy);
+    /// Explicitly retires one live core payload without consuming its aliases.
+    /// A second handle destroy reports StaleHandle; late Rc release remains valid.
+    pub fn destroy(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        io: std.Io,
+        target: handle.Handle,
+    ) HandleError!void {
+        const header = try self.resolveHeader(guard, target);
+        header.retirePayloadLocked(guard, io, .early_destroy);
     }
 
-    /// The object a handle names, or the rule that rejects the handle.
-    pub fn resolve(self: *Device, comptime T: type, target: handle.Handle) HandleError!*T {
-        const header = try self.resolveHeader(target);
+    /// Resolves a borrowed live core object. The pointer is usable only under
+    /// this guard. Failed objects remain resolvable; native callers require alive.
+    pub fn resolve(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        comptime T: type,
+        target: handle.Handle,
+    ) HandleError!*T {
+        const header = try self.resolveHeader(guard, target);
         return @fieldParentPtr("header", header);
     }
 
-    /// The bytes the arena holds right now.
-    ///
-    /// `deinit` poisons the receiver, so a read of this after it is a read of
-    /// poison. Where the blocks went is asked of the child allocator, which is
-    /// the ledger that outlives the device: `test/object_arena.zig` hands the
-    /// device a child of its own and asserts that child reports no leak.
-    pub fn queryCapacity(self: *const Device) usize {
-        return self.arena.queryCapacity();
+    /// Resolves retained host identity for owned-handle retain/release, including
+    /// a retired payload. Never use this result to read native payload fields.
+    /// Forged pointers and references after host deinit remain outside contract.
+    pub fn resolveReference(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        target: handle.Handle,
+    ) HandleError!*object.Object {
+        guard.assertOwns(self.arena.objectList());
+        const header: *object.Object = @ptrCast(target.ptr);
+        if (header.kind != target.kind) return error.HandleKindMismatch;
+        if (header.tracking != self.arena.objectList()) return error.StaleHandle;
+        if (!header.node.linked or header.reference_count == 0) return error.StaleHandle;
+        if (header.state == .initializing) return error.StaleHandle;
+        return header;
     }
 
-    /// The number of objects the device still holds alive.
-    pub fn queryTrackedCount(self: *const Device) usize {
-        return self.arena.queryTrackedCount();
+    /// Retires payloads newest-first without force-consuming user/lease refs.
+    pub fn retirePayloadsLocked(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        io: std.Io,
+        reason: object.DestroyReason,
+    ) void {
+        self.arena.objects.retirePayloadsLocked(guard, io, reason);
     }
 
+    /// Arena storage bytes committed since initialization.
+    pub fn queryCapacity(self: *const Device, guard: *const object.ObjectGuard) usize {
+        return self.arena.queryCapacity(guard);
+    }
+
+    /// Retained canonical headers, not the count of live native payloads.
+    pub fn queryTrackedCount(self: *const Device, guard: *const object.ObjectGuard) usize {
+        return self.arena.queryTrackedCount(guard);
+    }
+
+    /// Pushes a stable owned record under the canonical device guard.
     pub fn pushErrorScope(
         self: *Device,
         allocator: std.mem.Allocator,
+        guard: *const object.ObjectGuard,
         filter: error_scope.ErrorFilter,
-    ) std.mem.Allocator.Error!void {
-        return self.error_scopes.push(allocator, filter);
+    ) error_scope.ScopeAllocationError!void {
+        try self.arena.checkAllocator(guard, allocator);
+        return self.error_scopes.push(allocator, guard, filter);
     }
 
-    /// Closes the innermost scope. The caller then owns the scope and frees its
-    /// payload with `scope.deinit(allocator)`. The `ErrorData` struct the raiser
-    /// passed in stays the raiser's (`docs/40-plan.md:2393`).
-    pub fn popErrorScope(self: *Device) error_scope.PopError!error_scope.ErrorScope {
-        return self.error_scopes.pop();
+    /// Detaches matching now; the ticket waits for every accepted task pin.
+    pub fn popErrorScope(self: *Device, guard: *const object.ObjectGuard) error_scope.PopError!error_scope.ScopeTicket {
+        guard.assertOwns(self.arena.objectList());
+        return self.error_scopes.beginPop(guard);
     }
 
-    /// Hands the error to the innermost scope that takes it. The stack frees the
-    /// payload in every case, and the `ErrorData` struct stays the raiser's.
-    pub fn handleError(
+    /// Detaches and binds the current innermost scope without allocation.
+    /// Admission must already have succeeded. Every error leaves the stack and
+    /// prepared owner unchanged; activate the returned binding after unlocking.
+    pub fn popBoundErrorScope(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        prepared: *error_scope.PreparedScopeBinding,
+    ) error_scope.PopBoundError!error_scope.PopBoundResult {
+        guard.assertOwns(self.arena.objectList());
+        return self.error_scopes.popBound(guard, prepared);
+    }
+
+    pub fn captureScopeLeaseSet(
         self: *Device,
         allocator: std.mem.Allocator,
-        data: *errors.ErrorData,
-    ) bool {
-        return self.error_scopes.handleError(allocator, data);
+        guard: *const object.ObjectGuard,
+        possible: error_scope.ScopeCaptureMask,
+    ) error_scope.ScopeAllocationError!error_scope.ScopeLeaseSet {
+        try self.arena.checkAllocator(guard, allocator);
+        return self.error_scopes.captureLeaseSet(allocator, guard, possible);
     }
 
-    /// The device as a sink, so a caller hands its error to the device without
-    /// knowing that the device holds a scope stack.
-    pub fn errorSink(self: *Device) error_scope.ErrorSink {
+    /// Consumes one owned diagnostic. Dispatch any returned delivery only
+    /// after releasing every lock; no user callback runs from this function.
+    pub fn handleError(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        ref: errors.ErrorRef,
+    ) ?error_scope.UncapturedDelivery {
+        guard.assertOwns(self.arena.objectList());
+        return self.error_scopes.handleError(guard, ref);
+    }
+
+    /// Borrows this final-address device, never a worker-local error value.
+    pub fn errorSink(self: *Device, guard: *const object.ObjectGuard) error_scope.ErrorSink {
+        guard.assertOwns(self.arena.objectList());
+        self.error_scopes.bind(guard);
         return error_scope.ErrorSink.init(self, consumeDeviceError);
     }
 
@@ -175,28 +256,29 @@ pub const Device = struct {
     /// (`docs/30-port-design.md` §1.1). The list check catches a handle from
     /// another device. The link check catches an object this device already
     /// destroyed.
-    fn resolveHeader(self: *Device, target: handle.Handle) HandleError!*object.Object {
+    fn resolveHeader(
+        self: *Device,
+        guard: *const object.ObjectGuard,
+        target: handle.Handle,
+    ) HandleError!*object.Object {
+        guard.assertOwns(self.arena.objectList());
         // No `@alignCast`: `Handle.ptr` is `handle.ObjectPtr`, so the alignment
         // is in the type. `@ptrCast` only narrows `anyopaque` to `Object` here.
         const header: *object.Object = @ptrCast(target.ptr);
         if (header.kind != target.kind) return error.HandleKindMismatch;
         if (header.tracking != self.arena.objectList()) return error.StaleHandle;
-        if (!header.isAlive()) return error.StaleHandle;
+        if (!header.isAlive(guard)) return error.StaleHandle;
         return header;
     }
 };
 
 fn consumeDeviceError(
-    allocator: std.mem.Allocator,
+    guard: *const object.ObjectGuard,
     context: *anyopaque,
-    data: *errors.ErrorData,
-) void {
+    ref: errors.ErrorRef,
+) ?error_scope.UncapturedDelivery {
     const device: *Device = @ptrCast(@alignCast(context));
-    // The stack frees the payload either way, so the sink has nothing left to do
-    // with the "a scope took it" answer, and `ErrorSink.consumeError` is `void`
-    // (`src/core/error_scope.zig:257-261`). Dawn's `ConsumeError` is `void` for
-    // the same reason (`src/dawn/native/ErrorSink.h:138-143`).
-    _ = device.handleError(allocator, data);
+    return device.handleError(guard, ref);
 }
 
 const Probe = struct {
@@ -204,10 +286,15 @@ const Probe = struct {
     teardown_count: *u64,
     last_reason: object.DestroyReason = .early_destroy,
 
-    // Public because `ObjectArena.destroyTrampoline` calls it from
-    // `src/core/object.zig`, and Zig privacy is module-scoped
-    // (`src/core/object.zig:416-421`).
-    pub fn destroy(self: *Probe, reason: object.DestroyReason) void {
+    // Public because the arena trampoline crosses a module boundary.
+    pub fn destroy(
+        self: *Probe,
+        guard: *const object.ObjectGuard,
+        io: std.Io,
+        reason: object.DestroyReason,
+    ) void {
+        _ = io;
+        guard.assertOwns(self.header.tracking);
         self.teardown_count.* += 1;
         self.last_reason = reason;
     }
@@ -218,9 +305,11 @@ const Uncaptured = struct {
 
     fn record(
         allocator: std.mem.Allocator,
+        io: std.Io,
         context: *anyopaque,
-        data: *const errors.ErrorData,
+        data: errors.ErrorView,
     ) void {
+        _ = io;
         const self: *Uncaptured = @ptrCast(@alignCast(context));
         self.count += 1;
         // `Allocator` has no `==`, and its `ptr` may be `undefined`
@@ -232,53 +321,139 @@ const Uncaptured = struct {
     }
 };
 
-test "a device resolves its own handles and rejects everything else" {
+test "guarded handles preserve failed liveness and retained retired identities" {
     var uncaptured: Uncaptured = .{};
     var teardown_count: u64 = 0;
-    // The arena's child is the ledger that outlives the device, so it is where
-    // the blocks are checked after `deinit` has poisoned the receiver.
-    var child: std.heap.DebugAllocator(.{}) = .{};
-    defer std.testing.expect(child.deinit() == .ok) catch @panic("device block leaked");
-    var device: Device = .init(child.allocator(), .{
-        .uncaptured_context = @ptrCast(&uncaptured),
+    var mutex: std.Io.Mutex = .init;
+    var device = Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &uncaptured,
         .uncaptured_callback = Uncaptured.record,
     });
-
-    const probe = try device.create(Probe, .{ .kind = .buffer, .label = "probe" });
+    var guard = object.ObjectGuard.lockUncancelable(std.testing.io, device.arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    const probe = try device.create(std.testing.allocator, &guard, Probe, .{
+        .kind = .buffer,
+        .state = .initializing,
+        .initial_reference = .user,
+        .label = "probe",
+    });
     probe.teardown_count = &teardown_count;
-    probe.header.attach();
-    const target = device.handleFor(Probe, probe, .buffer);
-
-    try std.testing.expectEqual(@as(usize, 1), device.queryTrackedCount());
-    try std.testing.expect(device.queryCapacity() > 0);
+    probe.last_reason = .early_destroy;
+    probe.header.setInitializedError(&guard, error.LimitExceeded);
+    probe.header.attach(&guard, std.testing.io);
+    const target = device.handleFor(&guard, Probe, probe, .buffer);
+    try std.testing.expect(probe.header.isFailed(&guard));
+    try std.testing.expect(probe.header.isAlive(&guard));
+    try std.testing.expectEqual(probe, try device.resolve(&guard, Probe, target));
     try std.testing.expectEqualStrings("probe", probe.header.label);
-
-    const mislabelled: handle.Handle = .{ .ptr = @as(handle.ObjectPtr, probe), .kind = .device };
-    try std.testing.expectError(error.HandleKindMismatch, device.resolve(Probe, mislabelled));
-
-    try device.pushErrorScope(std.testing.allocator, .validation);
-    var data = try errors.initValidation(
+    const mislabelled: handle.Handle = .{ .ptr = target.ptr, .kind = .device };
+    try std.testing.expectError(
+        error.HandleKindMismatch,
+        device.resolve(&guard, Probe, mislabelled),
+    );
+    try device.pushErrorScope(std.testing.allocator, &guard, .validation);
+    var draft = try errors.ErrorDraft.init(
         std.testing.allocator,
-        error.LimitExceeded,
+        .{ .validation = error.LimitExceeded },
         &.{.{ .text = "maxTextureDimension2D" }},
     );
-    const sink = device.errorSink();
-    sink.consumeError(std.testing.allocator, &data);
+    defer draft.discard();
+    var reservation = try errors.ErrorReservation.prepare(std.testing.allocator);
+    defer reservation.discard();
+    try std.testing.expect(device.errorSink(&guard).consumeError(&guard, reservation.seal(&draft)) == null);
     try std.testing.expectEqual(@as(u64, 0), uncaptured.count);
-
-    var scope = try device.popErrorScope();
-    defer scope.deinit(std.testing.allocator);
-    const held = scope.captured orelse return error.ScopeCapturedNothing;
+    var ticket = try device.popErrorScope(&guard);
+    var result = try ticket.take(&guard);
+    defer result.deinit();
+    const held = (result.error_ref orelse return error.ScopeCapturedNothing).view();
     try std.testing.expectEqualStrings(
         "the request is above the device limit maxTextureDimension2D",
         held.message,
     );
-
-    try device.destroy(target);
-    try std.testing.expectError(error.StaleHandle, device.resolve(Probe, target));
-    try std.testing.expectEqual(@as(usize, 0), device.queryTrackedCount());
+    try device.destroy(&guard, std.testing.io, target);
+    try std.testing.expectError(error.StaleHandle, device.resolve(&guard, Probe, target));
+    try std.testing.expectEqual(@as(usize, 1), device.queryTrackedCount(&guard));
     try std.testing.expectEqual(@as(u64, 1), teardown_count);
     try std.testing.expectEqual(object.DestroyReason.early_destroy, probe.last_reason);
+    const retired_identity = try device.resolveReference(&guard, target);
+    try std.testing.expectEqual(&probe.header, retired_identity);
+    try retired_identity.retainUserLocked(&guard);
+    try retired_identity.releaseUserLocked(&guard, std.testing.io);
+    try (try device.resolveReference(&guard, target)).releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), device.queryTrackedCount(&guard));
+    try std.testing.expectError(error.StaleHandle, device.resolveReference(&guard, target));
+}
 
-    device.deinit(std.testing.allocator);
+test "stable core borrow binds the final high owner without a captured stack address" {
+    var uncaptured: Uncaptured = .{};
+    var mutex: std.Io.Mutex = .init;
+    var device = Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &uncaptured,
+        .uncaptured_callback = Uncaptured.record,
+    });
+    var guard = object.ObjectGuard.lockUncancelable(std.testing.io, device.arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    var high_owner: u64 = 7;
+    device.bindTrackingOwner(&guard, &high_owner);
+    device.bindTrackingOwner(&guard, &high_owner);
+    const borrow = device.borrow();
+    var teardown_count: u64 = 0;
+    const probe = try device.create(std.testing.allocator, &guard, Probe, .{
+        .kind = .buffer,
+        .initial_reference = .lease,
+    });
+    probe.teardown_count = &teardown_count;
+    probe.last_reason = .early_destroy;
+    probe.header.attach(&guard, std.testing.io);
+    try std.testing.expectEqual(probe.header.tracking, borrow.objectList());
+    try std.testing.expectEqual(@as(?*anyopaque, &high_owner), borrow.highOwner());
+    try std.testing.expectError(
+        error.ResourceInUse,
+        device.deinit(std.testing.allocator, &guard),
+    );
+    try std.testing.expectEqual(@as(u32, 1), probe.header.reference_count);
+    try std.testing.expect(probe.header.isAlive(&guard));
+    try std.testing.expectEqual(@as(u64, 0), teardown_count);
+    device.retirePayloadsLocked(&guard, std.testing.io, .early_destroy);
+    try std.testing.expectEqual(@as(?*anyopaque, &high_owner), borrow.highOwner());
+    try std.testing.expectEqual(@as(u64, 1), teardown_count);
+    try std.testing.expectError(
+        error.ResourceInUse,
+        device.deinit(std.testing.allocator, &guard),
+    );
+    probe.header.releaseLeaseLocked(&guard, std.testing.io);
+}
+
+test "constructor rollback refuses a handle that has escaped before attachment" {
+    var uncaptured: Uncaptured = .{};
+    var mutex: std.Io.Mutex = .init;
+    var device = Device.init(std.testing.allocator, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &uncaptured,
+        .uncaptured_callback = Uncaptured.record,
+    });
+    var guard = object.ObjectGuard.lockUncancelable(std.testing.io, device.arena.objectList());
+    defer guard.unlock(std.testing.io);
+    defer device.deinit(std.testing.allocator, &guard) catch @panic("references leaked");
+    const probe = try device.create(std.testing.allocator, &guard, Probe, .{
+        .kind = .buffer,
+        .initial_reference = .user,
+    });
+    const escaped = device.handleFor(&guard, Probe, probe, .buffer);
+    try std.testing.expectError(
+        error.ResourceInUse,
+        probe.header.discardUnpublishedLocked(&guard),
+    );
+    try std.testing.expectEqual(@as(u32, 1), probe.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), probe.header.user_reference_count);
+    var teardown_count: u64 = 0;
+    probe.teardown_count = &teardown_count;
+    probe.last_reason = .early_destroy;
+    probe.header.attach(&guard, std.testing.io);
+    try (try device.resolveReference(&guard, escaped)).releaseUserLocked(&guard, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 1), teardown_count);
 }

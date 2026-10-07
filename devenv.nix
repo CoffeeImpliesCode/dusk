@@ -23,26 +23,39 @@ let
     else
       "${builtins.getEnv "HOME"}/.cache/dusk-zig";
 
-  # Where the pinned Dawn checkout lives, for the WGSL to SPIR-V translator
-  # built from it. `.envrc` sources the host scratch policy before devenv
-  # evaluates, so `buildhost_SCRATCH_ROOT` is normally set. Outside the cluster
-  # it is empty and the fallback puts the checkout beside the caches.
+  # This source reference is fetched only by `zig build fetch-dawn`.
+  # The translator uses the same revision but needs a complete source tree.
   scratchRoot =
     let s = builtins.getEnv "buildhost_SCRATCH_ROOT";
     in if s != "" then s else "${builtins.getEnv "HOME"}/.cache/dusk-research";
-  dawnSrc = "${scratchRoot}/research/dawn";
+  dawnSrc =
+    let override = builtins.getEnv "DUSK_DAWN_SRC";
+    in if override != "" then override else "${scratchRoot}/research/dawn";
+  dawnPinText = builtins.readFile ./tools/dawn_pin.zon;
+  pinString = field:
+    builtins.head (lib.splitString "\""
+      (builtins.elemAt (lib.splitString ".${field} = \"" dawnPinText) 1));
+  dawnRevision = pinString "revision";
+  dawnUrl = pinString "url";
   tintBin = "${cacheRoot}/tools/tint";
+
+  # Header data only. Do not execute the repository's Zig build script.
+  # Keep this C header pin separate from the installed loader and tools.
+  vulkanHeadersSource = pkgs.fetchzip {
+    url = "https://codeload.github.com/CoffeeImpliesCode/vulkan-headers/tar.gz/8249cb829eb402c65cb7e3778c51b0f8edc4a4b6";
+    # The codeload URL ends in a commit hash, not an archive filename.
+    extension = "tar.gz";
+    sha256 = "0z89r39v4ivhfc6c1km0bgxgddyy7fdsy88bgr5rw0afzfcahwpa";
+  };
+
+  # Packages alone do not expose libraries opened through std.DynLib.
+  runtimePackages = [ pkgs.vulkan-loader ];
 
 in
 {
-  packages = [
+  packages = runtimePackages ++ [
     pkgs.git
     pkgs.pkg-config
-
-    # The Vulkan seam. `translate-c` reads the headers; `libvulkan.so.1` is the
-    # loader the generated bindings call into. See `docs/20-dependencies.md`.
-    pkgs.vulkan-headers
-    pkgs.vulkan-loader
 
     # `vulkaninfo` is how a test proves the loader sees a device at all, and
     # `glslangValidator`/`spirv-val` are how a test proves a SPIR-V fixture is
@@ -86,6 +99,11 @@ in
   # wanting the same cache, so it is per-project and off the checkout's
   # filesystem.
   env.ZIG_GLOBAL_CACHE_DIR = "${cacheRoot}/global";
+  env.DUSK_DAWN_SRC = dawnSrc;
+
+  # Replace inherited audio/scanner library paths only in this project shell.
+  # Use Nix library paths, not shell substitutions or host library directories.
+  env.LD_LIBRARY_PATH = lib.makeLibraryPath runtimePackages;
 
   # The house gate otherwise inherits the shared host cache. Keep this
   # project's build products and cross-test evidence with its own caches.
@@ -100,11 +118,9 @@ in
   # `zig build generate`. `docs/50-verification.md` §8.1 records the scope.
   env.GATE_EXCLUDE = "/[.]zig-cache/ /zig-out/ /zig-cache/ /.jj/ /devenv/ /.direnv/ /src/vulkan[.]zig /src/api/";
 
-  # The header tree `build.zig` translates. It is the nix package at 1.4.357,
-  # not the account pin at 1.4.365, so this comment must not claim otherwise.
-  # The pin moves here when the account package builds under Zig 0.16.0 again;
-  # `docs/20-dependencies.md` "Vulkan bindings" owns that decision.
-  env.DUSK_VULKAN_HEADERS = "${pkgs.vulkan-headers}/include";
+  # Vulkan-Headers v1.4.365. The source root contains vulkan/vulkan and
+  # vulkan/vk_video, so `build.zig` needs the outer vulkan include directory.
+  env.DUSK_VULKAN_HEADERS = "${vulkanHeadersSource}/vulkan";
 
   # Driver discovery is a SHELL-time concern, decided in `enterShell` below.
 
@@ -195,18 +211,18 @@ in
     fi
     unset _dusk_icds _icd _dusk_list
 
-    # The WGSL to SPIR-V translator, if it has been built. Exported only when
-    # the file is there: a test that needs it says so, and a test that does not
-    # is not blocked by an unset variable.
-    if [ -x "${tintBin}" ]; then
+    # Export only a cached translator with the current pin's revision sidecar.
+    # A test that does not need Tint is not blocked by an unset variable.
+    if [ -x "${tintBin}" ] && [ -f "${tintBin}.revision" ] &&
+       [ "$(cat "${tintBin}.revision")" = "${dawnRevision}" ]; then
       export DUSK_TINT="${tintBin}"
     fi
   '';
 
-  # The gate owns its stage order. zbc errors fail even with ZBC_STRICT=0;
-  # ZBC_STRICT=1 also makes its warnings fail. Tests cover both safety modes.
+  # The installed legacy gate skips ziglint, zwan, and the cross-test matrix.
+  # zbc is advisory unless ZBC_STRICT=1. Run missing stages separately.
   tasks."gate:dusk".exec = "zig-gate";
-  tasks."gate:dusk".description = "Run the house gate, including analysers and the project cross-test matrix";
+  tasks."gate:dusk".description = "Run the installed house gate; supplemental analysis and cross-tests are separate";
 
   # Print what the loader can actually see. A green test run that silently
   # found zero devices proves nothing, so the driver list is part of the
@@ -228,25 +244,41 @@ in
       src="${dawnSrc}"
       out="${tintBin}"
       build="${scratchRoot}/tint-build"
-      if [ -x "$out" ]; then
-        echo "dusk: tint already built at $out"
+      if [ ! -d "$src/.git" ]; then
+        echo "dusk: no standalone Dawn checkout at $src" >&2
+        echo "dusk: run zig build fetch-dawn first; see docs/20-dependencies.md" >&2
+        exit 1
+      fi
+      if [ "$(git -C "$src" rev-parse HEAD)" != "${dawnRevision}" ] ||
+         [ "$(git -C "$src" remote get-url origin)" != "${dawnUrl}" ]; then
+        echo "dusk: Dawn checkout does not match tools/dawn_pin.zon" >&2
+        exit 1
+      fi
+      if [ -x "$out" ] && [ -f "$out.revision" ] &&
+         [ "$(cat "$out.revision")" = "${dawnRevision}" ]; then
+        echo "dusk: pinned tint already built at $out"
         exit 0
       fi
-      if [ ! -d "$src" ]; then
-        echo "dusk: no Dawn checkout at $src" >&2
-        echo "dusk: fetch it first; see docs/20-dependencies.md" >&2
+      if [ ! -d "$src/tools" ] || [ ! -d "$src/third_party" ]; then
+        echo "dusk: sparse source reference is not a complete Tint build tree" >&2
+        echo "dusk: prepare complete pinned sources and dependencies separately; see docs/20-dependencies.md" >&2
         exit 1
       fi
       mkdir -p "$(dirname "$out")"
       cmake -GNinja -B "$build" -S "$src" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DENABLE_TESTS=OFF -DENABLE_WERROR=OFF -DENABLE_FUZZER=OFF \
+        -DDAWN_BUILD_TESTS=OFF -DTINT_BUILD_TESTS=OFF -DDAWN_WERROR=OFF \
+        -DDAWN_BUILD_FUZZERS=OFF -DTINT_BUILD_FUZZERS=OFF \
+        -DDAWN_BUILD_PROTOBUF=OFF -DTINT_BUILD_IR_BINARY=OFF \
+        -DTINT_BUILD_CMD_TOOLS=ON -DTINT_BUILD_WGSL_READER=ON \
+        -DTINT_BUILD_SPV_WRITER=ON \
         -DDAWN_USE_WAYLAND=OFF -DDAWN_USE_X11=OFF \
         -DDAWN_ENABLE_DESKTOP_GL=OFF -DDAWN_ENABLE_OPENGLES=OFF \
         -DDAWN_ENABLE_D3D11=OFF -DDAWN_ENABLE_D3D12=OFF \
         -DDAWN_ENABLE_METAL=OFF -DDAWN_ENABLE_WEBGPU_ON_WEBGPU=OFF
-      ninja -C "$build" tint
+      ninja -j2 -C "$build" tint
       cp "$build/tint" "$out"
+      printf '%s\n' "${dawnRevision}" > "$out.revision"
       echo "dusk: built $out"
     '';
   };

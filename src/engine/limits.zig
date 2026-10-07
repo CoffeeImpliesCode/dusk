@@ -6,12 +6,8 @@
 //! and `Limits.cpp:185-191`'s `GetDefaultLimits`. The ladder is 36 rows in
 //! eleven groups; every row carries one compat column and one column per tier.
 //!
-//! **What this does not claim.** The pipeline that consumes the table does not
-//! land here: `ReifyDefaultLimits`, `ValidateLimits`, `ValidateAndUnpackLimitsIn`,
-//! `UnpackLimitsIn`, `ApplyLimitTiers`, `NormalizeLimits`,
-//! `EnforceLimitSpecInvariants` and `FillLimits`. All eight are `CombinedLimits`
-//! mutations that run against a physical device's reported limits, and M8 is
-//! the first milestone that has one.
+//! Required limits are validated and reified against queried physical bounds.
+//! Defaults are bounded by those same values; compatibility metadata is retained.
 //!
 //! **Why a comptime table.** §1's goal for M7 is that a compat check is a field
 //! read. The table is a comptime array, so `defaultLimits` is a projection and a
@@ -570,6 +566,56 @@ pub fn defaultLimits(level: FeatureLevel) CombinedLimits {
         }
     }
     return combined;
+}
+
+pub const ReifyError = LimitCheckError || error{CompatibilityLimitsUnsupported};
+
+/// Resolve every requested field. Maximum limits are upper bounds; alignment
+/// limits are lower bounds. Undefined fields keep the bounded level default.
+pub fn reify(offered: CombinedLimits, level: FeatureLevel, required: ?CombinedLimits) ReifyError!CombinedLimits {
+    var effective = defaultLimits(level);
+    if (offered.compatibility == null) effective.compatibility = null;
+    inline for (rows) |row| {
+        const name = @tagName(row.field);
+        switch (row.scope) {
+            .v1 => {
+                const supported = @field(offered.v1, name);
+                const baseline = @field(effective.v1, name);
+                @field(effective.v1, name) = if (row.class == .maximum)
+                    @min(baseline, supported)
+                else
+                    @max(baseline, supported);
+                if (required) |request| {
+                    const value = @field(request.v1, name);
+                    if (!isLimitUndefined(value)) {
+                        try checkLimit(row.class, supported, value);
+                        @field(effective.v1, name) = value;
+                    }
+                }
+            },
+            .compat => {
+                if (offered.compatibility) |supported_block| {
+                    const supported = @field(supported_block, name);
+                    const baseline = @field(effective.compatibility.?, name);
+                    @field(effective.compatibility.?, name) = @min(baseline, supported);
+                    if (required) |request| {
+                        if (request.compatibility) |requested_block| {
+                            const value = @field(requested_block, name);
+                            if (!isLimitUndefined(value)) {
+                                try checkLimit(row.class, supported, value);
+                                @field(effective.compatibility.?, name) = value;
+                            }
+                        }
+                    }
+                } else if (required) |request| {
+                    if (request.compatibility) |block| {
+                        if (!isLimitUndefined(@field(block, name))) return error.CompatibilityLimitsUnsupported;
+                    }
+                }
+            },
+        }
+    }
+    return effective;
 }
 
 comptime {

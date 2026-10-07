@@ -11,31 +11,29 @@
 //! **What this file does not claim.** It does not claim the timestamp
 //! conversion of `native/QueryHelper.{h,cpp}`, whose only path is behind the
 //! `TimestampQuery` feature: `CommandEncoder.cpp:2334-2336` returns before it
-//! for an occlusion set, and `docs/40-plan.md` §3.3 records the row as a
-//! `skip`. It does not claim when a pool may be freed either; `takePool` hands
-//! that to the caller, and the serial timeline that decides it belongs to the
-//! queue.
+//! for an occlusion set. The plan records the conversion rows as skipped.
+//! `getPool` borrows the backend handle. The queue owns serial-safe retirement.
 
 const std = @import("std");
-const api = @import("../api/api.zig");
-const command_query = @import("../command/query.zig");
-const core = @import("../core/root.zig");
-const core_errors = @import("../core/errors.zig");
-const object = @import("../core/object.zig");
+
 const vulkan = @import("vulkan");
 
+const api = @import("../api/api.zig");
+const command_query = @import("../command/query.zig");
 pub const Descriptor = command_query.Descriptor;
 pub const DescriptorOptions = command_query.DescriptorOptions;
 pub const Error = command_query.Error;
+const core_errors = @import("../core/errors.zig");
+const core = @import("../core/root.zig");
+const platform = @import("../platform/root.zig");
+const queue_module = @import("queue.zig");
 
 /// Where a query set is in its life (`QuerySet.h:78`).
 ///
-/// The state is the only lifetime guard. `ValidateCanUseInSubmitNow` reads it at
-/// submit time (`QuerySet.cpp:150`), which is what catches a set destroyed
-/// between `finish` and `submit` (`QueryValidationTests.cpp:167-187`).
+/// Submit-time semantic state, protected by the owning core ObjectGuard.
+/// `ValidateCanUseInSubmitNow` reads it at submit time (`QuerySet.cpp:150`).
 pub const State = enum {
-    /// The error object a failed `createQuerySet` left behind, and the "no
-    /// query here" answer. Only that object starts here.
+    /// An initialized error set has no available queries.
     unavailable,
     /// A real set. Every availability flag is false.
     available,
@@ -68,143 +66,112 @@ pub const QuerySet = struct {
     /// reads it; that file is the only reader, which is the port's answer to
     /// `QuerySetVk` inheriting from `QuerySetBase`.
     pool: ?vulkan.VkQueryPool = null,
+    /// Borrows the exact queue storage that registered the native pool.
+    /// Keep that queue alive and unmoved until deregistration or `Queue.deinit` detaches this set.
+    /// `destroy` can defer deregistration until the last submission completes.
+    /// `null` means this set has no registered queue.
+    backend_queue: ?*queue_module.Queue = null,
+    backend_next: ?*QuerySet = null,
+    last_used_serial: platform.Serial = 0,
+    pending_use: bool = false,
 
-    /// Everything `create` can refuse: the descriptor rules and one arena
-    /// allocation. The handle rules left with `dev.resolve`; the object this
-    /// call makes is the one it attaches, so it never has to resolve one.
-    pub const CreateError = Error || std.mem.Allocator.Error;
+    /// Descriptor refusal, allocator mismatch, retirement, or allocation failure.
+    pub const CreateError = core.ValidationError || core.CreateError;
 
-    /// `QuerySetBase`'s normal constructor (`QuerySet.cpp:81-88`) with
-    /// `DeviceBase::CreateQuerySet` (`Device.cpp:2172-2178`) and
-    /// `QuerySetBase::MakeError` (`:114-117`).
-    ///
-    /// A rejected descriptor leaves an object behind, exactly as upstream does:
-    /// the caller gets the rule, and the handle it would have got names an
-    /// object in the `unavailable` state. A later use of that handle is refused
-    /// with `QuerySetIsError` rather than reading uninitialised bytes. This is
-    /// the shape M11's `Sampler.create` already has.
+    /// Creates one owned user reference after guarded allocator and descriptor checks.
+    /// On failure no object or reference is published. Release the result under its guard.
     pub fn create(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        guard: *const core.ObjectGuard,
         dev: *core.Device,
         descriptor: Descriptor,
         options: DescriptorOptions,
     ) CreateError!api.objects.QuerySet {
-        const set = try dev.create(QuerySet, .{
+        try dev.arena.checkAllocator(guard, gpa);
+        try command_query.validateDescriptor(descriptor, options);
+        const set = try dev.create(gpa, guard, QuerySet, .{
             .kind = .query_set,
             .state = .initializing,
+            .initial_reference = .user,
             .label = descriptor.label orelse "",
         });
+        errdefer set.header.discardUnpublishedLocked(guard) catch unreachable;
 
-        command_query.validateDescriptor(descriptor, options) catch |rule| {
-            initError(set, descriptor);
-            // `validateDescriptor` raises `QueryTypeUnknown`,
-            // `core.RequiredFeatureMissing` and `QueryCountAboveMaximum`, and
-            // all three are members of `core.ValidationError`, which is the
-            // type of the field they are recorded in. `codeFromError` is what
-            // carries a rule into the port's `ErrorCode`, and the two
-            // `unreachable` arms are the claim that a rule about an object is
-            // a validation rule: the declared set of the call above names no
-            // device-lost or unrecoverable member, so it cannot raise one.
-            switch (core_errors.codeFromError(rule)) {
-                .validation => |code| set.header.setInitializedError(code),
-                .device_lost, .unrecoverable => unreachable,
-            }
-            // The rejected set is tracked: `Device.deinit` is what runs its
-            // teardown, and `attach` is the only call that puts it in that list.
-            set.header.attach();
-            return rule;
-        };
-
-        // One byte per query, bounded by `max_query_count`, and taken from the
-        // device arena: there is no per-object free, so the lifetime rule is the
-        // state and not a destructor (`docs/30-port-design.md` §1.1).
-        const availability = try dev.arena.allocator().alloc(bool, descriptor.count);
+        // No destructor runs if this allocation fails: only the creator ledger is discarded.
+        const availability = try dev.arena.allocator(guard).alloc(bool, descriptor.count);
         @memset(availability, false);
 
         set.query_type = descriptor.type_;
         set.query_count = descriptor.count;
         set.state = .available;
         set.availability = availability;
-        set.header.setInitializedNoError();
-        set.header.attach();
-        return .{ .handle = @ptrCast(set) };
+        set.pool = null;
+        set.backend_queue = null;
+        set.backend_next = null;
+        set.last_used_serial = 0;
+        set.pending_use = false;
+        set.header.setInitializedNoError(guard);
+        set.header.attach(guard, io);
+        return .{ .handle = @ptrCast(dev.handleFor(guard, QuerySet, set, .query_set).ptr) };
     }
 
-    /// `QuerySetBase`'s error constructor (`QuerySet.cpp:90-95`): the type and
-    /// the count are the only fields it writes and the availability vector stays
-    /// empty, which is what makes a zero-count error set and a zero-count real
-    /// set read the same way.
-    fn initError(set: *QuerySet, descriptor: Descriptor) void {
-        set.query_type = descriptor.type_;
-        set.query_count = descriptor.count;
-        set.state = .unavailable;
-        set.availability = &.{};
+    /// Consumes one owned user reference; dependent leases may keep the payload alive.
+    pub fn apiDestroy(
+        self: *QuerySet,
+        guard: *const core.ObjectGuard,
+        io: std.Io,
+    ) core.ReferenceError!void {
+        try self.header.releaseUserLocked(guard, io);
     }
 
-    /// `QuerySetBase::APIDestroy` (`QuerySet.cpp:154-156`).
-    pub fn apiDestroy(self: *QuerySet) void {
-        self.header.release();
-    }
-
-    /// The arena teardown, which is the same transition from the other side:
-    /// the state is set and the pool is dropped. Upstream hands the pool to
-    /// `FencedDeleter` (`QuerySetVk.cpp:95`); the port splits the step, because
-    /// the timeline that decides when a pool is unused belongs to the queue.
-    ///
-    /// **There is nothing left to drop, because the arena owns the block.**
-    /// `create` took the object from the device arena through `Device.create`
-    /// (`src/core/device.zig:70`), and the one call that gives that block back
-    /// is `ObjectArena.deinit` (`src/core/object.zig:405`). An
-    /// `ArenaAllocator` has no per-allocation free: `ArenaAllocator.free`
-    /// rewinds only when the block ends at the arena's newest byte
-    /// (`lib/std/heap/ArenaAllocator.zig:620`-`:623`), and `create` allocates
-    /// the availability vector after the object block, so the object block is
-    /// never that byte. A `destroy(self)` here would be a no-op that reads as
-    /// a release.
-    //
-    // `heap-leak` asks this destructor for a `destroy(self)` that cannot
-    // release anything here, so the finding is suppressed on the declaration
-    // below instead of answered with a call that would read as a release and
-    // release nothing. The evidence that the finding is wrong:
-    //
-    // `create` takes the object from the device arena through `Device.create`
-    // (`src/core/device.zig:70`) and `ObjectArena.create`
-    // (`src/core/object.zig:354`), and the one call that gives the block back
-    // is `reset(.free_all)` (`src/core/object.zig:405`). Sixty-four query sets
-    // through that path, each torn down, then `Device.deinit`:
-    // `std.testing.allocator`, the leak detector, reports nothing, with the
-    // arena capacity above zero before the deinit so the blocks were really
-    // held. An `ArenaAllocator` has no per-allocation free, and `create`
-    // allocates the availability vector after the object block, so the block is
-    // never the newest one and a `destroy(self)` could not rewind even if it
-    // were called.
-    //
-    // zbc-disable-next-line: heap-leak
-    pub fn destroy(self: *QuerySet, reason: object.DestroyReason) void {
+    /// Marks the payload destroyed and asks the queue for serial-safe pool retirement.
+    /// Keep `backend_queue` alive and unmoved while it remains non-null.
+    /// A native retirement failure stays in the queue's typed cleanup error slot.
+    pub fn destroy(
+        self: *QuerySet,
+        guard: *const core.ObjectGuard,
+        io: std.Io,
+        reason: core.DestroyReason,
+    ) void {
+        guard.assertOwns(self.header.tracking);
         _ = reason;
         self.state = .destroyed;
-        self.pool = null;
+        if (self.backend_queue) |queue| {
+            queue.retireQueryPool(guard, io, self) catch |err| {
+                queue.recordCleanupError(guard, err);
+            };
+        }
     }
 
     /// `QuerySetBase::GetType` (`QuerySet.cpp:119-121`). The port names the
     /// object by the handle's kind byte, so the answer is the kind itself.
-    pub fn getObjectType(_: *const QuerySet) core.Handle.Kind {
+    pub fn getObjectType(self: *const QuerySet, guard: *const core.ObjectGuard) core.Handle.Kind {
+        guard.assertOwns(self.header.tracking);
         return .query_set;
     }
 
     /// `QuerySetBase::APIGetType` (`QuerySet.cpp:158-160`) and
     /// `GetQueryType` (`:122-124`), which are one read.
-    pub fn apiGetType(self: *const QuerySet) command_query.QueryType {
+    pub fn apiGetType(self: *const QuerySet, guard: *const core.ObjectGuard) command_query.QueryType {
+        guard.assertOwns(self.header.tracking);
         return self.query_type;
     }
 
     /// `QuerySetBase::APIGetCount` (`QuerySet.cpp:162-164`) and
     /// `GetQueryCount` (`:126-128`), which are one read.
-    pub fn apiGetCount(self: *const QuerySet) u32 {
+    pub fn apiGetCount(self: *const QuerySet, guard: *const core.ObjectGuard) u32 {
+        guard.assertOwns(self.header.tracking);
         return self.query_count;
     }
 
     /// `QuerySetBase::IsQueryAvailable` (`QuerySet.cpp:131-133`).
-    pub fn isQueryAvailable(self: *const QuerySet, index: u32) bool {
+    pub fn isQueryAvailable(
+        self: *const QuerySet,
+        guard: *const core.ObjectGuard,
+        index: u32,
+    ) bool {
+        guard.assertOwns(self.header.tracking);
         // The index is bounded by the caller: `validateResolve` runs before a
         // resolve and `beginOcclusionQuery` before a write, so an index past the
         // vector is a defect in that caller and not a rule here.
@@ -215,7 +182,13 @@ pub const QuerySet = struct {
     /// `QuerySetBase::AreAllQueriesAvailable` (`QuerySet.cpp:135-142`). It
     /// short-circuits on the first unavailable index, which is the answer the
     /// walk gives and one pass cheaper.
-    pub fn areAllQueriesAvailable(self: *const QuerySet, first: u32, count: u32) bool {
+    pub fn areAllQueriesAvailable(
+        self: *const QuerySet,
+        guard: *const core.ObjectGuard,
+        first: u32,
+        count: u32,
+    ) bool {
+        guard.assertOwns(self.header.tracking);
         const end = first + count;
         std.debug.assert(end <= self.availability.len);
         var index = first;
@@ -232,7 +205,8 @@ pub const QuerySet = struct {
     /// counted. A query that closed with zero passing samples is available; a
     /// query that never closed is not, and the two zeros reach the destination
     /// by different routes.
-    pub fn markQueryAvailable(self: *QuerySet, index: u32) void {
+    pub fn markQueryAvailable(self: *QuerySet, guard: *const core.ObjectGuard, index: u32) void {
+        guard.assertOwns(self.header.tracking);
         std.debug.assert(index < self.availability.len);
         self.availability[index] = true;
     }
@@ -241,7 +215,11 @@ pub const QuerySet = struct {
     /// `Queue::ValidateCanUseInSubmitNow` runs it for every set in
     /// `usages.usedQuerySets` (`Queue.cpp:543-545`), so this is a submit-time
     /// check and not a record-time one.
-    pub fn validateCanUseInSubmit(self: *const QuerySet) Error!void {
+    pub fn validateCanUseInSubmit(
+        self: *const QuerySet,
+        guard: *const core.ObjectGuard,
+    ) error{ QuerySetIsError, QuerySetDestroyed }!void {
+        guard.assertOwns(self.header.tracking);
         switch (self.state) {
             .unavailable => return error.QuerySetIsError,
             .destroyed => return error.QuerySetDestroyed,
@@ -261,13 +239,14 @@ pub const QuerySet = struct {
 /// object, so the assertion cannot fail for a handle this module produced.
 pub fn resolveQuerySet(
     dev: *core.Device,
+    guard: *const core.ObjectGuard,
     target: api.objects.QuerySet,
-) core.ValidationError!*QuerySet {
+) core.HandleError!*QuerySet {
     const wrapped: core.Handle = .{
         .ptr = @alignCast(target.handle orelse return error.HandleKindMismatch),
         .kind = .query_set,
     };
-    return dev.resolve(QuerySet, wrapped);
+    return dev.resolve(guard, QuerySet, wrapped);
 }
 
 /// A half-open range of query indices.
@@ -407,4 +386,97 @@ fn allAvailable(availability: []const bool, params: command_query.ResolveParams)
         if (!availability[index]) return false;
     }
     return true;
+}
+
+fn queryTestUncaptured(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    context: *anyopaque,
+    view: core_errors.ErrorView,
+) void {
+    _ = gpa;
+    _ = io;
+    _ = context;
+    _ = view;
+    @panic("unexpected query error callback");
+}
+
+fn queryFactoryAllocationTest(gpa: std.mem.Allocator) !void {
+    // Every allocation failure must consume unpublished ownership without a payload callback.
+    const io = std.testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var callback_context: u8 = 0;
+    var dev = core.Device.init(gpa, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = queryTestUncaptured,
+    });
+    var guard = core.ObjectGuard.lockUncancelable(io, dev.borrow().objectList());
+    defer guard.unlock(io);
+    defer dev.deinit(gpa, &guard) catch @panic("query references leaked");
+    defer {
+        std.debug.assert(dev.arena.objects.total_reference_count == 0);
+        std.debug.assert(dev.arena.objects.user_reference_count == 0);
+        std.debug.assert(dev.arena.queryTrackedCount(&guard) == 0);
+    }
+    const target = try QuerySet.create(gpa, io, &guard, &dev, .{
+        .label = "allocation failure coverage",
+        .type_ = .occlusion,
+        .count = command_query.max_query_count,
+    }, .{});
+    const set = try resolveQuerySet(&dev, &guard, target);
+    defer set.apiDestroy(&guard, io) catch @panic("query release failed");
+    try std.testing.expectEqual(@as(u32, 1), set.header.reference_count);
+    try std.testing.expectEqual(@as(u32, 1), set.header.user_reference_count);
+    try std.testing.expect(set.header.reference_escaped);
+    try std.testing.expect(!set.isQueryAvailable(&guard, 0));
+    set.markQueryAvailable(&guard, 0);
+    try std.testing.expect(set.isQueryAvailable(&guard, 0));
+}
+
+test "query factory allocation failures do not abandon unpublished creator references" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        queryFactoryAllocationTest,
+        .{},
+    );
+}
+
+test "query validation and allocator refusal leave no creator reference" {
+    // A rejected descriptor must not allocate an error object with an inaccessible user ref.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var mutex: std.Io.Mutex = .init;
+    var callback_context: u8 = 0;
+    var dev = core.Device.init(gpa, .{
+        .object_mutex = &mutex,
+        .uncaptured_context = &callback_context,
+        .uncaptured_callback = queryTestUncaptured,
+    });
+    var guard = core.ObjectGuard.lockUncancelable(io, dev.borrow().objectList());
+    defer guard.unlock(io);
+    defer dev.deinit(gpa, &guard) catch @panic("query references leaked");
+    const descriptor: Descriptor = .{ .type_ = .timestamp, .count = 1 };
+    var foreign_storage: [64]u8 = undefined;
+    var foreign = std.heap.FixedBufferAllocator.init(&foreign_storage);
+    try std.testing.expectError(error.AllocatorMismatch, QuerySet.create(
+        foreign.allocator(),
+        io,
+        &guard,
+        &dev,
+        descriptor,
+        .{},
+    ));
+    try std.testing.expectError(error.RequiredFeatureMissing, QuerySet.create(
+        gpa,
+        io,
+        &guard,
+        &dev,
+        descriptor,
+        .{},
+    ));
+    try std.testing.expectEqual(@as(usize, 0), dev.arena.queryCapacity(&guard));
+    try std.testing.expectEqual(@as(u64, 0), dev.arena.objects.total_reference_count);
+    try std.testing.expectEqual(@as(u64, 0), dev.arena.objects.user_reference_count);
+    try std.testing.expectEqual(@as(usize, 0), dev.arena.queryTrackedCount(&guard));
 }

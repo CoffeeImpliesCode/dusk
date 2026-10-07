@@ -112,6 +112,8 @@ pub const Error = dispatch.Error || dispatch.LoadError || error{
     /// accepts. Dawn rejects the whole negative range at
     /// `SemaphoreServiceImplementationFD.cpp:93`.
     InvalidSemaphoreHandle,
+    /// The selected handle type lacks native import-and-export support.
+    UnsupportedHandleType,
 };
 
 /// What `checkSupport` needs.
@@ -183,6 +185,7 @@ pub const Service = struct {
     /// Ports `CreateExportableSemaphore`
     /// (`SemaphoreServiceImplementationFD.cpp:140`).
     pub fn createExportableSemaphore(self: Service) Error!vulkan.VkSemaphore {
+        if (!self.supported) return error.UnsupportedHandleType;
         var export_info: vulkan.VkExportSemaphoreCreateInfo = .{
             .sType = vulkan.VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO_KHR,
             .handleTypes = self.handle_type.vkHandleTypeFlags(),
@@ -208,6 +211,7 @@ pub const Service = struct {
         self: Service,
         semaphore: vulkan.VkSemaphore,
     ) Error!ExternalSemaphoreHandle {
+        if (!self.supported) return error.UnsupportedHandleType;
         var get_info: vulkan.VkSemaphoreGetFdInfoKHR = .{
             .sType = vulkan.VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
             .semaphore = semaphore,
@@ -223,9 +227,11 @@ pub const Service = struct {
         try dispatch.checkVkSuccess(
             get_fd(self.device, &get_info, &descriptor),
         );
-        std.debug.assert(
-            descriptor >= 0 or descriptor == semaphore_fd_already_signaled_fd,
-        );
+        if (descriptor < 0 and
+            !(descriptor == semaphore_fd_already_signaled_fd and self.handle_type == .sync_fd))
+        {
+            return error.InvalidSemaphoreHandle;
+        }
         return descriptor;
     }
 
@@ -240,17 +246,18 @@ pub const Service = struct {
         self: Service,
         handle: ExternalSemaphoreHandle,
     ) Error!vulkan.VkSemaphore {
-        // The sentinel is a value, not a descriptor, so there is nothing to
-        // duplicate and nothing to close if the import fails. It is accepted
-        // only for the sync handle type, which is the type the specification
-        // defines it for (`UtilsVulkan.h:49`).
-        if (handle == semaphore_fd_already_signaled_fd and
-            self.handle_type == .sync_fd)
+        // Only SYNC_FD may use -1. Reject malformed handles before checking
+        // capability, and reject unsupported legal imports before any dup or
+        // Vulkan object creation.
+        if (handle < 0 and
+            !(handle == semaphore_fd_already_signaled_fd and self.handle_type == .sync_fd))
         {
+            return error.InvalidSemaphoreHandle;
+        }
+        if (!self.supported) return error.UnsupportedHandleType;
+        if (handle == semaphore_fd_already_signaled_fd) {
             return self.importSemaphoreDescriptor(handle);
         }
-        if (handle < 0) return error.InvalidSemaphoreHandle;
-
         const copy = try duplicateHandle(handle);
         errdefer closeHandle(io, copy);
         return self.importSemaphoreDescriptor(copy);
@@ -281,13 +288,10 @@ pub const Service = struct {
         var import_info: vulkan.VkImportSemaphoreFdInfoKHR = .{
             .sType = vulkan.VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
             .semaphore = semaphore,
-            // A temporary import means that after a wait on this semaphore
-            // its payload is restored to the prior permanent state, which is
-            // signalled, so several waiters can be released from one signal.
-            // Temporary is also the only valid flag for a sync descriptor,
-            // because a sync descriptor transitions once and never back.
-            // Dawn explains the choice at
-            // `SemaphoreServiceImplementationFD.cpp:109`-`:119`.
+            // The target is binary (no VkSemaphoreTypeCreateInfo in its
+            // create chain). SYNC_FD requires temporary import; OPAQUE_FD
+            // permits it. After a wait the original, unsignalled payload of
+            // this newly created semaphore is restored, not a second signal.
             .flags = vulkan.VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
             .handleType = self.handle_type.vkHandleType(),
             .fd = descriptor,
@@ -438,7 +442,7 @@ test "every member of the error set is named" {
     }
     try std.testing.expect(
         @typeInfo(Error).error_set.?.len ==
-            @typeInfo(dispatch.Error).error_set.?.len + 6,
+            @typeInfo(dispatch.Error).error_set.?.len + 7,
     );
 }
 
@@ -446,4 +450,24 @@ test "a sync descriptor that is negative is the only one the sentinel covers" {
     // The sentinel is `-1`. A descriptor of `-2` is not a state and not a
     // file, so `duplicateHandle` hands it to `dup`, which refuses.
     try std.testing.expectError(error.DuplicateFailed, duplicateHandle(-2));
+}
+
+test "unsupported handle types refuse legal operations before creating resources" {
+    const procs = std.mem.zeroes(dispatch.DeviceProcs);
+    const service = Service.init(.{
+        .device = null,
+        .device_procs = &procs,
+        .support = device_free_support,
+    });
+    try std.testing.expectError(error.UnsupportedHandleType, service.createExportableSemaphore());
+    try std.testing.expectError(error.UnsupportedHandleType, service.exportSemaphore(null));
+    try std.testing.expectError(error.UnsupportedHandleType, Service.importSemaphore(std.testing.io, service, 0));
+    var sync_service = service;
+    sync_service.handle_type = .sync_fd;
+    try std.testing.expectError(error.UnsupportedHandleType, Service.importSemaphore(
+        std.testing.io,
+        sync_service,
+        semaphore_fd_already_signaled_fd,
+    ));
+    try std.testing.expectError(error.InvalidSemaphoreHandle, Service.importSemaphore(std.testing.io, service, -1));
 }

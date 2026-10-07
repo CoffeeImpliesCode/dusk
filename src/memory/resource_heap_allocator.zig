@@ -45,6 +45,8 @@ pub const Error = error{
     /// `ResourceMemoryAllocatorVk.cpp:101-103`; the port names it separately
     /// because it is the caller's request and not the device's state.
     RequestExceedsMaximumHeapSize,
+    /// A fixed-size pool received or returned a different heap size.
+    HeapSizeMismatch,
 };
 
 /// The allocation failure the interface adds to the injected allocator's.

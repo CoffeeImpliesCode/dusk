@@ -3,10 +3,9 @@
 //! **What this file is.** `docs/30-port-design.md` §2.1 puts every rule in a
 //! Zig error set so a caller matches a rule and not a message.
 //! `core.ValidationError` holds the rules that are about an object, a
-//! descriptor among them. The rules here are about a *recorded command* — a
-//! draw that reads past a buffer, a pass whose attachments disagree with its
-//! pipeline — and no module above `command` can raise them, because no
-//! module above `command` records.
+//! descriptor among them. The rules here cover recorded commands and canonical
+//! attachment values. Native producers can raise the same attachment errors
+//! before they publish a pass, pipeline or bundle owner.
 //!
 //! **What this file does not claim.** It does not claim these names exist
 //! upstream. Dawn has no message-id mechanism at this revision
@@ -22,9 +21,9 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
+const browser_copy = @import("browser_copy.zig");
 
-/// A rule about a command. Each member is raised by exactly one function; the
-/// row in `docs/40-plan.md` §M15 names it.
+/// A command or canonical attachment validation rule.
 pub const CommandValidationError = error{
     /// A draw reads past the end of the vertex or instance buffer it names.
     /// Dawn's `ValidateBufferInRangeForVertexBuffer`
@@ -34,6 +33,8 @@ pub const CommandValidationError = error{
     /// Dawn's `ValidateIndexBufferInRange`
     /// (`src/dawn/native/CommandBufferStateTracker.cpp:498`).
     DrawIndexCount,
+    /// Replay must sanitize argument and count buffers before the render pass.
+    IndirectBufferWrittenInRenderPass,
     /// A dispatch names more workgroups than the device limit allows. Dawn has
     /// no `ValidateDispatchWorkgroups`; the rule is the three per-axis
     /// `DAWN_INVALID_IF`s against `maxComputeWorkgroupsPerDimension` inside
@@ -73,7 +74,7 @@ pub const CommandValidationError = error{
     /// Dawn's `ValidateSetImmediates`
     /// (`src/dawn/native/ProgrammableEncoder.cpp:130`).
     ImmediateDataTooLarge,
-    /// Immediate data does not start on a four-byte boundary.
+    /// The immediate offset or size is not a multiple of four bytes.
     ImmediateDataUnaligned,
     /// Two views of one texture are used in one render pass. Dawn's
     /// `ValidateNoDifferentTextureViewsOnSameTexture`
@@ -89,6 +90,17 @@ pub const CommandValidationError = error{
     NoAttachmentInRenderPass,
     /// A resolve names an attachment slot the pass does not resolve.
     ResolveWithoutAttachment,
+    TooManyAttachments,
+    InvalidAttachmentAspect,
+    AttachmentSampleCountUnsupported,
+    InvalidAttachmentResolve,
+    InvalidExpandResolveMask,
+    PixelLocalStorageSizeInvalid,
+    PixelLocalStorageOffsetUnaligned,
+    PixelLocalStorageAttachmentCountExceeded,
+    PixelLocalStorageOffsetOutOfRange,
+    PixelLocalStorageOffsetDuplicate,
+    NoncanonicalAttachmentState,
     /// A copy names a compressed format, which a copy can neither read nor
     /// write. Dawn has no `ValidateCopyTextureToTexture`; the rule is the
     /// `format.isCompressed` branch of `ValidateTextureCopyRange`
@@ -113,9 +125,7 @@ pub const CommandValidationError = error{
     /// `EncodingContext::ExitRenderPass`
     /// (`src/dawn/native/EncodingContext.cpp:175-180`).
     PassEnded,
-    /// The encoder has finished. `core.EncoderAlreadyFinished` covers a
-    /// finished *command* encoder; this covers a finished *bundle* encoder,
-    /// which `core` cannot name because it holds no core object.
+    /// The render bundle encoder has finished and cannot record again.
     BundleEncoderFinished,
     /// An indirect buffer is smaller than the draw or dispatch it feeds.
     /// Dawn's `ComputePassEncoder::APIDispatchWorkgroupsIndirect`
@@ -128,6 +138,15 @@ pub const CommandValidationError = error{
     /// the port reports it, because a stream the port did not write is input,
     /// and a decoder boundary is where input is refused.
     CommandStreamTruncated,
+    InvalidCommandTag,
+    UnsupportedCommand,
+    InvalidViewport,
+    InvalidScissorRect,
+    BundleDestroyed,
+    BundleDepthExhausted,
+    CommandCountExhausted,
+    BundleCycle,
+    InvalidBundle,
     /// A record was attempted on an encoder a previous failure already
     /// invalidated. Dawn's `ErrorInRecording` case
     /// (`src/dawn/native/EncodingContext.h:150-186`).
@@ -194,23 +213,15 @@ pub const CommandValidationError = error{
     /// port's own rule: a truncated plan would leave the destination holding
     /// whatever was in it before, so it is reported rather than applied.
     ResolveRunBufferTooSmall,
-};
+} || browser_copy.Error;
 
 /// Everything a record call can fail with. A caller of `command` matches on
 /// this set and never on a message.
 ///
-/// `core.Error` names no allocation failure (`core/errors.zig:117`), but a
-/// record call allocates: the payload and its trailing run come from the
-/// pending allocator, a bind group appends to the pass's usage trackers, and
-/// an indirect draw appends to the pass's metadata. `std.mem.Allocator.Error`
-/// is here for the methods that `try` one of those: `setBindGroup`,
-/// `setImmediates`, `pushDebugGroup`, `popDebugGroup` and `insertDebugMarker`
-/// (`programmable_encoder.zig:185`, `:229`, `:234`, `:247`, `:253`), and
-/// `setVertexBuffer`, `setIndexBuffer`, `setPipeline`, `draw`, `drawIndexed`,
-/// the four indirect draws, `recordIndirect` and `recordMultiDrawIndirect`
-/// (`render_encoder_base.zig:206`, `:228`, `:255`, `:298`, `:321`, `:344`,
-/// `:355`, `:366`, `:378`, `:400`, `:423`).
-pub const Error = core.Error || CommandValidationError || std.mem.Allocator.Error;
+/// Recording allocates command blocks and metadata. Attachment leases and real
+/// bundle creation add checked core reference and arena-creation failures.
+pub const Error = core.Error || core.ReferenceError || core.CreateError ||
+    CommandValidationError || std.mem.Allocator.Error;
 
 /// The sentence for each rule. Exhaustive by construction: the switch names
 /// every member of `CommandValidationError`, so a rule added there without a
@@ -222,6 +233,12 @@ pub fn describe(rule: CommandValidationError) []const u8 {
     return switch (rule) {
         error.DrawVertexCount => "the draw reads past the end of a vertex buffer it names",
         error.DrawIndexCount => "the draw reads past the end of the index buffer it names",
+        error.IndirectBufferWrittenInRenderPass => "the render pass writes an indirect argument or count buffer",
+        error.BrowserCopyInternalUsageForbidden => "the browser copy cannot grant private resource usage",
+        error.BrowserCopyConversionParametersMissing => "the browser color conversion needs all three parameter arrays",
+        error.BrowserCopyTransferLengthInvalid => "the browser transfer parameter array must have seven values",
+        error.BrowserCopyMatrixLengthInvalid => "the browser conversion matrix must have nine values",
+        error.BrowserCopyParameterNonFinite => "the browser copy parameter is not finite",
         error.DispatchWorkgroupCount => "the dispatch is above the device workgroup limit",
         error.DrawCountExceeded => "the pass issued more draws than its descriptor allows",
         error.MissingPipeline => "no pipeline is set for this command",
@@ -233,12 +250,23 @@ pub fn describe(rule: CommandValidationError) []const u8 {
         error.VertexBufferSlotOutOfRange => "the vertex buffer slot is above the maximum",
         error.BindGroupIndexOutOfRange => "the bind group index is above the maximum",
         error.ImmediateDataTooLarge => "the immediate data is larger than the maximum",
-        error.ImmediateDataUnaligned => "the immediate data does not start on a four-byte boundary",
+        error.ImmediateDataUnaligned => "the immediate offset or size is not a multiple of four bytes",
         error.ConflictingTextureViews => "two views of one texture are used in one render pass",
         error.AttachmentFormatMismatch => "the pipeline and the pass disagree on an attachment format",
         error.AttachmentSampleCountMismatch => "the pipeline and the pass disagree on a sample count",
         error.NoAttachmentInRenderPass => "the render pass has no attachment",
         error.ResolveWithoutAttachment => "the resolve names an attachment the pass does not resolve",
+        error.TooManyAttachments => "the attachment count exceeds the implementation or device limit",
+        error.InvalidAttachmentAspect => "the attachment aspects do not match its required role",
+        error.AttachmentSampleCountUnsupported => "the attachment sample count is not supported",
+        error.InvalidAttachmentResolve => "the resolve source and target are not compatible",
+        error.InvalidExpandResolveMask => "the expansion mask does not match the color and resolve attachments",
+        error.PixelLocalStorageSizeInvalid => "the pixel local storage size is unaligned or exceeds the limit",
+        error.PixelLocalStorageOffsetUnaligned => "the pixel local storage offset is not a multiple of four bytes",
+        error.PixelLocalStorageAttachmentCountExceeded => "the pixel local storage attachment count exceeds the limit",
+        error.PixelLocalStorageOffsetOutOfRange => "the pixel local storage offset is outside its declared size",
+        error.PixelLocalStorageOffsetDuplicate => "two pixel local storage attachments have the same offset",
+        error.NoncanonicalAttachmentState => "the attachment state contains invalid or inactive fields",
         error.CompressedTextureCopy => "a compressed format cannot be a copy source or destination",
         error.CopyExtentOutOfRange => "the copy extent leaves the texture it names",
         error.NonFiniteFloat => "a value the pass records is not a finite number",
@@ -249,6 +277,15 @@ pub fn describe(rule: CommandValidationError) []const u8 {
         error.IndirectBufferTooSmall => "the indirect buffer is smaller than the command it feeds",
         error.TimestampIndexOutOfRange => "the timestamp write names an index outside its query set",
         error.CommandStreamTruncated => "the command stream ends in the middle of a command",
+        error.InvalidCommandTag => "the command stream contains an unknown tag",
+        error.UnsupportedCommand => "the selected feature set does not support this command",
+        error.InvalidViewport => "the viewport is outside the render target or depth range",
+        error.InvalidScissorRect => "the scissor rectangle is outside the render target",
+        error.BundleDestroyed => "the render bundle has been destroyed",
+        error.BundleDepthExhausted => "the render bundle nesting depth exceeds the limit",
+        error.CommandCountExhausted => "the command traversal exceeds its command count limit",
+        error.BundleCycle => "the render bundle traversal contains a cycle",
+        error.InvalidBundle => "the render bundle body or attachment state is invalid",
         error.EncoderInvalidated => "a previous failure already invalidated this encoder",
         error.EncoderDestroyed => "the owner of this encoder is gone",
         error.ParentEncoderFinished => "the encoder that owns this pass has already finished",

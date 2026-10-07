@@ -32,6 +32,7 @@ const vulkan = @import("vulkan");
 
 const dispatch = dusk.vk.dispatch;
 const platform = dusk.platform;
+const core = dusk.core;
 const vulkan_device = dusk.engine.vulkan_device;
 const queue = dusk.engine.queue;
 
@@ -70,9 +71,7 @@ const SetupError = vulkan_device.ProcError ||
         /// `vkCreateBuffer`, `vkAllocateMemory` or `vkBindBufferMemory` succeeded
         /// and returned a null handle.
         HandleCreationReturnedNull,
-        /// No memory type is legal for the buffer. `vulkan_device.findMemoryTypeIndex`
-        /// refuses the device-local types, and a driver whose every type is
-        /// device-local cannot satisfy a fill that has to be real.
+        /// No compatible memory type is legal for the buffer.
         NoMemoryType,
         /// `vkCmdFillBuffer` is not in the device tier, which `loadDeviceProcs`
         /// guarantees for core Vulkan 1.0. Reaching this means the dispatch table is
@@ -109,6 +108,9 @@ test "test-vulkan-device" {
 
     var handles: vulkan_device.HandleSet = .{};
     var device_mutex: platform.DeviceMutex = .{};
+    // This raw fixture owns one canonical list on the queue's existing mutex.
+    // Both locals stay at their final addresses through native device teardown.
+    var objects: core.ObjectList = .{ .mutex = &device_mutex.mutex };
 
     // One `VkInstance` per ICD, fallback first (`BackendVk.cpp:590`-`:615`). An
     // ICD whose library will not open is skipped, and an ICD that reports no
@@ -127,6 +129,9 @@ test "test-vulkan-device" {
     try std.testing.expect(adapter.instance.loader_api_version >=
         vulkan_device.required_vulkan_version);
     try std.testing.expect(adapter.physical.queue_families.len != 0);
+    // The native query must return usable memory types, including on UMA drivers.
+    try std.testing.expect(adapter.physical.memory_properties.memoryTypeCount >= 1);
+    try std.testing.expect(adapter.physical.memory_properties.memoryTypeCount <= vulkan.VK_MAX_MEMORY_TYPES);
     try std.testing.expect(adapter.physical.deviceName().len != 0);
     try std.testing.expectEqual(icdCount(), backend.instances.len);
 
@@ -136,6 +141,10 @@ test "test-vulkan-device" {
         .handles = &handles,
     });
     try std.testing.expectEqual(@as(u32, 1), handles.countOf(.device));
+    try std.testing.expectEqual(
+        @min(adapter.instance.api_version, adapter.physical.properties.apiVersion),
+        device.api_version,
+    );
     try std.testing.expect(device.queue_family_index < adapter.physical.queue_families.len);
 
     var q = try queue.Queue.init(.{
@@ -166,7 +175,7 @@ test "test-vulkan-device" {
     fill(q.commandBuffer(), allocation.buffer, 0, fill_buffer_byte_count, fill_pattern);
 
     const serial_before_submit = q.timeline.lastSubmittedSerial();
-    const submitted = try q.submit(.{ .command_buffers = &.{q.commandBuffer()} });
+    const submitted = try q.submit(io, &objects, .{ .command_buffers = &.{q.commandBuffer()} });
     // The serial is taken after the submit (`QueueVk.cpp:364`-`:367`), so it is
     // the one before plus one and the timeline agrees.
     try std.testing.expectEqual(serial_before_submit + 1, submitted.serial);
@@ -176,7 +185,7 @@ test "test-vulkan-device" {
     try std.testing.expectEqual(@as(u64, 5_000_000_000), queue.fence_wait_timeout_ns);
     // `Queue::wait` is declared with `io` first (`src/engine/queue.zig:367`),
     // so it is not a member function and is called through the type name.
-    const completed = try queue.Queue.wait(io, &q, .{
+    const completed = try queue.Queue.wait(io, &q, &objects, .{
         .serial = submitted.serial,
         .timeout_ns = queue.fence_wait_timeout_ns,
     });
@@ -192,7 +201,13 @@ test "test-vulkan-device" {
     // (`AGENTS.md` §3.1), and this test runs them as the last statements of its
     // body because a `defer` cannot hand an error back.
     try destroyFillAllocation(&device, allocation, &handles);
-    try q.deinit();
+    try q.deinit(io, &objects);
+    {
+        var guard = try core.ObjectGuard.lock(io, &objects);
+        defer guard.unlock(io);
+        try objects.preflightDeinitLocked(&guard);
+    }
+    // The list preflight releases the guard before the native device is poisoned.
     try device.deinit(std.testing.allocator);
     adapters.deinit();
     try backend.deinit();
@@ -259,14 +274,12 @@ fn createFillAllocation(
     try std.testing.expect(requirements.memoryTypeBits != 0);
     try std.testing.expect(requirements.alignment != 0);
 
-    // `vkCmdFillBuffer` on device-local memory is legal and a driver may satisfy
-    // it by doing nothing, so the type is chosen with that flag forbidden. See
-    // `vulkan_device.findMemoryTypeIndex`.
+    // The fill is legal on any compatible type, including device-local UMA memory.
     const type_index = try vulkan_device.findMemoryTypeIndex(
         device.memoryProperties(),
         requirements.memoryTypeBits,
         0,
-        vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        0,
     );
 
     const allocate_info: vulkan.VkMemoryAllocateInfo = .{

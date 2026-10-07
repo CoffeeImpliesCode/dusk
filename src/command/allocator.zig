@@ -153,6 +153,41 @@ pub const Allocator = struct {
         return @as([*]T, @ptrCast(aligned))[0..count];
     }
 
+    /// Reserves a command and its byte run as one transaction.
+    /// Overflow or allocation failure leaves blocks, tails, and the cursor unchanged.
+    pub fn allocateCommandWithData(
+        self: *Allocator,
+        comptime T: type,
+        command_id: u32,
+        count: usize,
+    ) AllocatorError!struct { command: *T, data: []u8 } {
+        comptime std.debug.assert(@alignOf(T) <= constants.max_alignment);
+        std.debug.assert(command_id != constants.end_of_block);
+        std.debug.assert(command_id != constants.additional_data);
+        const command_size = comptime std.mem.alignForward(
+            usize,
+            @sizeOf(T),
+            constants.max_alignment,
+        );
+        const padded_count = std.math.add(usize, count, constants.max_alignment - 1) catch
+            return error.CopyExtentOutOfRange;
+        const data_size = padded_count & ~(constants.max_alignment - 1);
+        const prefix_size = comptime command_size + 2 * constants.max_alignment;
+        const record_size = std.math.add(usize, prefix_size, data_size) catch
+            return error.CopyExtentOutOfRange;
+        const requested = std.math.add(usize, record_size, @sizeOf(u32)) catch
+            return error.CopyExtentOutOfRange;
+        if (self.current_index >= self.blocks.items.len or
+            self.blocks.items[self.current_index].remaining() < requested)
+        {
+            try self.appendNewBlock(requested);
+        }
+        const block = &self.blocks.items[self.current_index];
+        const command = carve(block, command_id, @sizeOf(T));
+        const data = carve(block, constants.additional_data, count);
+        return .{ .command = @ptrCast(command.ptr), .data = data };
+    }
+
     /// Dawn's `AllocateInNewBlock` (`CommandAllocator.cpp:208-224`). The old
     /// block's tail gets the end-of-block tag, so the reader knows to move on,
     /// and the new block is large enough for the payload plus the worst case.
@@ -161,11 +196,6 @@ pub const Allocator = struct {
         command_id: u32,
         byte_count: usize,
     ) AllocatorError![]align(constants.max_alignment) u8 {
-        if (self.current_index < self.blocks.items.len) {
-            const previous = &self.blocks.items[self.current_index];
-            std.debug.assert(previous.remaining() >= @sizeOf(u32));
-            std.mem.writeInt(u32, previous.bytes[previous.len..][0..4], constants.end_of_block, .little);
-        }
         const requested = std.math.add(usize, byte_count, constants.worst_case_additional_size) catch
             return error.CopyExtentOutOfRange;
         try self.appendNewBlock(requested);
@@ -186,6 +216,17 @@ pub const Allocator = struct {
         // holds it yet, so it is released here rather than on the floor.
         errdefer self.allocator.free(bytes);
         try self.blocks.append(self.allocator, .{ .bytes = bytes, .len = 0 });
+        const previous_index = self.current_index;
+        if (previous_index < self.blocks.items.len - 1) {
+            const previous = &self.blocks.items[previous_index];
+            std.debug.assert(previous.remaining() >= @sizeOf(u32));
+            std.mem.writeInt(
+                u32,
+                previous.bytes[previous.len..][0..4],
+                constants.end_of_block,
+                .little,
+            );
+        }
         self.current_index = self.blocks.items.len - 1;
     }
 
@@ -233,12 +274,11 @@ fn freeBlocks(allocator: std.mem.Allocator, blocks: *Blocks) void {
 /// stream rule that refuses a run too large to count.
 pub const AllocatorError = std.mem.Allocator.Error || errors.CommandValidationError;
 
-/// The cursor over a finished stream.
+/// An owning cursor for raw command-block storage, not resource lifetime leases.
 ///
-/// Dawn's `CommandIterator` returns the blocks to the pool in
-/// `MakeEmptyAsDataWasDestroyed` (`CommandAllocator.cpp:124-132`), which it
-/// calls after `FreeCommands` has released every `Ref`. The port has no refs
-/// to release, so `deinit` is the whole epilogue.
+/// Dawn frees command references before returning blocks to its pool
+/// (`CommandAllocator.cpp:124-132`). Here pass usages own canonical leases.
+/// Finished and bundle consumers use BorrowedIterator to keep those owners intact.
 pub const Iterator = struct {
     allocator: std.mem.Allocator,
     blocks: Blocks = .empty,
@@ -287,23 +327,25 @@ pub const Iterator = struct {
     /// step over its eight-byte slot, moving to the next block when the tag
     /// is the end-of-block sentinel.
     ///
-    /// A raw id that is neither a tag nor a sentinel ends the walk. Dawn's
-    /// stream is one it wrote, so an unknown id is a corruption it can assert
-    /// on; the port's stream is input at M18, and stopping is the only answer
-    /// that cannot read past the end.
-    pub fn nextTag(self: *Iterator) ?commands.Tag {
-        const raw = self.nextRawTag() orelse return null;
-        return std.enums.fromInt(commands.Tag, raw);
+    /// Exhaustion is distinct from malformed framing and unknown command IDs.
+    pub fn nextTag(self: *Iterator) errors.Error!?commands.Tag {
+        const raw = try self.nextRawTag() orelse return null;
+        return std.enums.fromInt(commands.Tag, raw) orelse error.InvalidCommandTag;
     }
 
-    fn nextRawTag(self: *Iterator) ?u32 {
+    fn nextRawTag(self: *Iterator) errors.Error!?u32 {
         while (self.block_index < self.blocks.items.len) {
             const block = &self.blocks.items[self.block_index];
-            if (block.len - self.offset < @sizeOf(u32)) {
+            if (block.len > block.bytes.len or self.offset > block.len) {
+                return error.CommandStreamTruncated;
+            }
+            const remaining = block.len - self.offset;
+            if (remaining == 0) {
                 self.block_index += 1;
                 self.offset = 0;
                 continue;
             }
+            if (remaining < constants.max_alignment) return error.CommandStreamTruncated;
             const id = std.mem.readInt(u32, block.bytes[self.offset..][0..4], .little);
             if (id == constants.end_of_block) {
                 self.block_index += 1;
@@ -330,7 +372,7 @@ pub const Iterator = struct {
     /// behind a payload, behind the additional-data sentinel.
     pub fn nextData(self: *Iterator, comptime T: type, count: usize) errors.Error![]T {
         comptime std.debug.assert(@alignOf(T) <= constants.max_alignment);
-        const id = self.nextRawTag() orelse return error.CommandStreamTruncated;
+        const id = try self.nextRawTag() orelse return error.CommandStreamTruncated;
         // Dawn asserts this (`CommandAllocator.h:180`). The port refuses it:
         // a run that does not follow its payload is the one corruption the
         // framing can detect, and a decoder is where input is refused.
@@ -354,7 +396,10 @@ pub const Iterator = struct {
         // The cursor steps by the alignment only, as `carve` writes, so the
         // bytes it names keep the block's alignment.
         std.debug.assert(@rem(self.offset, constants.max_alignment) == 0);
-        const aligned_size = std.mem.alignForward(usize, byte_count, constants.max_alignment);
+        if (block.len > block.bytes.len or self.offset > block.len) return null;
+        const padded = std.math.add(usize, byte_count, constants.max_alignment - 1) catch
+            return null;
+        const aligned_size = padded & ~(constants.max_alignment - 1);
         if (block.len - self.offset < aligned_size) return null;
         const out: []align(constants.max_alignment) u8 = @alignCast(
             block.bytes[self.offset..][0..byte_count],
@@ -372,3 +417,167 @@ pub const Iterator = struct {
         return total;
     }
 };
+
+/// A cursor borrows an owner's command blocks and leases.
+/// The owner must outlive every read. Cursor cleanup releases no storage or references.
+pub const BorrowedIterator = struct {
+    iterator: Iterator,
+
+    pub fn deinit(self: *BorrowedIterator) void {
+        self.iterator.blocks = .empty;
+        self.iterator.reset();
+    }
+
+    pub fn reset(self: *BorrowedIterator) void {
+        self.iterator.reset();
+    }
+
+    pub fn nextTag(self: *BorrowedIterator) errors.Error!?commands.Tag {
+        return self.iterator.nextTag();
+    }
+
+    pub fn nextCommand(self: *BorrowedIterator, comptime T: type) errors.Error!*T {
+        return self.iterator.nextCommand(T);
+    }
+
+    pub fn nextData(self: *BorrowedIterator, comptime T: type, count: usize) errors.Error![]T {
+        return self.iterator.nextData(T, count);
+    }
+};
+
+test "borrowed cursors reset and discard views without consuming stream storage" {
+    var writer = try Allocator.init(std.testing.allocator, 4096);
+    defer writer.deinit();
+    const command = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    command.* = .{ .vertex_count = 7, .instance_count = 1, .first_vertex = 0, .first_instance = 0 };
+    var owner = Iterator.init(std.testing.allocator, writer.acquireBlocks());
+    defer owner.deinit();
+    var first: BorrowedIterator = .{ .iterator = Iterator.init(std.testing.allocator, owner.blocks) };
+    var second: BorrowedIterator = .{ .iterator = Iterator.init(std.testing.allocator, owner.blocks) };
+    defer second.deinit();
+    try std.testing.expectEqual(@as(?commands.Tag, .draw), try first.nextTag());
+    try std.testing.expectEqual(@as(u32, 7), (try first.nextCommand(commands.DrawCmd)).vertex_count);
+    first.deinit();
+    first.deinit();
+    try std.testing.expectEqual(@as(?commands.Tag, null), try first.nextTag());
+    try std.testing.expectEqual(@as(?commands.Tag, .draw), try second.nextTag());
+    _ = try second.nextCommand(commands.DrawCmd);
+    second.reset();
+    try std.testing.expectEqual(@as(?commands.Tag, .draw), try second.nextTag());
+}
+
+test "combined command data allocation refuses overflow without changing blocks" {
+    var writer = try Allocator.init(std.testing.allocator, 4096);
+    defer writer.deinit();
+    _ = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    const previous_len = writer.blocks.items[0].len;
+    try std.testing.expectError(error.CopyExtentOutOfRange, writer.allocateCommandWithData(
+        commands.SetImmediatesCmd,
+        @intFromEnum(commands.Tag.set_immediates),
+        std.math.maxInt(usize),
+    ));
+    try std.testing.expectEqual(previous_len, writer.blocks.items[0].len);
+    try std.testing.expectEqual(@as(usize, 1), writer.blocks.items.len);
+}
+
+test "failed combined allocation leaves the prior block tail and cursor unchanged" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var writer = try Allocator.init(failing.allocator(), 4096);
+    defer writer.deinit();
+    const draw = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    draw.* = .{ .vertex_count = 9, .instance_count = 1, .first_vertex = 0, .first_instance = 0 };
+    const before_len = writer.blocks.items[0].len;
+    const before_index = writer.current_index;
+    @memset(writer.blocks.items[0].bytes[before_len..][0..4], 0x5a);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, writer.allocateCommandWithData(
+        commands.SetImmediatesCmd,
+        @intFromEnum(commands.Tag.set_immediates),
+        8192,
+    ));
+    try std.testing.expectEqual(before_len, writer.blocks.items[0].len);
+    try std.testing.expectEqual(before_index, writer.current_index);
+    try std.testing.expectEqualSlices(u8, &.{ 0x5a, 0x5a, 0x5a, 0x5a }, writer.blocks.items[0].bytes[before_len..][0..4]);
+    var cursor = Iterator.init(failing.allocator(), writer.acquireBlocks());
+    defer cursor.deinit();
+    try std.testing.expectEqual(@as(?commands.Tag, .draw), try cursor.nextTag());
+    try std.testing.expectEqual(@as(u32, 9), (try cursor.nextCommand(commands.DrawCmd)).vertex_count);
+    try std.testing.expectEqual(@as(?commands.Tag, null), try cursor.nextTag());
+}
+
+test "combined record publishes its full byte run in the existing block" {
+    var writer = try Allocator.init(std.testing.allocator, 4096);
+    defer writer.deinit();
+    const record = try writer.allocateCommandWithData(
+        commands.SetImmediatesCmd,
+        @intFromEnum(commands.Tag.set_immediates),
+        5,
+    );
+    record.command.* = .{ .offset = 0, .size = 5 };
+    @memcpy(record.data, "bytes");
+    const second = try writer.allocateCommandWithData(
+        commands.SetImmediatesCmd,
+        @intFromEnum(commands.Tag.set_immediates),
+        0,
+    );
+    second.command.* = .{ .offset = 0, .size = 0 };
+    try std.testing.expectEqual(@as(usize, 1), writer.blocks.items.len);
+    var owner = Iterator.init(std.testing.allocator, writer.acquireBlocks());
+    defer owner.deinit();
+    try std.testing.expectEqual(@as(?commands.Tag, .set_immediates), try owner.nextTag());
+    _ = try owner.nextCommand(commands.SetImmediatesCmd);
+    try std.testing.expectEqualStrings("bytes", try owner.nextData(u8, 5));
+    try std.testing.expectEqual(@as(?commands.Tag, .set_immediates), try owner.nextTag());
+    _ = try owner.nextCommand(commands.SetImmediatesCmd);
+    try std.testing.expectEqual(@as(usize, 0), (try owner.nextData(u8, 0)).len);
+    try std.testing.expectEqual(@as(?commands.Tag, null), try owner.nextTag());
+}
+
+test "borrowed cursor rejects invalid block bounds before reading payload bytes" {
+    var writer = try Allocator.init(std.testing.allocator, 4096);
+    defer writer.deinit();
+    _ = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    var owner = Iterator.init(std.testing.allocator, writer.acquireBlocks());
+    defer owner.deinit();
+    owner.blocks.items[0].len = owner.blocks.items[0].bytes.len + 1;
+    var cursor: BorrowedIterator = .{ .iterator = Iterator.init(std.testing.allocator, owner.blocks) };
+    defer cursor.deinit();
+    try std.testing.expectError(error.CommandStreamTruncated, cursor.nextTag());
+    try std.testing.expectEqual(@as(usize, 0), cursor.iterator.offset);
+}
+
+fn testCombinedAllocationFailures(allocator: std.mem.Allocator) !void {
+    var writer = try Allocator.init(allocator, 4096);
+    defer writer.deinit();
+    for (0..9) |_| {
+        const before_count = writer.blocks.items.len;
+        const before_index = writer.current_index;
+        const before_len = if (before_count == 0) 0 else writer.blocks.items[before_index].len;
+        if (before_count != 0) {
+            @memset(writer.blocks.items[before_index].bytes[before_len..][0..4], 0x5a);
+        }
+        const record = writer.allocateCommandWithData(
+            commands.SetImmediatesCmd,
+            @intFromEnum(commands.Tag.set_immediates),
+            4096,
+        ) catch |err| {
+            try std.testing.expectEqual(before_count, writer.blocks.items.len);
+            try std.testing.expectEqual(before_index, writer.current_index);
+            if (before_count != 0) {
+                try std.testing.expectEqual(before_len, writer.blocks.items[before_index].len);
+                try std.testing.expectEqualSlices(u8, &.{ 0x5a, 0x5a, 0x5a, 0x5a }, writer.blocks.items[before_index].bytes[before_len..][0..4]);
+            }
+            return err;
+        };
+        record.command.* = .{ .offset = 0, .size = 4096 };
+        @memset(record.data, 0);
+    }
+}
+
+test "combined allocation byte and block-list failures leave existing records intact" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testCombinedAllocationFailures,
+        .{},
+    );
+}

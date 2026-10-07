@@ -16,10 +16,8 @@
 //! A twelfth row, or an eleventh renamed, has to change this file, which is the
 //! point of a census.
 //!
-//! **What this file does not claim.** It does not claim a physical device.
-//! `ReifyDefaultLimits`, `ValidateLimits`, `ApplyLimitTiers` and the rest of
-//! the eight are `CombinedLimits` mutations against reported limits, and M8 is
-//! the first milestone with one.
+//! Reification regressions cover physical bounds, explicit requests, undefined
+//! sentinels, optional compatibility metadata, and deterministic refusal.
 
 const std = @import("std");
 const dusk = @import("dusk");
@@ -261,4 +259,400 @@ test "a required limit the device cannot beat is refused" {
         error.RequiredLimitIsWorseThanSupported,
         limits.checkLimit(.alignment, 256, 100),
     );
+}
+
+test "required limits are reified with maximum and alignment directions" {
+    var offered = limits.defaultLimits(.core);
+    offered.v1.max_compute_invocations_per_workgroup = 1024;
+    offered.v1.min_uniform_buffer_offset_alignment = 64;
+    const required: limits.CombinedLimits = .{ .v1 = .{
+        .max_compute_invocations_per_workgroup = 512,
+        .min_uniform_buffer_offset_alignment = 128,
+    } };
+    const effective = try limits.reify(offered, .core, required);
+    try std.testing.expectEqual(@as(u32, 512), effective.v1.max_compute_invocations_per_workgroup);
+    try std.testing.expectEqual(@as(u32, 128), effective.v1.min_uniform_buffer_offset_alignment);
+    try std.testing.expectEqual(offered.compatibility, effective.compatibility);
+}
+
+test "undefined requests retain physically bounded defaults" {
+    var offered = limits.defaultLimits(.core);
+    offered.v1.max_compute_workgroup_size_x = 64;
+    offered.v1.min_storage_buffer_offset_alignment = 512;
+    offered.compatibility = null;
+    const effective = try limits.reify(offered, .core, .{ .v1 = .{} });
+    try std.testing.expectEqual(@as(u32, 64), effective.v1.max_compute_workgroup_size_x);
+    try std.testing.expectEqual(@as(u32, 512), effective.v1.min_storage_buffer_offset_alignment);
+    try std.testing.expectEqual(@as(?api.CompatibilityModeLimits, null), effective.compatibility);
+}
+
+test "required limits refuse unsupported directions and invalid alignment deterministically" {
+    const offered = limits.defaultLimits(.core);
+    try std.testing.expectError(error.RequiredLimitIsWorseThanSupported, limits.reify(offered, .core, .{
+        .v1 = .{ .max_compute_invocations_per_workgroup = 257 },
+    }));
+    try std.testing.expectError(error.RequiredLimitIsWorseThanSupported, limits.reify(offered, .core, .{
+        .v1 = .{ .min_uniform_buffer_offset_alignment = 128 },
+    }));
+    try std.testing.expectError(error.RequiredAlignmentIsNotPowerOfTwo, limits.reify(offered, .core, .{
+        .v1 = .{ .min_uniform_buffer_offset_alignment = 300 },
+    }));
+    var no_compatibility = offered;
+    no_compatibility.compatibility = null;
+    try std.testing.expectError(error.CompatibilityLimitsUnsupported, limits.reify(no_compatibility, .core, .{
+        .v1 = .{},
+        .compatibility = .{ .max_storage_buffers_in_vertex_stage = 1 },
+    }));
+}
+
+test "every accepted required field survives device limit reification" {
+    inline for (limits.rows) |row| {
+        const name = @tagName(row.field);
+        var offered = limits.defaultLimits(.core);
+        var required: limits.CombinedLimits = .{ .v1 = .{}, .compatibility = .{} };
+        const value = limits.defaultValue(row.field, .core) + 1;
+        switch (row.scope) {
+            .v1 => {
+                const requested = if (row.class == .alignment) 512 else value;
+                @field(offered.v1, name) = @intCast(if (row.class == .alignment) 256 else value + 1);
+                @field(required.v1, name) = @intCast(requested);
+                const effective = try limits.reify(offered, .core, required);
+                try std.testing.expectEqual(@field(required.v1, name), @field(effective.v1, name));
+            },
+            .compat => {
+                @field(offered.compatibility.?, name) = @intCast(value + 1);
+                @field(required.compatibility.?, name) = @intCast(value);
+                const effective = try limits.reify(offered, .core, required);
+                try std.testing.expectEqual(
+                    @field(required.compatibility.?, name),
+                    @field(effective.compatibility.?, name),
+                );
+            },
+        }
+    }
+}
+
+// Explicit queried records keep these tests independent of the WebGPU defaults.
+fn queriedNativeCaps() dusk.engine.vulkan_device.PhysicalDevice {
+    var device: dusk.engine.vulkan_device.PhysicalDevice = .{
+        .handle = null,
+        .properties = std.mem.zeroes(@FieldType(dusk.engine.vulkan_device.PhysicalDevice, "properties")),
+        .features = std.mem.zeroes(@FieldType(dusk.engine.vulkan_device.PhysicalDevice, "features")),
+        .memory_properties = std.mem.zeroes(@FieldType(dusk.engine.vulkan_device.PhysicalDevice, "memory_properties")),
+        .max_buffer_size = 1024 * 1024 * 1024,
+        .queue_families = &.{},
+        .max_per_set_descriptors = 4096,
+    };
+    device.features.robustBufferAccess = 1;
+    device.features.imageCubeArray = 1;
+    device.features.independentBlend = 1;
+    device.features.depthBiasClamp = 1;
+    device.features.fullDrawIndexUint32 = 1;
+    device.features.fragmentStoresAndAtomics = 1;
+    device.features.vertexPipelineStoresAndAtomics = 1;
+    device.features.sampleRateShading = 1;
+    device.features.shaderUniformBufferArrayDynamicIndexing = 1;
+    device.features.shaderStorageBufferArrayDynamicIndexing = 1;
+    device.features.shaderSampledImageArrayDynamicIndexing = 1;
+    device.features.shaderStorageImageArrayDynamicIndexing = 1;
+    device.features.textureCompressionBC = 1;
+    const queried = &device.properties.limits;
+    queried.maxComputeSharedMemorySize = 32768;
+    queried.maxComputeWorkGroupInvocations = 1024;
+    queried.maxComputeWorkGroupSize = .{ 1024, 1024, 64 };
+    queried.maxComputeWorkGroupCount = .{ 65535, 65535, 65535 };
+    queried.maxStorageBufferRange = 256 * 1024 * 1024;
+    queried.maxUniformBufferRange = 65536;
+    queried.maxDescriptorSetUniformBuffersDynamic = 16;
+    queried.maxDescriptorSetStorageBuffersDynamic = 8;
+    queried.maxPerStageDescriptorSampledImages = 64;
+    queried.maxPerStageDescriptorSamplers = 64;
+    queried.maxPerStageDescriptorUniformBuffers = 64;
+    queried.maxPerStageDescriptorStorageBuffers = 64;
+    queried.maxPerStageDescriptorStorageImages = 64;
+    queried.maxDescriptorSetSampledImages = 192;
+    queried.maxDescriptorSetSamplers = 192;
+    queried.maxDescriptorSetUniformBuffers = 192;
+    queried.maxDescriptorSetStorageBuffers = 192;
+    queried.maxDescriptorSetStorageImages = 192;
+    queried.maxPerStageResources = 1024;
+    queried.maxFragmentCombinedOutputResources = 1024;
+    queried.maxColorAttachments = 8;
+    queried.maxFragmentOutputAttachments = 8;
+    queried.maxVertexOutputComponents = 128;
+    queried.maxFragmentInputComponents = 128;
+    queried.maxImageDimension1D = 16384;
+    queried.maxImageDimension2D = 16384;
+    queried.maxImageDimension3D = 4096;
+    queried.maxImageArrayLayers = 2048;
+    queried.maxFramebufferWidth = 16384;
+    queried.maxFramebufferHeight = 16384;
+    queried.maxPushConstantsSize = 512;
+    queried.maxBoundDescriptorSets = 8;
+    queried.minUniformBufferOffsetAlignment = 64;
+    queried.minStorageBufferOffsetAlignment = 64;
+    queried.maxVertexInputBindings = 32;
+    queried.maxVertexInputAttributes = 32;
+    queried.maxVertexInputBindingStride = 4096;
+    return device;
+}
+
+test "native offered frontend capacities bound accepted explicit requests" {
+    var device = queriedNativeCaps();
+    const capacities = dusk.engine.native_capabilities;
+    const offered = capacities.offeredLimits(&device);
+    try std.testing.expectEqual(@as(u32, 4), offered.v1.max_bind_groups);
+    try std.testing.expectEqual(@as(u32, 256), offered.v1.max_immediate_size);
+    try std.testing.expectEqual(@as(u32, 1000), offered.v1.max_bindings_per_bind_group);
+    try std.testing.expectEqual(@as(u32, 36), offered.v1.max_bind_groups_plus_vertex_buffers);
+    const effective = try limits.reify(offered, .core, .{ .v1 = .{
+        .max_bind_groups = 4,
+        .max_immediate_size = 256,
+        .max_bindings_per_bind_group = 1000,
+    } });
+    try std.testing.expectEqual(@as(u32, 4), effective.v1.max_bind_groups);
+    try std.testing.expectEqual(@as(u32, 256), effective.v1.max_immediate_size);
+    try std.testing.expectEqual(@as(u32, 1000), effective.v1.max_bindings_per_bind_group);
+    inline for (.{
+        .{ "max_bind_groups", 5 },
+        .{ "max_immediate_size", 257 },
+        .{ "max_bindings_per_bind_group", 1001 },
+    }) |request| {
+        var required: limits.CombinedLimits = .{ .v1 = .{} };
+        @field(required.v1, request[0]) = request[1];
+        try std.testing.expectError(
+            error.RequiredLimitIsWorseThanSupported,
+            limits.reify(offered, .core, required),
+        );
+    }
+    device.properties.limits.maxBoundDescriptorSets = 3;
+    device.properties.limits.maxPushConstantsSize = 128;
+    device.max_per_set_descriptors = 999;
+    const smaller = capacities.offeredLimits(&device);
+    try std.testing.expectEqual(@as(u32, 3), smaller.v1.max_bind_groups);
+    try std.testing.expectEqual(@as(u32, 128), smaller.v1.max_immediate_size);
+    try std.testing.expectEqual(@as(u32, 999), smaller.v1.max_bindings_per_bind_group);
+    try std.testing.expectEqual(@as(u32, 35), smaller.v1.max_bind_groups_plus_vertex_buffers);
+}
+
+test "native per-stage descriptor offers fit three independent visibility budgets" {
+    inline for (.{
+        .{
+            "max_sampled_textures_per_shader_stage",
+            "maxDescriptorSetSampledImages",
+            "maxPerStageDescriptorSampledImages",
+        },
+        .{ "max_samplers_per_shader_stage", "maxDescriptorSetSamplers", "maxPerStageDescriptorSamplers" },
+        .{
+            "max_uniform_buffers_per_shader_stage",
+            "maxDescriptorSetUniformBuffers",
+            "maxPerStageDescriptorUniformBuffers",
+        },
+        .{
+            "max_storage_buffers_per_shader_stage",
+            "maxDescriptorSetStorageBuffers",
+            "maxPerStageDescriptorStorageBuffers",
+        },
+        .{
+            "max_storage_textures_per_shader_stage",
+            "maxDescriptorSetStorageImages",
+            "maxPerStageDescriptorStorageImages",
+        },
+    }) |category| {
+        var device = queriedNativeCaps();
+        @field(device.properties.limits, category[1]) = 98;
+        const offered = dusk.engine.native_capabilities.offeredLimits(&device);
+        const count = @field(offered.v1, category[0]);
+        try std.testing.expectEqual(@as(u32, 32), count);
+        // Vertex, fragment, and compute can each expose distinct bindings.
+        try std.testing.expect(count * 3 <= @field(device.properties.limits, category[1]));
+        var required: limits.CombinedLimits = .{ .v1 = .{} };
+        @field(required.v1, category[0]) = count;
+        const effective = try limits.reify(offered, .core, required);
+        try std.testing.expectEqual(count, @field(effective.v1, category[0]));
+        @field(required.v1, category[0]) = count + 1;
+        try std.testing.expectError(
+            error.RequiredLimitIsWorseThanSupported,
+            limits.reify(offered, .core, required),
+        );
+        @field(device.properties.limits, category[2]) = 17;
+        const stage_limited = dusk.engine.native_capabilities.offeredLimits(&device);
+        try std.testing.expectEqual(@as(u32, 17), @field(stage_limited.v1, category[0]));
+        @field(device.properties.limits, category[1]) = 2;
+        const exhausted = dusk.engine.native_capabilities.offeredLimits(&device);
+        try std.testing.expectEqual(@as(u32, 0), @field(exhausted.v1, category[0]));
+    }
+}
+
+test "native combined stage budget reserves fragment color attachments" {
+    var device = queriedNativeCaps();
+    const queried = &device.properties.limits;
+    queried.maxPerStageResources = 49;
+    const offered = dusk.engine.native_capabilities.offeredLimits(&device);
+    const resources = offered.v1.max_sampled_textures_per_shader_stage +
+        offered.v1.max_uniform_buffers_per_shader_stage +
+        offered.v1.max_storage_buffers_per_shader_stage +
+        offered.v1.max_storage_textures_per_shader_stage;
+    try std.testing.expect(resources + offered.v1.max_color_attachments <= 49);
+    try std.testing.expectEqual(@as(u32, 16), offered.v1.max_sampled_textures_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 12), offered.v1.max_uniform_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 8), offered.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 4), offered.v1.max_storage_textures_per_shader_stage);
+    // Standalone samplers do not count toward maxPerStageResources.
+    try std.testing.expectEqual(@as(u32, 64), offered.v1.max_samplers_per_shader_stage);
+    try std.testing.expectEqual(
+        offered.v1.max_storage_buffers_per_shader_stage,
+        offered.compatibility.?.max_storage_buffers_in_vertex_stage,
+    );
+    try std.testing.expectEqual(
+        offered.v1.max_storage_textures_per_shader_stage,
+        offered.compatibility.?.max_storage_textures_in_fragment_stage,
+    );
+    queried.maxPerStageResources = 48;
+    var mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(mapped.feature_levels.core);
+    try std.testing.expect(mapped.feature_levels.compatibility);
+    queried.maxPerStageResources = 47;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expectEqual(@as(u32, 15), mapped.limits.v1.max_sampled_textures_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 11), mapped.limits.v1.max_uniform_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 7), mapped.limits.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 3), mapped.limits.v1.max_storage_textures_per_shader_stage);
+    try std.testing.expect(!mapped.feature_levels.core);
+    try std.testing.expect(!mapped.feature_levels.compatibility);
+    queried.maxPerStageResources = 8;
+    const exhausted = dusk.engine.native_capabilities.offeredLimits(&device);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_sampled_textures_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_uniform_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_storage_textures_per_shader_stage);
+}
+
+test "native core feature level requires queried cube arrays and robustness" {
+    var device = queriedNativeCaps();
+    var mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(mapped.feature_levels.core);
+    try std.testing.expect(mapped.feature_levels.compatibility);
+    try std.testing.expect(mapped.supported_features.isEnabled(.core_features_and_limits));
+    device.features.imageCubeArray = 0;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    try std.testing.expect(mapped.feature_levels.compatibility);
+    try std.testing.expect(!mapped.supported_features.isEnabled(.core_features_and_limits));
+    device.features.imageCubeArray = 1;
+    device.features.robustBufferAccess = 0;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    try std.testing.expect(!mapped.feature_levels.compatibility);
+    device.features.robustBufferAccess = 1;
+    device.properties.limits.maxDescriptorSetSampledImages = 47;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    try std.testing.expect(!mapped.feature_levels.compatibility);
+}
+
+test "native combined descriptor arithmetic handles queried u32 maxima" {
+    var device = queriedNativeCaps();
+    const queried = &device.properties.limits;
+    queried.maxPerStageDescriptorSampledImages = std.math.maxInt(u32);
+    queried.maxPerStageDescriptorUniformBuffers = std.math.maxInt(u32);
+    queried.maxPerStageDescriptorStorageBuffers = std.math.maxInt(u32);
+    queried.maxPerStageDescriptorStorageImages = std.math.maxInt(u32);
+    queried.maxDescriptorSetSampledImages = std.math.maxInt(u32);
+    queried.maxDescriptorSetUniformBuffers = std.math.maxInt(u32);
+    queried.maxDescriptorSetStorageBuffers = std.math.maxInt(u32);
+    queried.maxDescriptorSetStorageImages = std.math.maxInt(u32);
+    queried.maxPerStageResources = std.math.maxInt(u32);
+    const offered = dusk.engine.native_capabilities.offeredLimits(&device);
+    const count = @as(u64, offered.v1.max_sampled_textures_per_shader_stage) +
+        offered.v1.max_uniform_buffers_per_shader_stage +
+        offered.v1.max_storage_buffers_per_shader_stage +
+        offered.v1.max_storage_textures_per_shader_stage +
+        offered.v1.max_color_attachments;
+    try std.testing.expect(count <= std.math.maxInt(u32));
+    inline for (.{
+        "max_sampled_textures_per_shader_stage",
+        "max_uniform_buffers_per_shader_stage",
+        "max_storage_buffers_per_shader_stage",
+        "max_storage_textures_per_shader_stage",
+    }) |field| {
+        try std.testing.expect(@as(u64, @field(offered.v1, field)) * 3 <= std.math.maxInt(u32));
+    }
+}
+
+test "native fragment storage offers reserve the combined color output budget" {
+    var device = queriedNativeCaps();
+    device.properties.limits.maxFragmentCombinedOutputResources = 20;
+    var mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expectEqual(@as(u32, 8), mapped.limits.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 4), mapped.limits.v1.max_storage_textures_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 8), mapped.limits.v1.max_color_attachments);
+    try std.testing.expect(mapped.feature_levels.core);
+    device.properties.limits.maxFragmentCombinedOutputResources = 19;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expectEqual(@as(u32, 7), mapped.limits.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 3), mapped.limits.v1.max_storage_textures_per_shader_stage);
+    try std.testing.expect(!mapped.feature_levels.core);
+    try std.testing.expect(!mapped.feature_levels.compatibility);
+    device.properties.limits.maxFragmentCombinedOutputResources = 7;
+    const exhausted = dusk.engine.native_capabilities.offeredLimits(&device);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_storage_buffers_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.v1.max_storage_textures_per_shader_stage);
+    try std.testing.expectEqual(@as(u32, 7), exhausted.v1.max_color_attachments);
+}
+
+test "native core admission refuses each missing required hardware feature" {
+    inline for (.{
+        "robustBufferAccess",
+        "imageCubeArray",
+        "independentBlend",
+        "depthBiasClamp",
+        "fullDrawIndexUint32",
+        "sampleRateShading",
+        "fragmentStoresAndAtomics",
+        "vertexPipelineStoresAndAtomics",
+        "shaderUniformBufferArrayDynamicIndexing",
+        "shaderStorageBufferArrayDynamicIndexing",
+        "shaderSampledImageArrayDynamicIndexing",
+        "shaderStorageImageArrayDynamicIndexing",
+    }) |field| {
+        var device = queriedNativeCaps();
+        var mapped = dusk.engine.native_capabilities.fromNative(&device);
+        try std.testing.expect(mapped.feature_levels.core);
+        try std.testing.expect(mapped.supported_features.isEnabled(.core_features_and_limits));
+        @field(device.features, field) = 0;
+        mapped = dusk.engine.native_capabilities.fromNative(&device);
+        try std.testing.expect(!mapped.feature_levels.core);
+        try std.testing.expect(!mapped.supported_features.isEnabled(.core_features_and_limits));
+        @field(device.features, field) = 1;
+        mapped = dusk.engine.native_capabilities.fromNative(&device);
+        try std.testing.expect(mapped.feature_levels.core);
+        try std.testing.expect(mapped.supported_features.isEnabled(.core_features_and_limits));
+    }
+}
+
+test "native core compression baseline requires BC or both ETC2 and ASTC" {
+    var device = queriedNativeCaps();
+    var mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(mapped.feature_levels.core);
+    try std.testing.expect(!mapped.supported_features.isEnabled(.texture_compression_bc));
+    device.features.textureCompressionBC = 0;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    device.features.textureCompressionETC2 = 1;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    device.features.textureCompressionASTC_LDR = 1;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(mapped.feature_levels.core);
+    try std.testing.expect(!mapped.supported_features.isEnabled(.texture_compression_etc2));
+    try std.testing.expect(!mapped.supported_features.isEnabled(.texture_compression_astc));
+    device.features.textureCompressionETC2 = 0;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(!mapped.feature_levels.core);
+    device.features.textureCompressionASTC_LDR = 0;
+    device.features.textureCompressionBC = 1;
+    mapped = dusk.engine.native_capabilities.fromNative(&device);
+    try std.testing.expect(mapped.feature_levels.core);
+    try std.testing.expect(!mapped.supported_features.isEnabled(.texture_compression_bc));
 }
