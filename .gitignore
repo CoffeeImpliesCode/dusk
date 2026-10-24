@@ -1,11 +1,17 @@
 # Jujutsu VCS
 .jj/
 
-# Zig caches. On this host both are symlinks to local disk (see AGENTS.md), so
-# the patterns must match the link itself, not a directory behind it.
+# Zig caches and build outputs
 .zig-cache
 zig-pkg
 zig-out/
+.zig-global-cache
+*.o
+/external-semaphore-dup
+__pycache__/
+*.pyc
+.ruff_cache/
+result*
 
 # codedb index snapshot
 codedb.snapshot
