@@ -240,16 +240,18 @@ pub fn assertErrorSetNamed(comptime ErrorSet: type, comptime named: []const Erro
 
 /// Destroys an instance the loader created, reporting rather than unwrapping.
 ///
-/// `destroy_instance` is filled by `loadInstanceProcs`
-/// (`src/vk/dispatch.zig:462`-`:465`) and not by `loadGlobalProcs`, which is why
-/// this reads the field where the loader has written it rather than taking a
-/// binding at the top of `VulkanInstance.create`. A loader that created an
-/// instance and cannot destroy it has failed in a way nothing here can undo, and
-/// that is the error the caller reads.
+/// `loadInstanceProcs` fills `destroy_instance`, but its allocation can fail
+/// before that field is written. Resolve the core instance command directly in
+/// that case, without allocating, so cleanup preserves the original failure.
 fn destroyInstance(global: *const dispatch.GlobalProcs, handle: vulkan.VkInstance) ProcError!void {
-    const destroy_instance = global.destroy_instance orelse
-        return error.MissingGlobalProc;
-    destroy_instance(handle, null);
+    var destroy_instance = global.destroy_instance;
+    if (destroy_instance == null) {
+        const get_instance_proc_addr = global.get_instance_proc_addr orelse
+            return error.MissingGlobalProc;
+        destroy_instance = @ptrCast(get_instance_proc_addr(handle, "vkDestroyInstance"));
+    }
+    const destroy = destroy_instance orelse return error.MissingInstanceProc;
+    destroy(handle, null);
 }
 
 /// One opened Vulkan library, one `VkInstance`, and the two proc tiers that

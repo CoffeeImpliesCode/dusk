@@ -11,6 +11,8 @@ handle export. Adapter and physical-device lists retain their instance.
 Devices retain their adapter, physical-device record, and instance.
 Do not move these owners while children borrow them.
 List and instance teardown refuse live children without consuming ownership.
+Instance creation destroys a created Vulkan instance if dispatch-table allocation
+fails. The original allocation error is returned after cleanup.
 
 Native resources have separate user references, dependency references, and GPU
 leases. A resource factory returns a user reference. `Device.retain` creates
