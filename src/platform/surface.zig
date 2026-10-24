@@ -2,17 +2,10 @@
 //!
 //! **What this file is.** The port of `src/dawn/native/Surface.{h,cpp}` and of
 //! `vulkan::CreateVulkanSurface` (`src/dawn/native/vulkan/SwapChainVk.cpp:633`)
-//! at Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`.
+//! at Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
-//! **What this file does not claim.** It does not claim a window system. The
-//! host has no `DISPLAY` and no `WAYLAND_DISPLAY` (`docs/50-verification.md:30-31`,
-//! grade A), and no configuration on this machine carries both
-//! `VK_KHR_display` and `VK_EXT_headless_surface`
-//! (`docs/50-verification.md:44-82`). So the observable result of the whole
-//! path is negative, and this file exists to make that negative exact: a
-//! declared error, a message that names what is missing, and an out-slot that
-//! provably was not written.
+//! **What this file does not claim.** It does not implement a window system.
+//! Missing display or extension support is reported as a declared error.
 //!
 //! **The message diverges from upstream on purpose.** Dawn's terminal error is
 //! `"Unsupported surface type (%s) for Vulkan."` (`SwapChainVk.cpp:774`), which
@@ -35,9 +28,7 @@ const x11_functions = @import("x11_functions.zig");
 
 /// Every rule the surface path can report.
 ///
-/// `AGENTS.md` §3 asks that the set be swept at compile time by an `inline for`
-/// over `@typeInfo`, so every member is named by a test. The sweep lives in
-/// `test/surface_headless.zig`.
+/// Every member is named by the sweep in `test/surface_headless.zig`.
 pub const SurfaceError = error{
     /// The host has no display server, so no `VkSurfaceKHR` can be created.
     ///
@@ -93,8 +84,8 @@ pub const SurfaceError = error{
 /// The message for each rule.
 ///
 /// A `switch` over the whole set, so a member added to `SurfaceError` without a
-/// message is a compile error rather than a runtime hole. `AGENTS.md` §2: the
-/// text is the port's own, because Dawn has no message id at this revision.
+/// message is a compile error rather than a runtime hole. The text is the
+/// port's own, because Dawn has no message id at this revision.
 pub fn message(err: SurfaceError) []const u8 {
     return switch (err) {
         error.SurfaceUnavailable => "no window system for a VkSurfaceKHR: DISPLAY and WAYLAND_DISPLAY are " ++
@@ -166,8 +157,8 @@ pub const SourceType = enum {
     /// back. Upstream has no such table; `AbslFormatConvert` is one-way
     /// (`Surface.cpp:59`).
     pub fn fromName(text: []const u8) ?SourceType {
-        inline for (@typeInfo(SourceType).@"enum".fields) |field| {
-            const source_type: SourceType = @enumFromInt(field.value);
+        inline for (@typeInfo(SourceType).@"enum".field_values) |field_value| {
+            const source_type: SourceType = @fromBackingInt(@intCast(field_value));
             if (std.mem.eql(u8, text, source_type.name())) return source_type;
         }
         return null;
@@ -224,8 +215,7 @@ pub const Source = union(SourceType) {
 /// and a capability cache (`Surface.h:146-161`). Every one of those belongs to
 /// a milestone that has not landed: the label is the M2 API binding
 /// (`Surface.cpp:675`), the device and the swap chains are M9, and the cache is
-/// the adapter query at M9. Their rows are in the M20 table of
-/// `docs/40-plan.md` with the milestone that lands them named.
+/// the adapter query.
 pub const Surface = struct {
     source: Source,
 
@@ -348,8 +338,7 @@ pub const Request = struct {
 /// `SType` with a `#if` per platform and a `default` that reports
 /// `"Unsupported sType (%s)"` (`:214-215`). The port's switch has no `#if`: it
 /// is over the nine-member `SourceType`, so every arm is visible whether or not
-/// this target compiles it, and `AGENTS.md` §2's "no unused parameter" has
-/// nothing to spare.
+/// this target compiles it.
 pub fn validateSurfaceDescriptor(request: Request) SurfaceError!void {
     const source = request.source orelse return error.DescriptorChainEmpty;
     if (request.color_management) return error.SurfaceColorManagementUnsupported;
@@ -481,11 +470,11 @@ comptime {
     // checks that the nine names are distinct. A collision would make
     // `fromName` return the wrong type, and the string is what a consumer
     // matches on, so it is a compile-time claim here.
-    for (@typeInfo(SourceType).@"enum".fields, 0..) |left, left_index| {
-        const left_type: SourceType = @enumFromInt(left.value);
-        for (@typeInfo(SourceType).@"enum".fields, 0..) |right, right_index| {
+    for (@typeInfo(SourceType).@"enum".field_values, 0..) |left_value, left_index| {
+        const left_type: SourceType = @fromBackingInt(@intCast(left_value));
+        for (@typeInfo(SourceType).@"enum".field_values, 0..) |right_value, right_index| {
             if (left_index == right_index) continue;
-            const right_type: SourceType = @enumFromInt(right.value);
+            const right_type: SourceType = @fromBackingInt(@intCast(right_value));
             if (!std.mem.eql(u8, left_type.name(), right_type.name())) continue;
             @compileError("two surface types share a name");
         }

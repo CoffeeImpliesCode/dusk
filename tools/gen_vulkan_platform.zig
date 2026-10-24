@@ -26,8 +26,8 @@ pub const Error = error{
     OutputWriteFailed,
 };
 pub const android_headers = [_][]const u8{
-    "jni.h", "android/native_window.h", "android/hardware_buffer.h",
-    "android/native_activity.h", "android/looper.h", "android/log.h",
+    "jni.h",                     "android/native_window.h", "android/hardware_buffer.h",
+    "android/native_activity.h", "android/looper.h",        "android/log.h",
 };
 
 pub fn parseArguments(arguments: []const []const u8) Error!Configuration {

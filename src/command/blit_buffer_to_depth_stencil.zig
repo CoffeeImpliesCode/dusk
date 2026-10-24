@@ -12,8 +12,8 @@
 //!
 //! It does not claim a shader. `kBlitRG8ToDepthShaders` (`:56`),
 //! `kBlitStencilShaderCommon` (`:111`) and both pipeline factories (`:161`,
-//! `:197`) emit and compile WGSL, and `AGENTS.md` §3.2 forbids a WGSL front end
-//! in the library. Neither `BlitBufferToDepth` (`:563`) nor
+//! `:197`) emit and compile WGSL, which this library does not accept.
+//! Neither `BlitBufferToDepth` (`:563`) nor
 //! `BlitBufferToStencil` (`:627`) lands with it either: each creates an
 //! intermediate `RG8Uint` or `R8Uint` texture, and a texture is an `engine`
 //! object. `BlitStagingBufferToDepth` (`:525`) and

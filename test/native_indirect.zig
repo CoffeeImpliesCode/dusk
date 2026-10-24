@@ -330,7 +330,7 @@ fn drawConsumers(f: *Fixture, index32: bool) !void {
         try encoder.writeBuffer(.{ .buffer = try arguments.ref(&guard), .data = &input });
         try encoder.writeBuffer(.{ .buffer = try counts.ref(&guard), .data = &count_bytes });
         try encoder.writeBuffer(.{ .buffer = try indices.ref(&guard), .data = &index_bytes });
-        const padding = [_]u8{sentinel} ** 544;
+        const padding: [544]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
     }
     var pass = try f.device.beginRenderPass(gpa, io, &encoder, .{
@@ -383,7 +383,7 @@ fn drawConsumers(f: *Fixture, index32: bool) !void {
         }
         try pass.end(io, &guard);
         try encoder.copyTextureToBuffer(.{
-            .source = .{ .texture = target, .format = @intFromEnum(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 12, .height = 1, .depth_or_array_layers = 1 } },
+            .source = .{ .texture = target, .format = @backingInt(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 12, .height = 1, .depth_or_array_layers = 1 } },
             .destination = .{ .buffer = try readback.ref(&guard), .blocks_per_row = 64, .rows_per_image = 1 },
             .copy_size = .{ .width = 12, .height = 1, .depth_or_array_layers = 1 },
         });
@@ -428,7 +428,7 @@ fn dispatchConsumers(f: *Fixture) !void {
         var guard = core.ObjectGuard.lockUncancelable(io, f.device.coreDevice().arena.objectList());
         defer guard.unlock(io);
         try encoder.writeBuffer(.{ .buffer = try arguments.ref(&guard), .data = &input });
-        const padding = [_]u8{sentinel} ** 224;
+        const padding: [224]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
         for (vectors, 0..) |_, index| {
             try encoder.writeBuffer(.{ .buffer = try output.ref(&guard), .data = &.{ 0, 0, 0, 0 } });
@@ -477,7 +477,7 @@ fn dispatchProducerConsumer(f: *Fixture) !void {
     {
         var guard = core.ObjectGuard.lockUncancelable(io, f.device.coreDevice().arena.objectList());
         defer guard.unlock(io);
-        const padding = [_]u8{sentinel} ** 40;
+        const padding: [40]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
         try encoder.writeBuffer(.{ .buffer = try arguments.ref(&guard), .data = padding[0..32] });
         try encoder.writeBuffer(.{ .buffer = try output.ref(&guard), .data = &.{ 0, 0, 0, 0 } });
@@ -579,7 +579,7 @@ fn drawKernelVectors(f: *Fixture) !void {
         var parameter_bytes: [32]u8 = @splat(0);
         putWords(&parameter_bytes, 0, &.{count});
         try encoder.writeBuffer(.{ .buffer = try parameters.ref(&guard), .data = &parameter_bytes });
-        const padding = [_]u8{sentinel} ** output_size;
+        const padding: [output_size]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try output.ref(&guard), .data = &padding });
         var pass = try encoder.beginComputePass(.{});
         defer pass.deinit();
@@ -655,7 +655,7 @@ fn dispatchKernelVectors(f: *Fixture) !void {
             var parameter_bytes: [16]u8 = undefined;
             putWords(&parameter_bytes, 0, &.{ @intCast(2 + index * 4), 3, 4, 5 });
             try encoder.writeBuffer(.{ .buffer = try parameters.ref(&guard), .data = &parameter_bytes });
-            const padding = [_]u8{sentinel} ** 16;
+            const padding: [16]u8 = @splat(sentinel);
             try encoder.writeBuffer(.{ .buffer = try output.ref(&guard), .data = &padding });
             var pass = try encoder.beginComputePass(.{});
             defer pass.deinit();
@@ -706,7 +706,7 @@ fn crossingDispatchConsumer(f: *Fixture, offset: usize) !void {
         defer guard.unlock(io);
         try encoder.writeBuffer(.{ .buffer = try arguments.ref(&guard), .data = &input });
         try encoder.writeBuffer(.{ .buffer = try output.ref(&guard), .data = &.{ 0, 0, 0, 0 } });
-        const padding = [_]u8{sentinel} ** 520;
+        const padding: [520]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
         var pass = try encoder.beginComputePass(.{});
         defer pass.deinit();
@@ -774,7 +774,7 @@ fn crossingDrawConsumers(f: *Fixture) !void {
         defer guard.unlock(io);
         try encoder.writeBuffer(.{ .buffer = try arguments.ref(&guard), .data = &input });
         try encoder.writeBuffer(.{ .buffer = try indices.ref(&guard), .data = &index_bytes });
-        const padding = [_]u8{sentinel} ** 1280;
+        const padding: [1280]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
     }
     var pass = try f.device.beginRenderPass(gpa, io, &encoder, .{
@@ -799,7 +799,7 @@ fn crossingDrawConsumers(f: *Fixture) !void {
         try pass.drawIndexedIndirect(.{ .indirect_buffer = try arguments.ref(&guard), .indirect_buffer_size = 1024, .indirect_offset = 252 });
         try pass.end(io, &guard);
         try encoder.copyTextureToBuffer(.{
-            .source = .{ .texture = target, .format = @intFromEnum(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 } },
+            .source = .{ .texture = target, .format = @backingInt(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 } },
             .destination = .{ .buffer = try readback.ref(&guard), .blocks_per_row = 64, .rows_per_image = 1 },
             .copy_size = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 },
         });

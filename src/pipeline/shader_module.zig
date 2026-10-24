@@ -4,7 +4,7 @@
 //! Ports `native/ShaderModule.{h,cpp}`. `docs/10-architecture.md` "Shaders"
 //! fixes the flow: SPIR-V bytes, then `spirv.validate`, then `spirv.reflect`,
 //! then a `vkCreateShaderModule` on the caller's own words. Dawn cannot take
-//! that third step (`docs/02-dawn-design.md` §4.9), so Dawn's record is built
+//! that third step, so Dawn's record is built
 //! around a `tint::Program` it must keep alive (`ShaderModule.h:113-118`) and
 //! every reflection row in it reads that program (`ShaderModule.cpp:795`
 //! and `:1314`). The port has the words, and nothing here holds a program.
@@ -18,7 +18,7 @@
 //! arena that would own one is the device layer's (`core.Device.create`,
 //! `src/core/device.zig:70`), so a module is a value whose lifetime belongs to
 //! whoever created it and `destroy` gives it back. It does not claim a WGSL
-//! front end (`AGENTS.md` §3.2), so `Descriptor` has no source-text field and
+//! front end, so `Descriptor` has no source-text field and
 //! no `strictMath` (`ShaderModule.cpp:1997`): there is no compiler whose
 //! arithmetic could be strict.
 
@@ -38,8 +38,7 @@ pub const Messages = shader_compilation_messages.Messages;
 ///
 /// The words are borrowed for the module's whole life, and the label with
 /// them: `ShaderModule.cpp:1821` copies the caller's words into
-/// `mOriginalSpirv`, and the port reads the caller's slice instead, which is
-/// one of the copies `AGENTS.md` §3.2 says the port does without.
+/// `mOriginalSpirv`; the port reads the caller's slice instead.
 pub const Descriptor = struct {
     label: ?[]const u8 = null,
 
@@ -72,8 +71,7 @@ pub const CreateError = spirv.ErrorOrOutOfMemory || shader_module_vk.CreateError
 
 /// The content hash upstream keeps in `mHash` and reads through
 /// `ComputeContentHash` (`ShaderModule.cpp:2006-2011`).
-/// `docs/20-dependencies.md` "Containers, hashing, sorting" gives hashing to
-/// the standard library, so there is no dependency entry for it.
+/// Hashing uses the standard library.
 pub const ContentHash = [std.crypto.hash.sha3.Sha3_256.digest_length]u8;
 
 /// One entry point and what it declares. The name borrows `ShaderModule.words`;
@@ -174,10 +172,8 @@ pub const ShaderModule = struct {
             // `self.vk_module` is non-null in this branch, and the assert above
             // pairs the two, so `device` is non-null here too. A missing proc is
             // not what a null device would mean: that is a broken loader and
-            // `shader_module_vk.destroy` reports it as a typed error
-            // (`AGENTS.md` §3.1). The claim is stated rather than unwrapped
-            // blind, as `AGENTS.md` §3 asks of an `unreachable` and as
-            // `removeFreeBlock` states its own (`src/memory/buddy_allocator.zig:342`).
+            // `shader_module_vk.destroy` reports a missing proc as a typed error.
+            // A live handle must still have the device that created it.
             const owner = device orelse @panic("a module with a handle has no device");
             try shader_module_vk.destroy(owner, handle);
         }

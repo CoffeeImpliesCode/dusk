@@ -18,9 +18,9 @@ const capabilities = @import("surface_capabilities.zig");
 pub fn sourceFromDescriptor(descriptor: *const api.descriptors.SurfaceDescriptorChain) platform.SurfaceError!platform.Source {
     if (descriptor.surface_color_management != null) return error.SurfaceColorManagementUnsupported;
     var arm_count: usize = 0;
-    inline for (@typeInfo(api.descriptors.SurfaceDescriptorChain).@"struct".fields) |field| {
-        if (!std.mem.eql(u8, field.name, "label") and !std.mem.eql(u8, field.name, "surface_color_management")) {
-            if (@field(descriptor, field.name) != null) arm_count += 1;
+    inline for (@typeInfo(api.descriptors.SurfaceDescriptorChain).@"struct".field_names) |field_name| {
+        if (!std.mem.eql(u8, field_name, "label") and !std.mem.eql(u8, field_name, "surface_color_management")) {
+            if (@field(descriptor, field_name) != null) arm_count += 1;
         }
     }
     if (arm_count == 0) return error.DescriptorChainEmpty;
@@ -110,7 +110,7 @@ fn nativeSurfaceLocked(
     cached: *vulkan_device.VulkanInstance,
 ) SurfaceCreateError!*NativeSurface {
     guard.assertOwns(surface.header.tracking);
-    const index = @intFromEnum(cached.icd);
+    const index = @backingInt(cached.icd);
     if (surface.native_surfaces[index]) |header| {
         const native: *NativeSurface = @fieldParentPtr("header", header);
         std.debug.assert(native.cached_instance == cached);
@@ -333,10 +333,16 @@ pub fn releaseSurfaceReference(
 pub const SurfaceOperationError = SurfaceCreateError || core.HandleError ||
     device_mod.OperationError || native_device.CleanupError || capabilities.QueryError ||
     swapchain.Error || swapchain.BridgeSubmitError || SurfaceReleaseError || error{
-        InvalidOwner, DeviceSurfaceInstanceMismatch, SurfaceQueueFamilyUnsupported,
-        SurfaceAlreadyAcquired, SurfaceTransitionInProgress, SurfaceNotConfigured,
-        SurfaceNotAcquired, SurfaceStale, SurfaceGenerationExhausted,
-    };
+    InvalidOwner,
+    DeviceSurfaceInstanceMismatch,
+    SurfaceQueueFamilyUnsupported,
+    SurfaceAlreadyAcquired,
+    SurfaceTransitionInProgress,
+    SurfaceNotConfigured,
+    SurfaceNotAcquired,
+    SurfaceStale,
+    SurfaceGenerationExhausted,
+};
 
 fn deviceForChain(chain: *swapchain.Swapchain) error{InvalidOwner}!*Device {
     return @import("native_async_handles.zig").resourceOwner(&chain.header);
@@ -633,7 +639,11 @@ pub fn getCurrentTexture(
     var guard = try core.ObjectGuard.lock(io, operation.device.core.arena.objectList());
     defer guard.unlock(io);
     const texture = try operation.device.createSwapchainTextureLocked(
-        allocator, io, &guard, operation.chain, token,
+        allocator,
+        io,
+        &guard,
+        operation.chain,
+        token,
     );
     out.* = .{ .texture = texture, .status = status };
 }
@@ -719,11 +729,11 @@ fn markSurfaceLost(io: std.Io, surface: *Surface, chain: *swapchain.Swapchain, d
 
 fn mapDrainError(err: native_device.CleanupError) SurfaceReleaseError {
     if (err == error.Canceled) return error.Canceled;
-    inline for (@typeInfo(dispatch.Error).error_set.?) |member| {
-        if (err == @field(anyerror, member.name)) return @errorCast(err);
+    inline for (@typeInfo(dispatch.Error).error_set.error_names.?) |member_name| {
+        if (err == @field(anyerror, member_name)) return @errorCast(err);
     }
-    inline for (@typeInfo(dispatch.LoadError).error_set.?) |member| {
-        if (err == @field(anyerror, member.name)) return @errorCast(err);
+    inline for (@typeInfo(dispatch.LoadError).error_set.error_names.?) |member_name| {
+        if (err == @field(anyerror, member_name)) return @errorCast(err);
     }
     return error.SurfaceInUse;
 }

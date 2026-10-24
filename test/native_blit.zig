@@ -365,9 +365,9 @@ fn target(
     for (colors, 0..) |view, index| {
         views[index] = view;
         value.color_attachments_set |= @as(u8, 1) << @intCast(index);
-        value.color_formats[index] = @intFromEnum(view.format);
+        value.color_formats[index] = @backingInt(view.format);
     }
-    if (depth_stencil) |view| value.depth_stencil_format = @intFromEnum(view.format);
+    if (depth_stencil) |view| value.depth_stencil_format = @backingInt(view.format);
     const native_context = device.native.?;
     const attachment = try engine.native_attachment_store.create(
         allocator,
@@ -904,7 +904,7 @@ fn exerciseCallerState(
         var state: engine.command_buffer.ProgrammablePassState = .{};
         try state.onSetPipeline(&guard, .render, pipeline.native);
         try state.descriptor_sets.set(&guard, 0, group.native, &.{});
-        const tracker_context: @typeInfo(@TypeOf(engine.command_buffer.ProgrammablePassState.syncAndRun)).@"fn".params[1].type.? = .{
+        const tracker_context: @typeInfo(@TypeOf(engine.command_buffer.ProgrammablePassState.syncAndRun)).@"fn".param_types[1].? = .{
             .guard = &guard,
             .procs = procs,
             .command_buffer = batch.recording.command_buffer,
@@ -1237,7 +1237,7 @@ fn exerciseFrontendStencil(
             .texture = image,
             .origin = .{ .x = 1, .y = 1, .z = 0 },
             .aspect = .stencil_only,
-            .format = @intFromEnum(api.TextureFormat.depth24_plus_stencil8),
+            .format = @backingInt(api.TextureFormat.depth24_plus_stencil8),
             .dimension = ._2d,
             .extent = .{ .width = 6, .height = 6, .depth_or_array_layers = 1 },
         };
@@ -2455,7 +2455,7 @@ fn exerciseSparseClear(
         var value: dusk.command.attachment_state.AttachmentState = .{};
         value.sample_count = 1;
         value.color_attachments_set = @as(u8, 1) << 7;
-        value.color_formats[7] = @intFromEnum(api.TextureFormat.rgba8_uint);
+        value.color_formats[7] = @backingInt(api.TextureFormat.rgba8_uint);
         const native_context = device.native.?;
         const attachments = try engine.native_attachment_store.create(
             allocator,
@@ -2490,7 +2490,7 @@ fn exerciseSparseClear(
                     try std.testing.expect(cached.pipeline.native.vk_pipeline != null);
                     try std.testing.expectEqual(@as(u8, 128), cached.key.attachments.?.value.color_attachments_set);
                     for (cached.key.attachments.?.value.color_formats[0..7]) |format| {
-                        try std.testing.expectEqual(@intFromEnum(api.TextureFormat.undefined_), format);
+                        try std.testing.expectEqual(@backingInt(api.TextureFormat.undefined_), format);
                     }
                     slot_seven_found = true;
                 }

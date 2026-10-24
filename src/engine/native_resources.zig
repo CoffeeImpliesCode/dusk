@@ -1896,12 +1896,12 @@ fn containsRefs(comptime T: type) bool {
     if (T == commands.Ref or T == *attachments.CanonicalAttachmentState) return true;
     return switch (@typeInfo(T)) {
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (containsRefs(field.type)) break :blk true;
+            inline for (info.field_types) |Field| if (containsRefs(Field)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
             if (info.tag_type == null) break :blk false;
-            inline for (info.fields) |field| if (containsRefs(field.type)) break :blk true;
+            inline for (info.field_types) |Field| if (containsRefs(Field)) break :blk true;
             break :blk false;
         },
         .optional => |info| containsRefs(info.child),
@@ -1925,14 +1925,14 @@ fn collectValueLocked(pending: *PendingUses, guard: *const core.ObjectGuard, dev
         return pending.addRootLocked(guard, device, root);
     }
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.fields) |field| {
-            if (comptime containsRefs(field.type)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, Field| {
+            if (comptime containsRefs(Field)) {
                 try collectValueLocked(
                     pending,
                     guard,
                     device,
-                    @field(value, field.name),
-                    fieldRefKind(field.name, expected),
+                    @field(value, field_name),
+                    fieldRefKind(field_name, expected),
                 );
             }
         },
@@ -2210,7 +2210,7 @@ test "pending malformed late command leaves recording and earlier root untouched
     defer root.header.releaseUserLocked(&guard, io) catch unreachable;
     var writer = try command_allocator.Allocator.init(gpa, 4096);
     defer writer.deinit();
-    const timestamp = try writer.allocateCommand(commands.WriteTimestampCmd, @intFromEnum(commands.Tag.write_timestamp));
+    const timestamp = try writer.allocateCommand(commands.WriteTimestampCmd, @backingInt(commands.Tag.write_timestamp));
     timestamp.* = .{
         .query_set = @ptrCast(@as(*query_set.QuerySet, @fieldParentPtr("header", &root.header))),
         .query_index = 0,

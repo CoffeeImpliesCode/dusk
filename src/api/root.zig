@@ -15,8 +15,7 @@
 //!
 //! **Why this file is hand-written.** Zig 0.16 has no `usingnamespace`, so a
 //! root in front of a generated aggregate can only name what it re-exports.
-//! Naming it here keeps `src/api/api.zig` a file no human edits, which is what
-//! `AGENTS.md` §3.1 asks of a generated file and what lets `zig build generate`
+//! Naming it here keeps `src/api/api.zig` generated and lets `zig build generate`
 //! rewrite it. The cost is one line per generated export: a name added to
 //! `dawn.json` needs a line in the list below before a consumer can reach it.
 //!

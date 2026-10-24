@@ -12,8 +12,8 @@
 //! **The set.** Dawn holds 222 entry points, and this file declares
 //! 205 of them: 6 global, 41 instance, 158 device.
 //!
-//! `AGENTS.md` §3.1 makes this table the only door to Vulkan, so an
-//! entry point that is not a field here cannot be called.
+//! This table is the core Vulkan entry-point boundary.
+//! An entry point outside the table cannot be called through it.
 //! `tools/gen_dispatch.zig` names every row it left out and why.
 //!
 //! **What it is not.** It calls nothing. A field holds a
@@ -325,10 +325,9 @@ pub const LoadError = error{
 /// One entry point: the dispatch field the loader fills, and the Vulkan
 /// symbol it looks up.
 ///
-/// A row is the whole contract between the generator and the loader. The
-/// field name is the symbol without its `vk` prefix in snake_case, which is
-/// the spelling `docs/40-plan.md` §3.2 uses for every row, and the comptime
-/// block at the end of this file checks it.
+/// A row is the contract between the generator and the loader.
+/// The field name is the symbol without its `vk` prefix in snake_case.
+/// The comptime block at the end of this file checks that spelling.
 pub const ProcRow = struct {
     field: []const u8,
     symbol: [:0]const u8,
@@ -366,11 +365,11 @@ pub const EnabledInstanceExts = packed struct(u64) {
     bits: u64 = 0,
 
     pub fn has(self: EnabledInstanceExts, ext: InstanceExt) bool {
-        return self.bits & @intFromEnum(ext) != 0;
+        return self.bits & @backingInt(ext) != 0;
     }
 
     pub fn with(self: EnabledInstanceExts, ext: InstanceExt) EnabledInstanceExts {
-        return .{ .bits = self.bits | @intFromEnum(ext) };
+        return .{ .bits = self.bits | @backingInt(ext) };
     }
 };
 pub const InstanceProcGroup = ProcGroup(InstanceExt);
@@ -420,11 +419,11 @@ pub const EnabledDeviceExts = packed struct(u64) {
     bits: u64 = 0,
 
     pub fn has(self: EnabledDeviceExts, ext: DeviceExt) bool {
-        return self.bits & @intFromEnum(ext) != 0;
+        return self.bits & @backingInt(ext) != 0;
     }
 
     pub fn with(self: EnabledDeviceExts, ext: DeviceExt) EnabledDeviceExts {
-        return .{ .bits = self.bits | @intFromEnum(ext) };
+        return .{ .bits = self.bits | @backingInt(ext) };
     }
 };
 pub const DeviceProcGroup = ProcGroup(DeviceExt);
@@ -952,6 +951,10 @@ pub fn loadInstanceProcs(
     gpa: std.mem.Allocator,
     options: InstanceLoadOptions,
 ) LoadError!*InstanceProcs {
+    const procs = try gpa.create(InstanceProcs);
+    errdefer gpa.destroy(procs);
+    procs.* = std.mem.zeroes(InstanceProcs);
+
     const get_instance_proc_addr = options.get_instance_proc_addr orelse
         return error.MissingInstanceProc;
     const instance = options.instance;
@@ -964,11 +967,6 @@ pub fn loadInstanceProcs(
         if (address == null) return error.MissingInstanceProc;
         @field(options.global, row.field) = asProc(Proc, address);
     }
-
-    // Allocation failure must leave vkDestroyInstance available for rollback.
-    const procs = try gpa.create(InstanceProcs);
-    errdefer gpa.destroy(procs);
-    procs.* = std.mem.zeroes(InstanceProcs);
 
     inline for (instance_fields) |row| {
         const Proc = @FieldType(InstanceProcs, row.field);
@@ -1108,7 +1106,7 @@ pub const injected_device_oom_result: vulkan.VkResult =
 ///
 /// `zig translate-c` gives `VkResult` as `c_int`
 /// (`docs/30-port-design.md` §5.1), so this union and `Error` are the only
-/// place a driver code becomes a Zig value (`AGENTS.md` §3.1). The tags
+/// place a driver code becomes a Zig value. The tags
 /// other than `success` and `error` are outcomes the caller must branch
 /// on: `VK_INCOMPLETE` says call again, `VK_SUBOPTIMAL_KHR` says recreate
 /// the swapchain, and none of them is a failure.
@@ -1306,8 +1304,7 @@ comptime {
         &device_swapchain_fields,
     });
 
-    // Every field name is the snake_case of its symbol, which is the spelling
-    // `docs/40-plan.md` §3.2 uses for every row.
+    // Every field name is the snake_case of its symbol.
     var buffer: [longest_symbol_len]u8 = undefined;
     for (all_rows) |rows| {
         for (rows) |row| {
@@ -1351,17 +1348,17 @@ comptime {
         error.Unknown,
         error.Unknown,
     };
-    for (@typeInfo(Error).error_set.?) |member| {
+    for (@typeInfo(Error).error_set.error_names.?) |member_name| {
         var reachable = false;
         for (produced) |err| {
-            reachable = reachable or std.mem.eql(u8, @errorName(err), member.name);
+            reachable = reachable or std.mem.eql(u8, @errorName(err), member_name);
         }
-        const from_else = std.mem.eql(u8, member.name, "UnexpectedOutcome") or
-            std.mem.eql(u8, member.name, "UnknownResult");
+        const from_else = std.mem.eql(u8, member_name, "UnexpectedOutcome") or
+            std.mem.eql(u8, member_name, "UnknownResult");
         if (!reachable and !from_else) {
             @compileError(std.fmt.comptimePrint(
                 "Error.{s} has no result code",
-                .{member.name},
+                .{member_name},
             ));
         }
     }
@@ -1373,26 +1370,26 @@ fn assertFieldsCovered(
     comptime rows: []const []const ProcRow,
 ) void {
     @setEvalBranchQuota(coverage_branch_quota);
-    const fields = @typeInfo(Procs).@"struct".fields;
-    for (fields) |field| {
+    const field_names = @typeInfo(Procs).@"struct".field_names;
+    for (field_names) |field_name| {
         var found: usize = 0;
         for (rows) |row_list| {
             for (row_list) |row| {
-                if (std.mem.eql(u8, row.field, field.name)) found += 1;
+                if (std.mem.eql(u8, row.field, field_name)) found += 1;
             }
         }
         if (found != 1) {
             @compileError(std.fmt.comptimePrint(
                 "{s}.{s} is named by {d} rows",
-                .{ @typeName(Procs), field.name, found },
+                .{ @typeName(Procs), field_name, found },
             ));
         }
     }
     for (rows) |row_list| {
         for (row_list) |row| {
             var named = false;
-            for (fields) |field| {
-                named = named or std.mem.eql(u8, row.field, field.name);
+            for (field_names) |field_name| {
+                named = named or std.mem.eql(u8, row.field, field_name);
             }
             if (!named) {
                 @compileError(std.fmt.comptimePrint(

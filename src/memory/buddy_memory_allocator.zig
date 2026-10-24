@@ -381,8 +381,8 @@ test "constructor and request invariants have distinct failures" {
 
 test "every parent error rolls reserved offsets back before retry" {
     const allocator = std.testing.allocator;
-    inline for (@typeInfo(heap_allocator.Error).error_set.?) |member| {
-        var parent: TestParent = .{ .fail_error = @field(heap_allocator.Error, member.name) };
+    inline for (@typeInfo(heap_allocator.Error).error_set.error_names.?) |member_name| {
+        var parent: TestParent = .{ .fail_error = @field(heap_allocator.Error, member_name) };
         var memory = try BuddyMemoryAllocator.init(allocator, parent.interface(), .{
             .max_system_size_byte_count = 64,
             .memory_block_size_byte_count = 64,

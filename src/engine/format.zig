@@ -31,7 +31,7 @@ pub fn aspectIndex(aspect: Aspect) AspectError!u8 {
         .color, .depth, .plane_0, .combined_depth_stencil => 0,
         .stencil, .plane_1 => 1,
         .plane_2 => 2,
-        else => if (@popCount(@intFromEnum(aspect)) > 1)
+        else => if (@popCount(@backingInt(aspect)) > 1)
             error.MultipleAspects
         else
             error.InvalidAspect,
@@ -39,7 +39,7 @@ pub fn aspectIndex(aspect: Aspect) AspectError!u8 {
 }
 
 pub fn aspectCount(aspects: Aspect) u8 {
-    return if (aspects == .stencil) 2 else @popCount(@intFromEnum(aspects));
+    return if (aspects == .stencil) 2 else @popCount(@backingInt(aspects));
 }
 
 pub const TexelBlockInfo = struct { byte_size: u32 = 0, width: u32 = 0, height: u32 = 0 };
@@ -148,10 +148,10 @@ pub const Format = struct {
         return self.aspects == .color;
     }
     pub fn hasDepth(self: *const Format) bool {
-        return @intFromEnum(self.aspects) & @intFromEnum(Aspect.depth) != 0;
+        return @backingInt(self.aspects) & @backingInt(Aspect.depth) != 0;
     }
     pub fn hasStencil(self: *const Format) bool {
-        return @intFromEnum(self.aspects) & @intFromEnum(Aspect.stencil) != 0;
+        return @backingInt(self.aspects) & @backingInt(Aspect.stencil) != 0;
     }
     pub fn hasDepthOrStencil(self: *const Format) bool {
         return self.hasDepth() or self.hasStencil();
@@ -166,7 +166,7 @@ pub const Format = struct {
         };
     }
     pub fn isMultiPlanar(self: *const Format) bool {
-        return @intFromEnum(self.aspects) & 56 != 0;
+        return @backingInt(self.aspects) & 56 != 0;
     }
     pub fn copyCompatibleWith(self: *const Format, other: *const Format) bool {
         return self.base_format == other.base_format;
@@ -186,8 +186,8 @@ pub const Format = struct {
         const selected: Aspect = switch (aspect) {
             .undefined_ => return error.InvalidAspect,
             .all => self.aspects,
-            .depth_only => @enumFromInt(@intFromEnum(self.aspects) & 2),
-            .stencil_only => @enumFromInt(@intFromEnum(self.aspects) & 4),
+            .depth_only => @fromBackingInt(@intCast(@backingInt(self.aspects) & 2)),
+            .stencil_only => @fromBackingInt(@intCast(@backingInt(self.aspects) & 4)),
         };
         if (selected == .none) return error.AspectNotPresent;
         return selected;
@@ -197,7 +197,7 @@ pub const Format = struct {
         aspect: Aspect,
     ) AspectError!*const AspectInfo {
         const index = try aspectIndex(aspect);
-        if (@intFromEnum(self.aspects) & @intFromEnum(aspect) == 0) {
+        if (@backingInt(self.aspects) & @backingInt(aspect) == 0) {
             return error.AspectNotPresent;
         }
         std.debug.assert(index < aspectCount(self.aspects));
@@ -210,7 +210,7 @@ pub fn computeFormatIndex(format: api.TextureFormat) ?usize {
     return computeCanonicalFormatIndex(fromApiFormat(format));
 }
 pub fn computeCanonicalFormatIndex(format: FormatName) ?usize {
-    const tag = @intFromEnum(format);
+    const tag = @backingInt(format);
     if (tag > 0 and tag <= webgpu_format_count) return tag - 1;
     if (tag >= dawn_format_base and tag < dawn_format_base + dawn_format_count) {
         return webgpu_format_count + tag - dawn_format_base;
@@ -218,11 +218,11 @@ pub fn computeCanonicalFormatIndex(format: FormatName) ?usize {
     return null;
 }
 pub fn fromApiFormat(format: api.TextureFormat) FormatName {
-    return @enumFromInt(@intFromEnum(format));
+    return @fromBackingInt(@intCast(@backingInt(format)));
 }
 pub fn toApiFormat(format: FormatName) error{UnrepresentableFormat}!api.TextureFormat {
-    if (@intFromEnum(format) >= dawn_format_base) return error.UnrepresentableFormat;
-    return @enumFromInt(@intFromEnum(format));
+    if (@backingInt(format) >= dawn_format_base) return error.UnrepresentableFormat;
+    return @fromBackingInt(@intCast(@backingInt(format)));
 }
 
 const any_float: SampleTypeSet = .{ .float = true, .unfilterable_float = true };
@@ -255,7 +255,7 @@ fn addFormat(out: *FormatTable, value: Format) void {
     std.debug.assert(out[index].format == .undefined_);
     out[index] = value;
     out[index].index = index;
-    if (@popCount(@intFromEnum(value.aspects)) == 1) {
+    if (@popCount(@backingInt(value.aspects)) == 1) {
         std.debug.assert(value.aspect_info[0].block.byte_size != 0);
         std.debug.assert(texture_bytes_per_row_alignment % value.aspect_info[0].block.byte_size == 0);
     }
@@ -352,7 +352,7 @@ pub fn buildFormatTable(enabled: features.FeaturesSet, out: *FormatTable) void {
             .aspects = row.aspects,
             .component_count = row.components,
             .sub_sampling = row.sub_sampling,
-            .caps = if (row.aspects == @as(Aspect, @enumFromInt(6)))
+            .caps = if (row.aspects == @as(Aspect, @fromBackingInt(@intCast(6))))
                 .{ .renderable = true, .multisample = true }
             else
                 .{},
@@ -387,21 +387,21 @@ const MultiRow = struct {
 const multi_rows = [_]MultiRow{
     .{
         .format = .depth24_plus_stencil8,
-        .aspects = @enumFromInt(6),
+        .aspects = @fromBackingInt(@intCast(6)),
         .components = 2,
         .gate = .always,
         .planes = .{ .depth24_plus, .stencil8, .undefined_ },
     },
     .{
         .format = .depth32_float_stencil8,
-        .aspects = @enumFromInt(6),
+        .aspects = @fromBackingInt(@intCast(6)),
         .components = 2,
         .gate = .{ .feature = .depth32_float_stencil8 },
         .planes = .{ .depth32_float, .stencil8, .undefined_ },
     },
     .{
         .format = .r8_bg8_biplanar420_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e420,
         .gate = .{ .excluded = .dawn_multi_planar_formats },
@@ -409,7 +409,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r8_bg8_biplanar422_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e422,
         .gate = .{ .excluded = .multi_planar_format_nv16 },
@@ -417,7 +417,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r8_bg8_biplanar444_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e444,
         .gate = .{ .feature = .multi_planar_format_nv24 },
@@ -425,7 +425,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r10x6_bg10x6_biplanar420_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e420,
         .gate = .{ .excluded = .multi_planar_format_p010 },
@@ -433,7 +433,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r10x6_bg10x6_biplanar422_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e422,
         .gate = .{ .feature = .multi_planar_format_p210 },
@@ -441,7 +441,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r10x6_bg10x6_biplanar444_unorm,
-        .aspects = @enumFromInt(24),
+        .aspects = @fromBackingInt(@intCast(24)),
         .components = 3,
         .sub_sampling = .e444,
         .gate = .{ .feature = .multi_planar_format_p410 },
@@ -449,7 +449,7 @@ const multi_rows = [_]MultiRow{
     },
     .{
         .format = .r8_bg8_a8_triplanar420_unorm,
-        .aspects = @enumFromInt(56),
+        .aspects = @fromBackingInt(@intCast(56)),
         .components = 4,
         .sub_sampling = .e420,
         .gate = .{ .excluded = .multi_planar_format_nv12a },
@@ -899,25 +899,27 @@ fn computeFormatCapabilities(enabled: features.FeaturesSet, out: *FormatTable) v
 }
 
 comptime {
-    std.debug.assert(@typeInfo(FormatName).@"enum".fields.len == format_count + 1);
+    std.debug.assert(@typeInfo(FormatName).@"enum".field_names.len == format_count + 1);
     std.debug.assert(color_rows.len == 44);
     std.debug.assert(compressed_rows.len == 52);
     std.debug.assert(multi_rows.len == 9);
     std.debug.assert(view_format_pairs.len == 23);
-    for (@typeInfo(api.TextureFormat).@"enum".fields) |field| {
-        std.debug.assert(@intFromEnum(@field(FormatName, field.name)) == field.value);
+    const api_info = @typeInfo(api.TextureFormat).@"enum";
+    for (api_info.field_names, api_info.field_values) |field_name, field_value| {
+        std.debug.assert(@backingInt(@field(FormatName, field_name)) == field_value);
     }
-    for (@typeInfo(SampleTypeBit).@"enum".fields) |field| {
-        if (field.value == 0) continue;
-        const sample = @field(SampleType, field.name);
-        std.debug.assert(field.value == @as(u8, 1) << @intCast(@intFromEnum(sample) - 2));
+    const sample_info = @typeInfo(SampleTypeBit).@"enum";
+    for (sample_info.field_names, sample_info.field_values) |field_name, field_value| {
+        if (field_value == 0) continue;
+        const sample = @field(SampleType, field_name);
+        std.debug.assert(field_value == @as(u8, 1) << @intCast(@backingInt(sample) - 2));
     }
     @setEvalBranchQuota(30000);
     // SAFETY: buildFormatTable initializes each slot, then writes all 109 canonical rows before the proof reads them.
     var proof: FormatTable = undefined;
     buildFormatTable(.{}, &proof);
-    for (@typeInfo(FormatName).@"enum".fields) |field| {
-        const name: FormatName = @enumFromInt(field.value);
+    for (@typeInfo(FormatName).@"enum".field_values) |field_value| {
+        const name: FormatName = @fromBackingInt(@intCast(field_value));
         if (name == .undefined_) continue;
         const index = computeCanonicalFormatIndex(name).?;
         std.debug.assert(proof[index].format == name);
@@ -927,15 +929,15 @@ comptime {
 test "format table contains every canonical row and retained API member" {
     var table: FormatTable = undefined;
     buildFormatTable(.{}, &table);
-    inline for (@typeInfo(FormatName).@"enum".fields) |field| {
-        const name: FormatName = @enumFromInt(field.value);
+    inline for (@typeInfo(FormatName).@"enum".field_values) |field_value| {
+        const name: FormatName = @fromBackingInt(@intCast(field_value));
         if (name == .undefined_) continue;
         const index = computeCanonicalFormatIndex(name).?;
         try std.testing.expectEqual(name, table[index].format);
         try std.testing.expectEqual(index, table[index].index);
     }
-    inline for (@typeInfo(api.TextureFormat).@"enum".fields) |field| {
-        const name: api.TextureFormat = @enumFromInt(field.value);
+    inline for (@typeInfo(api.TextureFormat).@"enum".field_values) |field_value| {
+        const name: api.TextureFormat = @fromBackingInt(@intCast(field_value));
         try std.testing.expectEqual(name != .undefined_, computeFormatIndex(name) != null);
     }
     try std.testing.expectEqual(@as(usize, 109), table.len);
@@ -1024,11 +1026,12 @@ test "planar metadata has explicit internal planes and API conversion errors" {
 }
 
 test "sample type bits retain API positions and undefined is an error" {
-    inline for (@typeInfo(SampleTypeBit).@"enum".fields) |field| {
-        if (field.value != 0) {
-            const sample = @field(SampleType, field.name);
+    const info = @typeInfo(SampleTypeBit).@"enum";
+    inline for (info.field_names, info.field_values) |field_name, field_value| {
+        if (field_value != 0) {
+            const sample = @field(SampleType, field_name);
             try std.testing.expectEqual(
-                @as(u8, field.value),
+                @as(u8, field_value),
                 @as(u8, @bitCast(try sampleTypeBit(sample))),
             );
         }
@@ -1038,7 +1041,7 @@ test "sample type bits retain API positions and undefined is an error" {
 
 test "aspect flags reject empty combined and absent masks" {
     try std.testing.expectError(error.InvalidAspect, aspectIndex(.none));
-    try std.testing.expectError(error.MultipleAspects, aspectIndex(@enumFromInt(6)));
+    try std.testing.expectError(error.MultipleAspects, aspectIndex(@fromBackingInt(@intCast(6))));
     try std.testing.expectEqual(@as(u8, 0), try aspectIndex(.combined_depth_stencil));
     try std.testing.expectEqual(@as(u8, 2), try aspectIndex(.plane_2));
     var table: FormatTable = undefined;

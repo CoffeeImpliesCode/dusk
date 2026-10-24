@@ -3,8 +3,7 @@
 //!
 //! **What this file is.** The port of `vulkan/BindGroupLayoutVk.{h,cpp}` and
 //! `vulkan/PipelineLayoutVk.{h,cpp}` at Dawn
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. Dawn keeps a map from a layout
+//! `32f77c02294310054a660c393feded4bcb3f203c`. Dawn keeps a map from a layout
 //! to its `VkDescriptorSetLayout` and caches one `VkPipelineLayout` per
 //! specialization (`BindGroupLayoutVk.cpp:259`-`:301`, `PipelineLayoutVk.cpp:131`-`:152`).
 //!
@@ -268,7 +267,7 @@ pub fn descriptorBindings(
         }
         allocator.free(bindings);
     }
-    var public_numbers = std.StaticBitSet(layout_internal.max_bindings_per_bind_group).initEmpty();
+    var public_numbers: std.bit_set.Static(layout_internal.max_bindings_per_bind_group) = .empty;
     binding_index = 0;
     while (binding_index < internal.entries.len) {
         const entry = internal.entries[binding_index];
@@ -380,8 +379,7 @@ pub fn createDescriptorSetLayoutFromBindings(
 /// Dawn's own comment says a descriptor set layout is never used by execution
 /// and is destroyed immediately rather than going on the fenced deleter
 /// (`BindGroupLayoutVk.cpp:321`-`:322`). The port destroys it here and returns
-/// the refusal, because `AGENTS.md` §3.1 makes a missing proc a typed error
-/// rather than a trap.
+/// the refusal as a typed error rather than a trap.
 pub fn destroyDescriptorSetLayout(
     procs: *const vk.DeviceProcs,
     device: vulkan.VkDevice,
@@ -451,8 +449,7 @@ pub fn createPipelineLayout(
 
 /// `PipelineLayout::DestroyImpl` (`PipelineLayoutVk.cpp:156`).
 ///
-/// The refusal is typed for the same reason as
-/// `destroyDescriptorSetLayout`'s: `AGENTS.md` §3.1.
+/// A missing entry point is reported as a typed error.
 pub fn destroyPipelineLayout(
     procs: *const vk.DeviceProcs,
     device: vulkan.VkDevice,

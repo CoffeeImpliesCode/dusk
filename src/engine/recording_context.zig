@@ -1,7 +1,7 @@
 //! The per-submit state the replay writes into.
 //!
 //! **What this file is.** `vulkan/CommandRecordingContextVk.{h,cpp}` upstream:
-//! 102 lines and 58 lines, 2 rows (`docs/40-plan.md` §M18). The context is the
+//! 102 lines and 58 lines. The context is the
 //! one object that outlives a single Vulkan call and is shared by every command
 //! buffer in one submit, which is why upstream holds a queue, a command pool
 //! and a semaphore list in it.
@@ -32,7 +32,7 @@ pub const BufferUsage = api.bitmask.BufferUsage;
 /// require a host-visible, persistently mapped allocation.
 pub const k_mappable_buffer_usages: BufferUsage = .{ .map_read = true, .map_write = true };
 
-/// The stages a barrier may name. `AGENTS.md` §2 wants the unit in the name;
+/// The stages a barrier may name.
 /// Vulkan spells the mask `VkPipelineStageFlags`, so the port names the mask
 /// and not the stage.
 pub const StageFlags = vulkan.VkPipelineStageFlags;

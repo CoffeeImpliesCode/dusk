@@ -1,8 +1,7 @@
 //! The adapter: one physical device at one feature level, and the only object
 //! that creates a device.
 //!
-//! Ports `src/dawn/native/Adapter.{h,cpp}`. `docs/40-plan.md` §3.3 `#### M8`
-//! holds the row table.
+//! Ports `src/dawn/native/Adapter.{h,cpp}`.
 //!
 //! Native queue construction belongs to `native_device_context.zig`. The adapter
 //! validates requests and preserves Dawn's successful-creation consumption latch.
@@ -230,18 +229,14 @@ pub const Adapter = struct {
     /// nothing, and every other field must be at or below the adapter's value.
     fn validateRequiredLimits(self: *const Adapter, required: *const api.Limits) Error!void {
         const offered = &self.limits.v1;
-        // `inline for` and not `for`: `std.meta.fields` yields a
-        // `StructField`, whose `type` is a type and so does not exist at
-        // runtime. The skip below is written as a nested `if` rather than as
-        // `continue`, because `continue` in an inline loop is comptime control
-        // flow and the decision to skip is a runtime comparison; Zig rejects
-        // the two in one statement.
-        inline for (std.meta.fields(api.Limits)) |field| {
-            const Field = @FieldType(api.Limits, field.name);
-            const asked: Field = @field(required, field.name);
-            const have: Field = @field(offered, field.name);
+        // Field types are comptime-only. The skip below is a nested `if` rather
+        // than `continue`, because the comparison is evaluated at runtime.
+        const info = @typeInfo(api.Limits).@"struct";
+        inline for (info.field_names, info.field_types) |field_name, Field| {
+            const asked: Field = @field(required, field_name);
+            const have: Field = @field(offered, field_name);
             if (asked != undefinedLimit(Field)) {
-                const minimum = comptime std.mem.startsWith(u8, field.name, "min_");
+                const minimum = comptime std.mem.startsWith(u8, field_name, "min_");
                 if (minimum) {
                     if (asked < have) return error.RequiredLimitAboveAdapterLimit;
                 } else {

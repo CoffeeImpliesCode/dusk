@@ -49,7 +49,7 @@ pub const Group = enum {
     other,
 };
 
-pub const group_count: usize = @typeInfo(Group).@"enum".fields.len;
+pub const group_count: usize = @typeInfo(Group).@"enum".field_names.len;
 
 /// One limit row: `X(scope, class, name, compat, base, tiers...)` from
 /// `Limits.cpp:43-140`.
@@ -244,10 +244,7 @@ pub const rows: [36]Row = .{
         .scope = .compat,
         .class = .maximum,
         .field = .max_storage_textures_in_vertex_stage,
-        // `Limits.cpp:80`. The plan's M8 acceptance at `docs/40-plan.md:363`
-        // and the compatibility table at `docs/40-plan.md:621` cite this line
-        // for `maxStorageBuffersInVertexStage`, which is `Limits.cpp:96`. The
-        // value is 0 in both rows, so no assertion moves; the citation is wrong.
+        // `Limits.cpp:80`.
         .compat = 0,
         .tiers = &.{ 4, 8, 8 },
     },
@@ -273,7 +270,7 @@ pub const rows: [36]Row = .{
         .scope = .compat,
         .class = .maximum,
         .field = .max_storage_buffers_in_fragment_stage,
-        // `Limits.cpp:95`, the value `docs/40-plan.md:364` names.
+        // `Limits.cpp:95`.
         .compat = 4,
         .tiers = &.{ 8, 10, 16 },
     },
@@ -505,7 +502,7 @@ pub fn isLimitUndefined(value: anytype) bool {
 /// The row for one field. Every `Field` member has exactly one row, and the
 /// table asserts it, so this indexes rather than searches.
 pub inline fn fieldOf(field: Field) Row {
-    const index = @intFromEnum(field);
+    const index = @backingInt(field);
     std.debug.assert(index < row_count);
     return rows[index];
 }
@@ -620,13 +617,13 @@ pub fn reify(offered: CombinedLimits, level: FeatureLevel, required: ?CombinedLi
 
 comptime {
     if (row_count != 36) @compileError("the limit table must carry exactly 36 rows");
-    if (@typeInfo(Field).@"enum".fields.len != row_count) {
+    if (@typeInfo(Field).@"enum".field_names.len != row_count) {
         @compileError("every Field member must have exactly one row");
     }
-    if (@typeInfo(api.Limits).@"struct".fields.len != 32) {
+    if (@typeInfo(api.Limits).@"struct".field_names.len != 32) {
         @compileError("api.Limits must carry exactly 32 fields");
     }
-    if (@typeInfo(api.CompatibilityModeLimits).@"struct".fields.len != 4) {
+    if (@typeInfo(api.CompatibilityModeLimits).@"struct".field_names.len != 4) {
         @compileError("api.CompatibilityModeLimits must carry exactly 4 fields");
     }
 
@@ -634,7 +631,7 @@ comptime {
     // neighbouring row and every value would be wrong by an offset no name
     // would show.
     for (rows, 0..) |row, index| {
-        std.debug.assert(@intFromEnum(row.field) == index);
+        std.debug.assert(@backingInt(row.field) == index);
     }
 
     // The two descriptor structs and the table are the same sets of fields. A
@@ -676,14 +673,14 @@ comptime {
     if (maximum_count != 34) @compileError("the table must carry 34 maximum rows");
     if (alignment_count != 2) @compileError("the table must carry 2 alignment rows");
 
-    for (std.meta.fields(api.Limits)) |field| {
-        if (!@hasField(Field, field.name)) {
-            @compileError("api.Limits has a field the table does not: " ++ field.name);
+    for (@typeInfo(api.Limits).@"struct".field_names) |field_name| {
+        if (!@hasField(Field, field_name)) {
+            @compileError("api.Limits has a field the table does not: " ++ field_name);
         }
     }
-    for (std.meta.fields(api.CompatibilityModeLimits)) |field| {
-        if (!@hasField(Field, field.name)) {
-            @compileError("the compat chain has a field the table does not: " ++ field.name);
+    for (@typeInfo(api.CompatibilityModeLimits).@"struct".field_names) |field_name| {
+        if (!@hasField(Field, field_name)) {
+            @compileError("the compat chain has a field the table does not: " ++ field_name);
         }
     }
 
@@ -708,10 +705,10 @@ comptime {
 /// from one visit per row, and `groupTierCount` stays the reader a caller
 /// outside this file uses.
 fn checkGroupTierCounts() void {
-    var carried = [_]bool{false} ** group_count;
-    var tier_counts = [_]usize{0} ** group_count;
+    var carried: [group_count]bool = @splat(false);
+    var tier_counts: [group_count]usize = @splat(0);
     for (rows) |row| {
-        const ordinal = @intFromEnum(row.group);
+        const ordinal = @backingInt(row.group);
         if (carried[ordinal]) {
             std.debug.assert(row.tiers.len == tier_counts[ordinal]);
         } else {
@@ -720,7 +717,7 @@ fn checkGroupTierCounts() void {
         }
     }
     for (groups) |group| {
-        const ordinal = @intFromEnum(group);
+        const ordinal = @backingInt(group);
         std.debug.assert(carried[ordinal]);
         std.debug.assert(tier_counts[ordinal] > 0);
     }

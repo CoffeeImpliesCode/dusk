@@ -110,7 +110,7 @@ const feature_word_count: usize =
 /// the one-line overload of `EnableFeature`, and the comptime block below is
 /// what lets it be `@enumFromInt` rather than a switch.
 pub fn fromApiName(name: api.FeatureName) Feature {
-    return @enumFromInt(@intFromEnum(name));
+    return @fromBackingInt(@intCast(@backingInt(name)));
 }
 
 /// The closure `DeviceBase::ApplyFeatures` (`Device.cpp:1734-1753`) applies to a
@@ -132,14 +132,14 @@ pub const implicitly_enabled: [4][2]Feature = .{
 /// Which features one object holds. `FeaturesBitSet` (`Features.h:49`) is an
 /// `ityp::bitset` upstream, which is a word array and three reads here.
 pub const FeaturesSet = struct {
-    bits: [feature_word_count]u64 = [_]u64{0} ** feature_word_count,
+    bits: [feature_word_count]u64 = @splat(0),
 
     /// Marks a feature present. `FeaturesSet::EnableFeature`
     /// (`Features.cpp:505-508`). Upstream asserts the argument is not
     /// `Feature::InvalidEnum`; the parameter here is this file's `enum`, which
     /// has no such member, so the assertion is the type.
     pub fn enable(self: *FeaturesSet, feature: Feature) void {
-        const index: usize = @intCast(@intFromEnum(feature));
+        const index: usize = @intCast(@backingInt(feature));
         std.debug.assert(index < feature_count);
         self.bits[index / bit_count_per_word] |=
             @as(u64, 1) << @as(u6, @intCast(index % bit_count_per_word));
@@ -148,7 +148,7 @@ pub const FeaturesSet = struct {
     /// Whether a feature is present. `FeaturesSet::IsEnabled`
     /// (`Features.cpp:514-517`).
     pub fn isEnabled(self: FeaturesSet, feature: Feature) bool {
-        const index: usize = @intCast(@intFromEnum(feature));
+        const index: usize = @intCast(@backingInt(feature));
         std.debug.assert(index < feature_count);
         return self.bits[index / bit_count_per_word] &
             (@as(u64, 1) << @as(u6, @intCast(index % bit_count_per_word))) != 0;
@@ -157,9 +157,8 @@ pub const FeaturesSet = struct {
     /// The features in the set, ascending by tag. `ToSupportedFeatures`
     /// (`Features.cpp:524-545`).
     ///
-    /// Upstream allocates a `HeapArray`; `AGENTS.md` section 2 makes an
-    /// allocator a parameter, so the port writes into a caller-owned array and
-    /// returns the slice of it that was filled. The `index == count` assertion
+    /// Upstream allocates a `HeapArray`; the port writes into a caller-owned
+    /// array and returns the slice of it that was filled. The `index == count` assertion
     /// at `Features.cpp:542` survives as the read-back below.
     pub fn toSupportedFeatures(
         self: FeaturesSet,
@@ -169,8 +168,8 @@ pub const FeaturesSet = struct {
         // Bound: the tag domain, `feature_count` tags, each visited once. The
         // tags are dense, so `@enumFromInt` traps on none of them.
         for (0..feature_count) |tag| {
-            if (!self.isEnabled(@enumFromInt(tag))) continue;
-            out[written] = @enumFromInt(tag);
+            if (!self.isEnabled(@fromBackingInt(@intCast(tag)))) continue;
+            out[written] = @fromBackingInt(@intCast(tag));
             written += 1;
         }
         std.debug.assert(written == self.count());
@@ -193,14 +192,14 @@ comptime {
     // each tag. Without this, `fromApiName` answers a neighbouring feature the
     // day `src/api/enums.zig` gains, drops or renames a name, and nothing else
     // in the port would say so.
-    if (@typeInfo(api.FeatureName).@"enum".fields.len != feature_count) {
+    if (@typeInfo(api.FeatureName).@"enum".field_names.len != feature_count) {
         @compileError("every api.FeatureName member must have exactly one Feature");
     }
-    for (@typeInfo(Feature).@"enum".fields) |field| {
-        const mine: Feature = @enumFromInt(field.value);
-        const theirs: api.FeatureName = @enumFromInt(field.value);
+    for (@typeInfo(Feature).@"enum".field_values) |field_value| {
+        const mine: Feature = @fromBackingInt(@intCast(field_value));
+        const theirs: api.FeatureName = @fromBackingInt(@intCast(field_value));
         if (@tagName(mine) != @tagName(theirs)) {
-            @compileError("a feature tag names two features: " ++ field.name);
+            @compileError("a feature tag names two features: " ++ @tagName(mine));
         }
     }
 }
@@ -208,9 +207,9 @@ comptime {
 test "the two enumerations name the same feature on the same tag" {
     // The comptime block above proves the tags; this proves the conversion, so
     // a `fromApiName` that stopped being `@enumFromInt` fails here.
-    inline for (@typeInfo(api.FeatureName).@"enum".fields) |field| {
-        const name: api.FeatureName = @enumFromInt(field.value);
-        try std.testing.expectEqual(field.value, @intFromEnum(fromApiName(name)));
+    inline for (@typeInfo(api.FeatureName).@"enum".field_values) |field_value| {
+        const name: api.FeatureName = @fromBackingInt(@intCast(field_value));
+        try std.testing.expectEqual(field_value, @backingInt(fromApiName(name)));
     }
 }
 

@@ -145,7 +145,7 @@ fn validateTarget(context: kernels.Context, target: Target) Error!void {
         try validateAttachmentView(context, target, view);
         if (view.aspects.color == 0) return error.BlitFormatMismatch;
         shapes[slot].view = .{
-            .format = @intFromEnum(view.format),
+            .format = @backingInt(view.format),
             .sample_count = view.texture.sample_count,
             .aspects = view.aspects.toFlags(),
         };
@@ -155,7 +155,7 @@ fn validateTarget(context: kernels.Context, target: Target) Error!void {
         try validateAttachmentView(context, target, view);
         if (view.aspects.depth == 0 and view.aspects.stencil == 0) return error.BlitFormatMismatch;
         depth_shape = .{
-            .format = @intFromEnum(view.format),
+            .format = @backingInt(view.format),
             .sample_count = view.texture.sample_count,
             .aspects = view.aspects.toFlags(),
         };

@@ -1,20 +1,19 @@
 //! The M20 colour-space shard: `common/ColorSpace.h` with fixed inputs and
 //! fixed outputs.
 //!
-//! **What this file is.** The other half of the M20 acceptance
-//! (`docs/40-plan.md:720-722`). It exercises the 27 constants
+//! **What this file is.** It exercises the 27 constants
 //! `src/dawn/common/ColorSpace.h` declares at the pinned revision, with no
 //! surface, no device and no display server.
 //!
 //! **What this file does not claim.** It does not claim the algebra.
-//! `src/dawn/common/Algebra.h` is M7's (`docs/40-plan.md:7028-7032`); the three
+//! `src/dawn/common/Algebra.h` defines the algebra; the three
 //! operations this table needs are private helpers of
 //! `src/platform/color_space.zig`.
 //!
 //! **How the comparison works.** `@abs(actual - expected) <= tolerance` per
-//! channel, the rule `docs/50-verification.md:395` fixes, and one channel
-//! per assertion so a failure names a channel rather than a vector. The
-//! tolerances are per row and each row states why it is what it is.
+//! channel, with one channel per assertion so a failure names a channel
+//! rather than a vector. The tolerances are per row and each row states why it
+//! is what it is.
 //!
 //! **Why the values are f32 and not the published ones.** Dawn stores these as
 //! `float` (`ColorSpace.h:135-316`), so a reference that prints ten digits is
@@ -25,13 +24,9 @@ const std = @import("std");
 
 const color = @import("dusk").platform.color_space;
 
-/// The one failure the channel comparison below can report, as a declared set
-/// rather than `anyerror` (`AGENTS.md` §2). `expectApproxEqAbs` is what reports
-/// the tolerance failure, so its error is the one that reaches a caller.
 const ExpectationError = error{TestExpectedApproxEqAbs};
 
-/// `docs/50-verification.md:395`: `@abs(actual - expected) <= tolerance` per
-/// channel.
+/// `@abs(actual - expected) <= tolerance` per channel.
 ///
 /// One assertion per channel on its own line, and not an `inline for`: a row
 /// can carry the same expected value on two channels, so the reported line is

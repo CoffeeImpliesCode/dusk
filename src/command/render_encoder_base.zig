@@ -1580,7 +1580,7 @@ test "real bundle bodies reject cycles depth exhaustion and malformed data befor
     defer stream.deinit();
     const nested = try stream.allocateCommand(
         commands.ExecuteBundlesCmd,
-        @intFromEnum(commands.Tag.execute_bundles),
+        @backingInt(commands.Tag.execute_bundles),
     );
     nested.* = .{ .count = 1 };
     const references = try stream.allocateData(commands.Ref, 1);
@@ -1602,7 +1602,7 @@ test "real bundle bodies reject cycles depth exhaustion and malformed data befor
         if (count != 0) {
             const command = try stream.allocateCommand(
                 commands.ExecuteBundlesCmd,
-                @intFromEnum(commands.Tag.execute_bundles),
+                @backingInt(commands.Tag.execute_bundles),
             );
             command.* = .{ .count = 1 };
             (try stream.allocateData(commands.Ref, 1))[0] = try chain[count - 1].ref(&guard);
@@ -1617,7 +1617,7 @@ test "real bundle bodies reject cycles depth exhaustion and malformed data befor
     );
     _ = try stream.allocateCommand(
         commands.ExecuteBundlesCmd,
-        @intFromEnum(commands.Tag.execute_bundles),
+        @backingInt(commands.Tag.execute_bundles),
     );
     const malformed = try testRawBundle(&fixture.device, &guard, pass.attachmentState(), &stream);
     defer malformed.header.releaseUserLocked(&guard, std.testing.io) catch @panic("release failed");
@@ -1657,7 +1657,7 @@ test "bundle command budget counts repeated actual bodies exactly" {
     defer stream.deinit();
     const command = try stream.allocateCommand(
         commands.SetStencilReferenceCmd,
-        @intFromEnum(commands.Tag.set_stencil_reference),
+        @backingInt(commands.Tag.set_stencil_reference),
     );
     command.* = .{ .reference = 1 };
     const bundle = try testRawBundle(&fixture.device, &guard, pass.attachmentState(), &stream);

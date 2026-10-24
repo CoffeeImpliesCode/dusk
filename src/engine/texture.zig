@@ -128,7 +128,7 @@ const AttachmentView = struct {
 };
 
 /// Every way creating a texture or a view can fail. The set is named so a
-/// reader enumerates the obligations from the signature (`AGENTS.md` §2).
+/// reader enumerates the obligations from the signature.
 pub const CreateError = core_errors.ValidationError || object.CreateError || object.ReferenceError;
 
 /// The row pitch every linear texel copy must use. Dawn fixes it at
@@ -1190,7 +1190,7 @@ pub const Texture = struct {
         // Callers select one present aspect from the validated canonical row.
         // resolveCopy rejects user-selected missing or multiple aspects before this getter.
         return (self.format_info.getAspectInfoForAspect(
-            @enumFromInt(@intFromEnum(aspect)),
+            @fromBackingInt(@intCast(@backingInt(aspect))),
         ) catch |err| std.debug.panic(
             "Texture.aspectBlock: validated single-aspect invariant failed: {s}",
             .{@errorName(err)},
@@ -1247,7 +1247,7 @@ pub const Texture = struct {
     /// array layer, per aspect.
     pub fn subresourceCount(self: *const Texture, guard: *const object.ObjectGuard) usize {
         guard.assertOwns(self.header.tracking);
-        const aspects = @popCount(@intFromEnum(self.format_info.aspects));
+        const aspects = @popCount(@backingInt(self.format_info.aspects));
         return @as(usize, self.mip_level_count) *
             @as(usize, self.getArrayLayers(guard)) *
             @as(usize, aspects);
@@ -2188,13 +2188,13 @@ pub fn selectFormatAspects(format: *const canonical_format.Format, aspect: enums
 }
 
 pub fn formatAspects(format: *const canonical_format.Format) AspectMask {
-    return AspectMask.fromFlags(@intFromEnum(format.aspects));
+    return AspectMask.fromFlags(@backingInt(format.aspects));
 }
 
 fn primaryBlock(format: *const canonical_format.Format) canonical_format.TexelBlockInfo {
     // Validated canonical rows have at least one aspect. firstAspect selects one present bit.
     return (format.getAspectInfoForAspect(
-        @enumFromInt(@intFromEnum(firstAspect(@intFromEnum(format.aspects)))),
+        @fromBackingInt(@intCast(@backingInt(firstAspect(@backingInt(format.aspects))))),
     ) catch |err| std.debug.panic(
         "primaryBlock: canonical format aspect invariant failed: {s}",
         .{@errorName(err)},
@@ -2630,8 +2630,7 @@ pub fn validateComponentSwizzle(
 
 /// `ResolveDefaultCompatiblityTextureBindingViewDimension` (`Texture.cpp:680`)
 /// over its `_Impl` (`:650`). Dawn keeps its spelling of "compatibility" in the
-/// name; the port does not, because `AGENTS.md` §2 names things for what they
-/// are.
+/// name; the port names it for the binding view dimension it resolves.
 pub fn resolveBindingViewDimension(
     compatibility_mode: bool,
     dimension: enums.TextureDimension,
@@ -3047,7 +3046,7 @@ fn roundUpToBlocks(extent: descriptors.Extent3D, format: *const canonical_format
 /// question. The mask has seven named bits and no more, so the walk below is
 /// bounded by the mask and not by the caller's data.
 fn aspectIndexIn(mask: AspectMask, aspect: Aspect) usize {
-    const wanted: u3 = @intCast(@ctz(@as(u8, @intFromEnum(aspect))));
+    const wanted: u3 = @intCast(@ctz(@as(u8, @backingInt(aspect))));
     var index: usize = 0;
     var flags = mask.toFlags();
     while (flags != 0) : (flags &= flags - 1) {
@@ -3081,17 +3080,16 @@ fn aspectOfBit(index: u3) Aspect {
 
 /// The mask that names one aspect.
 fn aspectMaskOf(aspect: Aspect) AspectMask {
-    return AspectMask.fromFlags(@intFromEnum(aspect));
+    return AspectMask.fromFlags(@backingInt(aspect));
 }
 
 /// `value` rounded up to a multiple of `alignment`, named so the rule reads at
-/// the call site (`AGENTS.md` §2, "make division explicit").
+/// the call site.
 fn alignForward(value: u32, alignment: u32) u32 {
     return divCeil(value, alignment) * alignment;
 }
 
-/// Integer division rounded up, written out because `AGENTS.md` §2 asks for the
-/// rounding rule to be visible.
+/// Integer division rounded up.
 fn divCeil(numerator: u32, denominator: u32) u32 {
     return @divTrunc(numerator, denominator) + @intFromBool(numerator % denominator != 0);
 }
@@ -3162,8 +3160,8 @@ comptime {
     // for the reason `src/engine/buffer.zig:1847-1850` records.
     for (raised) |name| {
         var held = false;
-        for (@typeInfo(core_errors.ValidationError).error_set.?) |member| {
-            if (std.mem.eql(u8, member.name, name)) held = true;
+        for (@typeInfo(core_errors.ValidationError).error_set.error_names.?) |member_name| {
+            if (std.mem.eql(u8, member_name, name)) held = true;
         }
         if (!held) @compileError("a texture rule names a missing error: " ++ name);
     }
@@ -3532,7 +3530,7 @@ const NativeFixture = struct {
             .{ .propertyFlags = vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT },
             .{ .propertyFlags = vulkan.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                 vulkan.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT },
-        } ++ ([_]vulkan.VkMemoryType{.{}} ** 30),
+        } ++ @as([30]vulkan.VkMemoryType, @splat(.{})),
     },
 
     fn context(
@@ -3994,7 +3992,7 @@ test "3D attachment cache survives replay scratch teardown" {
     const attachment_value = try attachment.AttachmentState.fromRenderPass(.{
         .colors = &.{.{
             .view = .{
-                .format = @intFromEnum(view.getFormat(guard)),
+                .format = @backingInt(view.getFormat(guard)),
                 .sample_count = texture.getSampleCount(guard),
                 .aspects = view.getAspects(guard).toFlags(),
             },
@@ -4658,7 +4656,7 @@ test "hardware YCbCr views own the actual parent and conversion sampler" {
         guard,
         &arena,
         backend,
-        .{ .y_cb_cr_vk_descriptor = .{
+        .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
             .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
         } },
     );
@@ -4731,7 +4729,7 @@ test "hardware upload checks every plane before recording a copy" {
         guard,
         &arena,
         backend,
-        .{ .y_cb_cr_vk_descriptor = .{
+        .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
             .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
         } },
     );
@@ -4809,7 +4807,7 @@ fn hardwareAllocationRoundTrip(allocator: std.mem.Allocator) !void {
         guard,
         &arena,
         backend,
-        .{ .y_cb_cr_vk_descriptor = .{
+        .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
             .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
         } },
     );
@@ -4885,7 +4883,7 @@ test "hardware lazy initialization zeroes physical planes through queue staging"
         guard,
         &arena,
         backend,
-        .{ .y_cb_cr_vk_descriptor = .{
+        .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
             .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
         } },
     );
@@ -5209,7 +5207,7 @@ test "hardware queries and native creation failures roll back original owners" {
             guard,
             &arena,
             backend,
-            .{ .y_cb_cr_vk_descriptor = .{
+            .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
                 .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
             } },
         );
@@ -5266,7 +5264,7 @@ test "failed hardware view creation releases both real constructor leases" {
         guard,
         &arena,
         backend,
-        .{ .y_cb_cr_vk_descriptor = .{
+        .{ .compare = .undefined_, .y_cb_cr_vk_descriptor = .{
             .vk_format = vulkan.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
         } },
     );

@@ -361,7 +361,7 @@ test "native attachment actual sparse views preserve holes and normalize trailin
         const state = pass.attachmentState();
         try t.expectEqual(@as(u8, 0b10), state.value.color_attachments_set);
         try t.expectEqual(@as(u32, 0), state.value.color_formats[0]);
-        try t.expectEqual(@intFromEnum(api.TextureFormat.rgba8_unorm), state.value.color_formats[1]);
+        try t.expectEqual(@backingInt(api.TextureFormat.rgba8_unorm), state.value.color_formats[1]);
         try t.expectEqual(@as(u32, 0), state.value.color_formats[2]);
         try t.expect((try sparse.renderOptions(&guard)).attachment_state == state);
         try t.expect((try trailing.renderOptions(&guard)).attachment_state == state);
@@ -376,7 +376,7 @@ test "native attachment actual sparse views preserve holes and normalize trailin
         try encoder.copyTextureToBuffer(.{
             .source = .{
                 .texture = image.texture,
-                .format = @intFromEnum(api.TextureFormat.rgba8_unorm),
+                .format = @backingInt(api.TextureFormat.rgba8_unorm),
                 .dimension = ._2d,
                 .aspect = .all,
                 .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },
@@ -434,8 +434,8 @@ test "native attachment preserves exact API depth aliases despite equal physical
         try t.expect(a.attachment_state == pass24.attachmentState());
         try t.expect(b.attachment_state == pass32.attachmentState());
         try t.expect(a.attachment_state != b.attachment_state);
-        try t.expectEqual(@intFromEnum(api.TextureFormat.depth24_plus), a.attachment_state.value.depth_stencil_format);
-        try t.expectEqual(@intFromEnum(api.TextureFormat.depth32_float), b.attachment_state.value.depth_stencil_format);
+        try t.expectEqual(@backingInt(api.TextureFormat.depth24_plus), a.attachment_state.value.depth_stencil_format);
+        try t.expectEqual(@backingInt(api.TextureFormat.depth32_float), b.attachment_state.value.depth_stencil_format);
         try pass24.setPipeline(&guard, a);
         try t.expectError(error.AttachmentFormatMismatch, pass24.setPipeline(&guard, b));
         try pass32.setPipeline(&guard, b);
@@ -527,7 +527,7 @@ test "native attachment ordinary resolve mask normalizes to matching multisample
         try encoder.copyTextureToBuffer(.{
             .source = .{
                 .texture = target.texture,
-                .format = @intFromEnum(api.TextureFormat.rgba8_unorm),
+                .format = @backingInt(api.TextureFormat.rgba8_unorm),
                 .dimension = ._2d,
                 .aspect = .all,
                 .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },
@@ -835,7 +835,7 @@ test "native attachment finite fail N rolls back final weak bucket insertion aft
         const value = try attachment.AttachmentState.fromRenderPass(.{
             .colors = &.{.{
                 .view = .{
-                    .format = @intFromEnum(image.view.format),
+                    .format = @backingInt(image.view.format),
                     .sample_count = image.view.texture.sample_count,
                     .aspects = image.view.aspects.toFlags(),
                 },
@@ -1134,7 +1134,7 @@ test "native attachment GPU draw and bundle readback survive source users then a
             try encoder.copyTextureToBuffer(.{
                 .source = .{
                     .texture = image.texture,
-                    .format = @intFromEnum(api.TextureFormat.rgba8_unorm),
+                    .format = @backingInt(api.TextureFormat.rgba8_unorm),
                     .dimension = ._2d,
                     .aspect = .all,
                     .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },

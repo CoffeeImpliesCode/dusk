@@ -8,8 +8,7 @@
 //! **Why these are local and not a dependency.** `Math.h` is M7 — the milestone
 //! that lands `Format.h`, `Limits.h` and `Toggles.h` — and it is 309 lines
 //! across a `.h` and a `.cpp`. The memory module needs three integer helpers out
-//! of it. `AGENTS.md` §6's ladder puts the standard library first and the
-//! standard library covers all three: `@clz` for the log, `std.math.isPowerOfTwo`
+//! of it. The standard library covers all three: `@clz` for the log, `std.math.isPowerOfTwo`
 //! for the test, and `std.mem.alignForward` for the alignment.
 //! `docs/30-port-design.md` §7.1 already routes `Slab` through the same three
 //! operations, so when M7 lands this file and that section's copy merge in the

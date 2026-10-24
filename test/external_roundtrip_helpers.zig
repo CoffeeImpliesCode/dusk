@@ -12,9 +12,9 @@ const pitch = 256;
 const byte_count = pitch * extent;
 pub const Error = engine.device.OperationError || engine.device.CleanupError ||
     engine.buffer.MapError || dusk.command.command_encoder.Error || dusk.command.Error ||
-    core.HandleError || core.ReferenceError || error{PixelMismatch, InvalidReadbackLength};
+    core.HandleError || core.ReferenceError || error{ PixelMismatch, InvalidReadbackLength };
 
-pub fn checkPixels(bytes: []const u8, expected: [4]u8) error{PixelMismatch, InvalidReadbackLength}!void {
+pub fn checkPixels(bytes: []const u8, expected: [4]u8) error{ PixelMismatch, InvalidReadbackLength }!void {
     if (bytes.len != byte_count) return error.InvalidReadbackLength;
     for (0..extent) |row| {
         for (0..extent) |column| {
@@ -39,29 +39,27 @@ test "roundtrip oracle checks each channel and every row, not row padding" {
     try std.testing.expectError(error.InvalidReadbackLength, checkPixels(bytes[0..4], expected));
 }
 
-fn releaseBuffer(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device,
-    buffer: *engine.native_resources.Buffer) void {
+fn releaseBuffer(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, buffer: *engine.native_resources.Buffer) void {
     device.release(allocator, io, buffer) catch @panic("roundtrip buffer release failed");
 }
 
-fn deinitEncoder(allocator: std.mem.Allocator, io: std.Io,
-    device: *engine.Device, encoder: *Encoder) void {
+fn deinitEncoder(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, encoder: *Encoder) void {
     var guard = core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
     defer guard.unlock(io);
     encoder.deinit(allocator, io, &guard);
 }
 
-fn deinitFinished(allocator: std.mem.Allocator, io: std.Io,
-    device: *engine.Device, finished: *Finished) void {
+fn deinitFinished(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, finished: *Finished) void {
     var guard = core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
     defer guard.unlock(io);
     finished.deinit(allocator, io, &guard);
 }
 
-pub fn writeTexture(allocator: std.mem.Allocator, io: std.Io,
-    device: *engine.Device, texture: *engine.texture.Texture, expected: [4]u8) Error!void {
+pub fn writeTexture(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, texture: *engine.texture.Texture, expected: [4]u8) Error!void {
     const upload = try device.createBuffer(allocator, io, .{
-        .size = byte_count, .usage = .{ .copy_src = true }, .mapped_at_creation = true,
+        .size = byte_count,
+        .usage = .{ .copy_src = true },
+        .mapped_at_creation = true,
     });
     defer releaseBuffer(allocator, io, device, upload);
     {
@@ -80,12 +78,8 @@ pub fn writeTexture(allocator: std.mem.Allocator, io: std.Io,
         var guard = try core.ObjectGuard.lock(io, texture.header.tracking);
         defer guard.unlock(io);
         try encoder.copyBufferToTexture(.{
-            .source = .{ .buffer = try upload.ref(&guard),
-                .blocks_per_row = pitch / 4, .rows_per_image = extent },
-            .destination = .{ .texture = texture,
-                .format = @intFromEnum(dusk.api.TextureFormat.rgba8_unorm),
-                .dimension = ._2d, .aspect = .all,
-                .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
+            .source = .{ .buffer = try upload.ref(&guard), .blocks_per_row = pitch / 4, .rows_per_image = extent },
+            .destination = .{ .texture = texture, .format = @backingInt(dusk.api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
             .copy_size = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },
         });
     }
@@ -95,10 +89,10 @@ pub fn writeTexture(allocator: std.mem.Allocator, io: std.Io,
     try device.wait(io, serial);
 }
 
-pub fn readTexture(allocator: std.mem.Allocator, io: std.Io,
-    device: *engine.Device, texture: *engine.texture.Texture, expected: [4]u8) Error!void {
+pub fn readTexture(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, texture: *engine.texture.Texture, expected: [4]u8) Error!void {
     const readback = try device.createBuffer(allocator, io, .{
-        .size = byte_count, .usage = .{ .copy_dst = true, .map_read = true },
+        .size = byte_count,
+        .usage = .{ .copy_dst = true, .map_read = true },
     });
     defer releaseBuffer(allocator, io, device, readback);
     var encoder = Encoder.init(allocator, device.core.borrow(), .{});
@@ -107,12 +101,8 @@ pub fn readTexture(allocator: std.mem.Allocator, io: std.Io,
         var guard = try core.ObjectGuard.lock(io, texture.header.tracking);
         defer guard.unlock(io);
         try encoder.copyTextureToBuffer(.{
-            .source = .{ .texture = texture,
-                .format = @intFromEnum(dusk.api.TextureFormat.rgba8_unorm),
-                .dimension = ._2d, .aspect = .all,
-                .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
-            .destination = .{ .buffer = try readback.ref(&guard),
-                .blocks_per_row = pitch / 4, .rows_per_image = extent },
+            .source = .{ .texture = texture, .format = @backingInt(dusk.api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
+            .destination = .{ .buffer = try readback.ref(&guard), .blocks_per_row = pitch / 4, .rows_per_image = extent },
             .copy_size = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },
         });
     }

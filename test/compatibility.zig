@@ -1,9 +1,8 @@
 //! The M16 shard: the compatibility profile, re-gated.
 //!
-//! **What this file is.** `docs/40-plan.md` §M16 names nine restrictions that
-//! apply when the `core features and limits` feature is absent, and its
-//! re-gate checklist says each must fail by a named error on a compatibility
-//! device. This file drives all nine and names the error each one produces.
+//! **What this file is.** It drives nine restrictions that apply when the
+//! `core features and limits` feature is absent and names the error each
+//! produces on a compatibility device.
 //!
 //! **Why this is a milestone of its own.** M7 writes the compat column, M8
 //! writes a device that reports it, M11 writes the texture rules, M14 writes
@@ -279,7 +278,7 @@ fn bindingLimits(device: *const engine.Device) !pipeline.BindingLimits {
 /// this shard does not exercise is never compared against a non-zero count.
 fn countsForStage(stage: pipeline.Stage, storage_buffer_count: u32) pipeline.BindingCounts {
     var counts: pipeline.BindingCounts = .{};
-    counts.per_stage[@intFromEnum(stage)].storage_buffer_count = storage_buffer_count;
+    counts.per_stage[@backingInt(stage)].storage_buffer_count = storage_buffer_count;
     return counts;
 }
 
@@ -831,7 +830,7 @@ test "restriction 9: a compressed format cannot be a copy source" {
         encoder.copyTextureToBuffer(.{
             .source = .{
                 .texture = @ptrCast(&source),
-                .format = @intFromEnum(api.TextureFormat.bc1_rgba_unorm),
+                .format = @backingInt(api.TextureFormat.bc1_rgba_unorm),
                 // One row, so the 256-byte row alignment
                 // (`command/constants.zig:32`) does not apply and the only rule
                 // this copy can trip is the compressed-format one.
@@ -864,7 +863,7 @@ test "restriction 9: an uncompressed format is accepted as a copy source" {
     try encoder.copyTextureToBuffer(.{
         .source = .{
             .texture = @ptrCast(&source),
-            .format = @intFromEnum(api.TextureFormat.rgba8_unorm),
+            .format = @backingInt(api.TextureFormat.rgba8_unorm),
             .extent = .{ .width = 4, .height = 1, .depth_or_array_layers = 1 },
         },
         .destination = .{ .buffer = @ptrCast(&destination), .blocks_per_row = 4 },
@@ -916,7 +915,7 @@ fn createColorAttachmentState(
     guard: *const core.ObjectGuard,
 ) !*command.attachment_state.CanonicalAttachmentState {
     const value = try command.attachment_state.AttachmentState.fromRenderPipeline(.{
-        .color_formats = &.{@intFromEnum(api.TextureFormat.rgba8_unorm)},
+        .color_formats = &.{@backingInt(api.TextureFormat.rgba8_unorm)},
         .depth_stencil_format = 0,
         .sample_count = 1,
         .expand_resolve = .{},

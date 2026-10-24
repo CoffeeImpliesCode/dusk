@@ -134,7 +134,7 @@ fn draw(
         try encoder.copyTextureToBuffer(.{
             .source = .{
                 .texture = texture,
-                .format = @intFromEnum(config.format),
+                .format = @backingInt(config.format),
                 .dimension = ._2d,
                 .aspect = .all,
                 .extent = .{ .width = config.width, .height = config.height, .depth_or_array_layers = 1 },
@@ -253,7 +253,10 @@ pub fn main(init: std.process.Init) !void {
     // Error cleanup must detach the Surface before Device's final preflight.
     defer if (surface_live) surface_api.unconfigure(io, &instance, surface) catch @panic("WSI unconfigure failed");
     var caps: api.SurfaceCapabilities = .{
-        .usages = .{}, .format_count = 0, .present_mode_count = 0, .alpha_mode_count = 0,
+        .usages = .{},
+        .format_count = 0,
+        .present_mode_count = 0,
+        .alpha_mode_count = 0,
     };
     if (try surface_api.getCapabilities(allocator, io, &instance, surface, &adapters.items[0], &caps) != .success)
         return error.SurfaceCapabilitiesFailed;

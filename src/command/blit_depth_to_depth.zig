@@ -9,8 +9,8 @@
 //!
 //! **What this file does not claim.** It does not claim a render pipeline:
 //! `GetOrCreateDepthBlitPipeline` (`BlitDepthToDepth.cpp:66`) compiles the WGSL
-//! at `:47`-`:64`, and `AGENTS.md` §3.2 forbids a WGSL front end in the
-//! library. It does not claim the single-layer intermediate texture each layer
+//! at `:47`-`:64`; the library has no WGSL front end.
+//! It does not claim the single-layer intermediate texture each layer
 //! above zero is copied into first (`:135`-`:192`); that is a
 //! `CopyTextureToTexture` and belongs to the command stream.
 //!
@@ -134,9 +134,8 @@ pub fn texelCount(copy_extent: Extent3D) Error!u64 {
 ///
 /// The fragment body is a load and a store with nothing in between
 /// (`BlitDepthToDepth.cpp:61-62`), so every destination value is bit-identical to
-/// the source value it was read from. `docs/50-verification.md:414` records the
-/// same line: Dawn's `ExpectEq` takes a tolerance that defaults to zero, and a
-/// copy is the case where zero is right.
+/// the source value it was read from. Dawn's `ExpectEq` takes a tolerance that
+/// defaults to zero, and a copy is the case where zero is right.
 ///
 /// Dawn runs one render pass per layer (`:195-239`), each drawing three
 /// vertices, so this walks the same layers in the same order.

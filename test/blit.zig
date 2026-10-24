@@ -1,7 +1,6 @@
 //! The M17 shard: the blit family and the three things the milestone names.
 //!
-//! **What this shard asserts.** The acceptance sentence
-//! (`docs/40-plan.md:645-651`) has three parts and they are three tests here:
+//! **What this shard asserts.** Three tests cover:
 //! a 4x4 texture copied to a buffer at a 256-byte row pitch and back with every
 //! pixel exact, an `rgba8unorm` to `bgra8unorm` blit with the channel order
 //! swapped, and a `depth24plus` region through the depth-to-depth path with the
@@ -41,13 +40,8 @@ const Origin3D = api.Origin3D;
 /// different code path (`BlitTextureToBuffer.cpp:1701`).
 const bytes_per_row_alignment: u32 = 256;
 
-/// `minStorageBufferOffsetAlignment` on the device this test stands in for.
-/// Vulkan guarantees 4 (`docs/50-verification.md:246-247`), and the acceptance
-/// needs a value that makes the shader-start and binding-offset split visible,
-/// so it is 256: the largest alignment the specification's minimum offset rule
-/// permits in `docs/50-verification.md:246-247` is 4 and the port's own
-/// measured value is 128 (`docs/50-verification.md:254`). 256 is the value the
-/// WebGPU row alignment already uses, so one number carries both rules.
+/// A synthetic `minStorageBufferOffsetAlignment` that makes the shader-start
+/// and binding-offset split visible, using the same 256-byte alignment as rows.
 const storage_buffer_offset_alignment: u32 = 256;
 
 /// The fill byte for a destination the blit must not touch.
@@ -568,8 +562,7 @@ test "blit: a depth24plus region is unchanged by the depth-to-depth path" {
 
     // The fragment body is a load and a store with nothing in between
     // (`BlitDepthToDepth.cpp:62`), so the comparison is exact and the tolerance
-    // is zero, the same line `docs/50-verification.md:414` draws for Dawn's
-    // `ExpectEq`.
+    // is zero.
     for (destination_depths, source_depths) |actual, expected| {
         try std.testing.expectEqual(expected, actual);
     }
@@ -651,8 +644,8 @@ test "blit: a layer of depth values needs one pass and the count scales with the
 test "blit: the texture-to-buffer allowlist is exactly Dawn's forty formats" {
     const supported = comptime blk: {
         var count: usize = 0;
-        for (@typeInfo(TextureFormat).@"enum".fields) |field| {
-            const format: TextureFormat = @enumFromInt(field.value);
+        for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
+            const format: TextureFormat = @fromBackingInt(@intCast(field_value));
             if (blit_texture_to_buffer.isFormatSupportedByTextureToBufferBlit(format)) {
                 count += 1;
             }
@@ -665,8 +658,8 @@ test "blit: the texture-to-buffer allowlist is exactly Dawn's forty formats" {
     // formats, so the byte-size groups partition the list.
     var with_block_size: usize = 0;
     var without_block_size: usize = 0;
-    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
-        const format: TextureFormat = @enumFromInt(field.value);
+    inline for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
+        const format: TextureFormat = @fromBackingInt(@intCast(field_value));
         // The guard is a block rather than a `continue`: `inline for` unwraps
         // to straight-line code, which a runtime `continue` may not cross.
         if (blit_texture_to_buffer.isFormatSupportedByTextureToBufferBlit(format)) {
@@ -684,8 +677,8 @@ test "blit: the texture-to-buffer allowlist is exactly Dawn's forty formats" {
 test "blit: the buffer-to-texture allowlist is exactly Dawn's fourteen formats" {
     const supported = comptime blk: {
         var count: usize = 0;
-        for (@typeInfo(TextureFormat).@"enum".fields) |field| {
-            const format: TextureFormat = @enumFromInt(field.value);
+        for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
+            const format: TextureFormat = @fromBackingInt(@intCast(field_value));
             if (blit_buffer_to_texture.isFormatSupportedByBufferToTextureBlit(format)) {
                 count += 1;
             }
@@ -745,10 +738,6 @@ test "blit: the buffer-to-texture predicate refuses each of its five cases" {
 }
 
 test "blit: the buffer-to-texture pitch rule is four bytes, not two hundred and fifty six" {
-    // `BlitBufferToTexture.cpp:408` is `DAWN_CHECK((src.bytesPerRow % 4) == 0)`
-    // and it is the only hard pitch check in the family. A pitch of four is
-    // legal; a pitch of three is not. `AGENTS.md` §2 asks for both sides of a
-    // boundary.
     const source = rgbaPattern();
     var staged: [copy_extent.width * 4]u8 = undefined;
     try blit_buffer_to_texture.blitBufferToTexture(.{
@@ -876,21 +865,19 @@ test "blit: the RG8 to depth16unorm decode is a multiply by the reciprocal" {
 // --- Every error member is named -------------------------------------------
 
 test "blit: every member of every blit error set is reachable" {
-    // The bound is the set itself, so a member added to one of them lands here
-    // without a second edit (`AGENTS.md` §3).
-    inline for (@typeInfo(blit_texture_to_buffer.Error).error_set.?) |member| {
+    inline for (@typeInfo(blit_texture_to_buffer.Error).error_set.error_names.?) |member| {
         _ = member;
     }
-    inline for (@typeInfo(blit_buffer_to_texture.Error).error_set.?) |member| {
+    inline for (@typeInfo(blit_buffer_to_texture.Error).error_set.error_names.?) |member| {
         _ = member;
     }
-    inline for (@typeInfo(blit_depth_to_depth.Error).error_set.?) |member| {
+    inline for (@typeInfo(blit_depth_to_depth.Error).error_set.error_names.?) |member| {
         _ = member;
     }
-    inline for (@typeInfo(blit_color_to_color_with_draw.Error).error_set.?) |member| {
+    inline for (@typeInfo(blit_color_to_color_with_draw.Error).error_set.error_names.?) |member| {
         _ = member;
     }
-    inline for (@typeInfo(blit_buffer_to_depth_stencil.Error).error_set.?) |member| {
+    inline for (@typeInfo(blit_buffer_to_depth_stencil.Error).error_set.error_names.?) |member| {
         _ = member;
     }
 

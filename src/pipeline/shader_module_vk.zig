@@ -9,16 +9,15 @@
 //! creation and the 400-line body of `GetHandleAndSpirv`
 //! (`ShaderModuleVk.cpp:130-532`) collapses to the tail at `:496-528`.
 //!
-//! **This is the row `docs/02-dawn-design.md` §4.9 says Dawn has no branch
-//! for.** `ShaderModuleVk.cpp:500-501` points `codeSize` and `pCode` at
+//! `ShaderModuleVk.cpp:500-501` points `codeSize` and `pCode` at
 //! `compilation->spirv`, which is what `tint::spirv::writer::Generate` wrote
 //! at `:429`, and the `#else` at `:529-530` is
 //! `DAWN_UNRECOVERABLE_ERROR("TINT_BUILD_SPV_WRITER is not defined.")`. The
 //! port points the same two fields at the words the caller handed over, and
 //! `test/shader_module.zig` asserts they are word for word the input file.
 //!
-//! **Why the device arrives as a parameter.** `AGENTS.md` §3.1 makes the
-//! dispatch table in `src/vk/dispatch.zig` the only door to Vulkan, and this
+//! **Why the device arrives as a parameter.** The dispatch table in
+//! `src/vk/dispatch.zig` is the only door to Vulkan, and this
 //! file names two of its fields and nothing else. `docs/10-architecture.md`
 //! "Module boundaries" gives `pipeline` no Vulkan dependency, so the half of
 //! the device this file needs is a value a caller fills in, and a test can fill

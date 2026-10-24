@@ -21,7 +21,10 @@ fn fixture() ![160]u8 {
 fn expectMiss(result: provider.LoadResult, expected: provider.CacheMiss) !void {
     switch (result) {
         .miss => |miss| try testing.expectEqual(expected, miss),
-        .hit => |bytes| { testing.allocator.free(bytes); return error.TestUnexpectedResult; },
+        .hit => |bytes| {
+            testing.allocator.free(bytes);
+            return error.TestUnexpectedResult;
+        },
     }
 }
 
@@ -219,7 +222,10 @@ fn faultOperate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cance
             const write = operation.file_write_streaming;
             const short = write.data[0][0..@min(write.data[0].len, 7)];
             return testing.io.vtable.operate(userdata, .{ .file_write_streaming = .{
-                .file = write.file, .header = write.header, .data = &.{short}, .splat = 1,
+                .file = write.file,
+                .header = write.header,
+                .data = &.{short},
+                .splat = 1,
             } });
         }
     }
@@ -305,7 +311,8 @@ test "Dawn store bounds prevent callback invocation" {
     const bytes = try fixture();
     var state: CallbackState = .{ .bytes = &bytes };
     var context: provider.DawnCallbackProvider = .{
-        .configuration = state.configuration(), .maximum_payload_byte_count = 31,
+        .configuration = state.configuration(),
+        .maximum_payload_byte_count = 31,
     };
     try testing.expectError(error.ArtifactTooLarge, context.provider().store(testing.io, key, &bytes));
     try testing.expectEqual(@as(usize, 0), state.stores);
@@ -355,7 +362,9 @@ fn largeArtifact(allocator: std.mem.Allocator, marker: u8) ![]u8 {
     const base = try fixture();
     @memcpy(bytes[codec.header_byte_count..][0..32], base[codec.header_byte_count..]);
     const header = try codec.encodeHeader(.{
-        .identity = identity, .isolation_key_hash = key, .payload = bytes[codec.header_byte_count..],
+        .identity = identity,
+        .isolation_key_hash = key,
+        .payload = bytes[codec.header_byte_count..],
     });
     @memcpy(bytes[0..codec.header_byte_count], &header);
     return bytes;
@@ -439,12 +448,17 @@ test "providers reject a payload bound above the absolute codec maximum without 
     const above_limit = codec.default_maximum_payload_byte_count + 1;
     var state: CallbackState = .{ .bytes = &bytes };
     var callbacks_context: provider.DawnCallbackProvider = .{
-        .configuration = state.configuration(), .maximum_payload_byte_count = above_limit,
+        .configuration = state.configuration(),
+        .maximum_payload_byte_count = above_limit,
     };
     var empty: [0]u8 = .{};
     var allocator = std.heap.FixedBufferAllocator.init(&empty);
     try testing.expectError(error.ArtifactTooLarge, provider.PipelineCacheProvider.load(
-        allocator.allocator(), testing.io, callbacks_context.provider(), key, above_limit,
+        allocator.allocator(),
+        testing.io,
+        callbacks_context.provider(),
+        key,
+        above_limit,
     ));
     try testing.expectError(error.ArtifactTooLarge, callbacks_context.provider().store(testing.io, key, &bytes));
     try testing.expectEqual(@as(usize, 0), state.loads);
@@ -452,10 +466,15 @@ test "providers reject a payload bound above the absolute codec maximum without 
     var directory = testing.tmpDir(.{});
     defer directory.cleanup();
     var filesystem_context: provider.FilesystemProvider = .{
-        .configuration = .{ .root = &directory.dir }, .maximum_payload_byte_count = above_limit,
+        .configuration = .{ .root = &directory.dir },
+        .maximum_payload_byte_count = above_limit,
     };
     try testing.expectError(error.ArtifactTooLarge, provider.PipelineCacheProvider.load(
-        allocator.allocator(), testing.io, filesystem_context.provider(), key, above_limit,
+        allocator.allocator(),
+        testing.io,
+        filesystem_context.provider(),
+        key,
+        above_limit,
     ));
     try testing.expectError(error.ArtifactTooLarge, filesystem_context.provider().store(testing.io, key, &bytes));
     try testing.expectEqual(@as(u64, 0), filesystem_context.next_temporary_id);

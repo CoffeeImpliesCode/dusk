@@ -675,8 +675,8 @@ pub fn prepareBrowserCopy(
     }
     const target_format = options.attachments.value.color_formats[0];
     const decode_destination_srgb =
-        target_format == @intFromEnum(api.TextureFormat.rgba8_unorm_srgb) or
-        target_format == @intFromEnum(api.TextureFormat.bgra8_unorm_srgb);
+        target_format == @backingInt(api.TextureFormat.rgba8_unorm_srgb) or
+        target_format == @backingInt(api.TextureFormat.bgra8_unorm_srgb);
     putBrowserWord(&validated.parameters, 40, @intFromBool(decode_destination_srgb));
     var bindings: [4]kernels.Binding = undefined;
     const binding_count: usize = if (source.conversion_sampler != null) 2 else 4;
@@ -778,8 +778,8 @@ fn encodeBrowser(input: BrowserInput) ResourceError![browser_parameter_size]u8 {
     putBrowserFloat(&bytes, 20, @floatFromInt(input.source_size.height));
     putBrowserWord(&bytes, 24, @intFromBool(input.options.flip_y));
     putBrowserWord(&bytes, 28, @intFromBool(input.options.needs_color_space_conversion));
-    putBrowserWord(&bytes, 32, @intFromEnum(input.options.src_alpha_mode));
-    putBrowserWord(&bytes, 36, @intFromEnum(input.options.dst_alpha_mode));
+    putBrowserWord(&bytes, 32, @backingInt(input.options.src_alpha_mode));
+    putBrowserWord(&bytes, 36, @backingInt(input.options.dst_alpha_mode));
     for (input.options.src_transfer_function_parameters, 0..) |value, index| {
         putBrowserFloat(&bytes, 48 + index * 4, value);
     }

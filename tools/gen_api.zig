@@ -1,10 +1,8 @@
 //! Generator for `src/api` and the API conformance tables, from
 //! `src/dawn/dawn.json` at the pinned Dawn revision.
 //!
-//! **What this program does.** It reads the JSON and it writes one Zig file
-//! per category into the output directory. It also writes the three Markdown
-//! tables that the `M2` section of `docs/40-plan.md` carries, so the document
-//! and the generated code cannot disagree about a count.
+//! It reads the JSON and writes one Zig file per category into the output
+//! directory. It also writes three Markdown tables with matching counts.
 //!
 //! **Command line.** Three positional arguments:
 //!
@@ -19,11 +17,9 @@
 //! with Dawn's C header. `docs/30-port-design.md` section 4.2 states that the
 //! chain has no `next` pointer, so it does not.
 //!
-//! **Line numbers.** `docs/40-plan.md` section M2 cites a `dawn.json` line for
-//! every row and a `src/api` line for every declaration. This program therefore
-//! reads the raw JSON text as well as the parsed value: the parse loses
-//! positions and the tables must not invent them. A row whose line cannot be
-//! located is `error.ItemLineNotFound`, never a row without a citation.
+//! Each table row cites a `dawn.json` line and each declaration's `src/api`
+//! line. The generator reads the raw JSON text because parsing loses positions.
+//! A missing source line returns `error.ItemLineNotFound`.
 
 const std = @import("std");
 
@@ -79,10 +75,9 @@ pub const GenerateError = error{
 
 /// Every entry name the port has handled, in the order `dawn.json` lists them.
 ///
-/// `src/api/handled.zig` gets a `coverage` arm per name and no `else`, so a
-/// new upstream entry is a compile error there until someone adds its arm
-/// (`AGENTS.md` section 3, `docs/30-port-design.md` section 8.2). This list is
-/// that ledger. It is 347 long because the pinned JSON has 347 entries.
+/// `src/api/handled.zig` gets a `coverage` arm per name and no `else`.
+/// A new upstream entry requires an arm (`docs/30-port-design.md` section 8.2).
+/// The list has 347 names because the pinned JSON has 347 entries.
 pub const handled_entry_names = [_][]const u8{
     "INTERNAL_HAVE_EMDAWNWEBGPU_HEADER",
     "create instance",
@@ -774,9 +769,7 @@ const Line = struct {
 
 /// A generated file under construction.
 ///
-/// The file is held as lines rather than bytes because `docs/40-plan.md`
-/// section M2 cites the line of every generated declaration. A byte buffer
-/// would make the caller count lines again to fill the table.
+/// Lines let the tables cite each generated declaration without counting again.
 const Out = struct {
     gpa: Allocator,
     path: []const u8,
@@ -1233,10 +1226,9 @@ const KeyRange = struct {
 
 /// Find every top-level key and its line range, in file order.
 ///
-/// `std.json` gives no positions, and `docs/40-plan.md` section M2 cites a
-/// line for every row. A top-level key sits on its own line at four spaces of
-/// indent, which no nested key does, so the text is a sufficient source for
-/// the key order and the key lines.
+/// `std.json` gives no positions. Each table row needs a source line.
+/// A top-level key sits on its own line at four spaces of indent.
+/// No nested key does, so the text supplies the key order and source lines.
 fn locateKeys(gpa: Allocator, text: []const u8) GenerateError![]KeyRange {
     var keys: std.ArrayList(KeyRange) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -1567,7 +1559,7 @@ fn emitEnums(model: *const Model, output: *Output) !void {
 
         // A duplicate tag value is `error.enum tag value already taken`, so the
         // first name in the file wins and the rest are recorded beside the
-        // declaration. No alias is emitted (`AGENTS.md` section 2).
+        // declaration. No alias is emitted.
         var seen: std.ArrayList(u32) = .empty;
         var drops: std.ArrayList([]const u8) = .empty;
         var kept: std.ArrayList(bool) = .empty;
@@ -1915,7 +1907,7 @@ fn emitNatives(model: *const Model, output: *Output) !void {
     _ = try natives.add("//");
     _ = try natives.add("// A native has no declaration of its own. `tools/gen_api.zig` emits the");
     _ = try natives.add("// spelling below wherever dawn.json names the native, so an alias here");
-    _ = try natives.add("// would forward to itself (`AGENTS.md` section 2).");
+    _ = try natives.add("// would forward to itself.");
     _ = try natives.add("//");
     _ = try natives.add("// | dawn.json | Zig |");
     _ = try natives.add("// | --- | --- |");
@@ -2603,7 +2595,7 @@ fn emitMethodSignature(
             const out = objects.?;
             _ = try out.addIndent(1, try std.fmt.allocPrint(
                 gpa,
-                "/// {d} parameters of `{s}` become this struct (`AGENTS.md` section 2).",
+                "/// {d} parameters of `{s}` become this struct.",
                 .{ count, param.zig_type },
             ));
             _ = try out.addIndent(
@@ -2981,9 +2973,8 @@ fn extensionSlotCount(model: *const Model, entry: Entry) usize {
 /// Emit `src/api/handled.zig`: the `Entry` and `Object` domains, the
 /// `coverage` switch, the per-entry `record`, the totals, and the sweeps.
 ///
-/// `coverage` has no `else`: a new upstream entry has no arm and the generated
-/// file stops compiling until someone writes one. That is the whole point
-/// (`AGENTS.md` section 3, `docs/30-port-design.md` section 8.2).
+/// `coverage` has no `else`: a new upstream entry requires an explicit arm.
+/// See `docs/30-port-design.md` section 8.2.
 fn emitHandled(model: *const Model, output: *Output) !void {
     const gpa = output.gpa;
     var handled = output.handled;
@@ -3119,8 +3110,8 @@ fn emitHandled(model: *const Model, output: *Output) !void {
     _ = try handled.add("");
 
     _ = try handled.add("test \"every API entry is ported\" {");
-    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".fields) |field| {");
-    _ = try handled.addIndent(2, "const entry: Entry = @enumFromInt(field.value);");
+    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".field_values) |field_value| {");
+    _ = try handled.addIndent(2, "const entry: Entry = @fromBackingInt(@intCast(field_value));");
     _ = try handled.addIndent(2, "try std.testing.expectEqual(Coverage.ported, coverage(entry));");
     _ = try handled.addIndent(1, "}");
     _ = try handled.add("}");
@@ -3142,16 +3133,16 @@ fn emitHandled(model: *const Model, output: *Output) !void {
     _ = try handled.add("}");
     _ = try handled.add("");
     _ = try handled.add("test \"a chained struct belongs to a root and an extension to none\" {");
-    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".fields) |field| {");
-    _ = try handled.addIndent(2, "try expectEntryChaining(@enumFromInt(field.value));");
+    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".field_values) |field_value| {");
+    _ = try handled.addIndent(2, "try expectEntryChaining(@fromBackingInt(@intCast(field_value)));");
     _ = try handled.addIndent(1, "}");
     _ = try handled.add("}");
     _ = try handled.add("");
     _ = try handled.add("test \"the per-entry table sums to the totals\" {");
     _ = try handled.addIndent(1, "var methods: usize = 0;");
     _ = try handled.addIndent(1, "var members: usize = 0;");
-    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".fields) |field| {");
-    _ = try handled.addIndent(2, "const entry: Entry = @enumFromInt(field.value);");
+    _ = try handled.addIndent(1, "inline for (@typeInfo(Entry).@\"enum\".field_values) |field_value| {");
+    _ = try handled.addIndent(2, "const entry: Entry = @fromBackingInt(@intCast(field_value));");
     _ = try handled.addIndent(2, "methods += record(entry).methods;");
     _ = try handled.addIndent(2, "members += record(entry).members;");
     _ = try handled.addIndent(1, "}");
@@ -3202,16 +3193,17 @@ fn emitEnumDomain(model: *const Model, output: *Output) !void {
     _ = try enums.add("/// fresh block, and the loop body below is the one call.");
     _ = try enums.add("fn expectTagsRoundTrip(comptime kind: Enum) !void {");
     _ = try enums.addIndent(1, "const T = tagType(kind);");
-    _ = try enums.addIndent(1, "inline for (@typeInfo(T).@\"enum\".fields) |tag| {");
-    _ = try enums.addIndent(2, "const value: T = @enumFromInt(tag.value);");
-    _ = try enums.addIndent(2, "try std.testing.expectEqual(tag.value, @intFromEnum(value));");
-    _ = try enums.addIndent(2, "try std.testing.expectEqualStrings(tag.name, @tagName(value));");
+    _ = try enums.addIndent(1, "const info = @typeInfo(T).@\"enum\";");
+    _ = try enums.addIndent(1, "inline for (info.field_names, info.field_values) |tag_name, tag_value| {");
+    _ = try enums.addIndent(2, "const value: T = @fromBackingInt(@intCast(tag_value));");
+    _ = try enums.addIndent(2, "try std.testing.expectEqual(tag_value, @backingInt(value));");
+    _ = try enums.addIndent(2, "try std.testing.expectEqualStrings(tag_name, @tagName(value));");
     _ = try enums.addIndent(1, "}");
     _ = try enums.add("}");
     _ = try enums.add("");
-    _ = try enums.add("test \"every enum tag round-trips through @intFromEnum\" {");
-    _ = try enums.addIndent(1, "inline for (@typeInfo(Enum).@\"enum\".fields) |field| {");
-    _ = try enums.addIndent(2, "try expectTagsRoundTrip(@enumFromInt(field.value));");
+    _ = try enums.add("test \"every enum tag round-trips through @backingInt\" {");
+    _ = try enums.addIndent(1, "inline for (@typeInfo(Enum).@\"enum\".field_values) |field_value| {");
+    _ = try enums.addIndent(2, "try expectTagsRoundTrip(@fromBackingInt(@intCast(field_value)));");
     _ = try enums.addIndent(1, "}");
     _ = try enums.add("}");
     _ = try enums.add("");
@@ -3435,10 +3427,8 @@ pub fn main(init: std.process.Init) GenerateError!void {
         .api = Out.init(gpa, "src/api/api.zig"),
     };
 
-    // `docs/40-plan.md` section M2 carries 347 object, 205 method and 571
-    // member rows. The ledger below fails the run unless the JSON is exactly
-    // what the plan counts: a new upstream entry is `error` rather than a
-    // silent gap in the table.
+    // The pinned JSON has 347 entries. Reject new entries rather than leave
+    // gaps in the generated coverage table.
     if (entries.len != handled_entry_names.len) return error.UpstreamEntryCountChanged;
     try generate(&model, &output);
 

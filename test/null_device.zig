@@ -1,8 +1,7 @@
 //! The M8 shard: a device is created with no GPU.
 //!
-//! `docs/40-plan.md` §1 `### M8` fixes the acceptance: enumerate the null
-//! adapter, request one device with `feature_level = .core` and one with
-//! `.compatibility`, and assert the two report different values for
+//! Enumerate the null adapter, request one device with `feature_level = .core`
+//! and one with `.compatibility`, and assert the two report different values for
 //! `maxStorageBuffersInVertexStage` and `maxStorageBuffersInFragmentStage`.
 //!
 //! **Why those two rows and no other.** They are the only two limits whose
@@ -864,14 +863,14 @@ fn nameDeviceError(err: engine.DeviceError) []const u8 {
 comptime {
     // Reflection hands back a member's name, not a value, and `@field` is what
     // turns a swept member into the error these name.
-    for (@typeInfo(engine.AdapterError).error_set.?) |member| {
-        _ = nameAdapterError(@field(engine.AdapterError, member.name));
+    for (@typeInfo(engine.AdapterError).error_set.error_names.?) |member| {
+        _ = nameAdapterError(@field(engine.AdapterError, member));
     }
-    for (@typeInfo(engine.InstanceError).error_set.?) |member| {
-        _ = nameInstanceError(@field(engine.InstanceError, member.name));
+    for (@typeInfo(engine.InstanceError).error_set.error_names.?) |member| {
+        _ = nameInstanceError(@field(engine.InstanceError, member));
     }
-    for (@typeInfo(engine.DeviceError).error_set.?) |member| {
-        _ = nameDeviceError(@field(engine.DeviceError, member.name));
+    for (@typeInfo(engine.DeviceError).error_set.error_names.?) |member| {
+        _ = nameDeviceError(@field(engine.DeviceError, member));
     }
 }
 

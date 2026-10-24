@@ -57,7 +57,10 @@ const Session = struct {
         });
         errdefer self.device.deinit(allocator, io) catch @panic("Android device rollback failed");
         var caps: api.SurfaceCapabilities = .{
-            .usages = .{}, .format_count = 0, .present_mode_count = 0, .alpha_mode_count = 0,
+            .usages = .{},
+            .format_count = 0,
+            .present_mode_count = 0,
+            .alpha_mode_count = 0,
         };
         _ = try surface_api.getCapabilities(allocator, io, &self.instance, self.surface, &self.adapters.items[0], &caps);
         defer {
@@ -152,7 +155,10 @@ const Session = struct {
             return error.AndroidPresentFailed;
         try self.device.wait(io, serial);
         self.color = color;
-        marker(switch (color) { .red => "WSI_PRESENT_RED", .blue => "WSI_PRESENT_BLUE" });
+        marker(switch (color) {
+            .red => "WSI_PRESENT_RED",
+            .blue => "WSI_PRESENT_BLUE",
+        });
     }
 
     fn deinit(self: *Session, io: std.Io) !void {

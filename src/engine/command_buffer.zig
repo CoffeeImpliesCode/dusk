@@ -51,8 +51,8 @@ test "replay rejects render commands at top level and mismatched pass ends" {
 }
 
 test "replay context classification covers every command tag" {
-    inline for (@typeInfo(commands.Tag).@"enum".fields) |field| {
-        const tag: commands.Tag = @enumFromInt(field.value);
+    inline for (@typeInfo(commands.Tag).@"enum".field_values) |field_value| {
+        const tag: commands.Tag = @fromBackingInt(@intCast(field_value));
         var accepted: bool = false;
         inline for (.{
             ContextKind.top_level,
@@ -325,24 +325,24 @@ test "indirect replay compares the full selected index snapshot" {
         .index_element_count = 5,
     };
     try validateIndirectSnapshot(expected, expected);
-    inline for (@typeInfo(indirect_mod.IndirectDraw).@"struct".fields) |field| {
+    inline for (@typeInfo(indirect_mod.IndirectDraw).@"struct".field_names) |field_name| {
         var changed = expected;
-        if (comptime std.mem.eql(u8, field.name, "buffer") or
-            std.mem.eql(u8, field.name, "draw_count_buffer") or
-            std.mem.eql(u8, field.name, "index_buffer"))
+        if (comptime std.mem.eql(u8, field_name, "buffer") or
+            std.mem.eql(u8, field_name, "draw_count_buffer") or
+            std.mem.eql(u8, field_name, "index_buffer"))
         {
-            @field(changed, field.name) = if (@field(changed, field.name) == null)
+            @field(changed, field_name) = if (@field(changed, field_name) == null)
                 &arguments
             else
                 null;
-        } else if (comptime std.mem.eql(u8, field.name, "indexed") or
-            std.mem.eql(u8, field.name, "multi"))
+        } else if (comptime std.mem.eql(u8, field_name, "indexed") or
+            std.mem.eql(u8, field_name, "multi"))
         {
-            @field(changed, field.name) = !@field(changed, field.name);
-        } else if (comptime std.mem.eql(u8, field.name, "index_format")) {
-            @field(changed, field.name) = .uint32;
+            @field(changed, field_name) = !@field(changed, field_name);
+        } else if (comptime std.mem.eql(u8, field_name, "index_format")) {
+            @field(changed, field_name) = .uint32;
         } else {
-            @field(changed, field.name) += 1;
+            @field(changed, field_name) += 1;
         }
         try std.testing.expectError(error.PassMetadataMismatch, validateIndirectSnapshot(expected, changed));
     }
@@ -1135,8 +1135,8 @@ const Replay = struct {
 };
 
 fn validateIndirectSnapshot(expected: indirect_mod.IndirectDraw, actual: indirect_mod.IndirectDraw) ReplayError!void {
-    inline for (@typeInfo(indirect_mod.IndirectDraw).@"struct".fields) |field| {
-        if (@field(expected, field.name) != @field(actual, field.name))
+    inline for (@typeInfo(indirect_mod.IndirectDraw).@"struct".field_names) |field_name| {
+        if (@field(expected, field_name) != @field(actual, field_name))
             return error.PassMetadataMismatch;
     }
 }
@@ -1982,9 +1982,9 @@ fn attachmentViewShape(
     const aspects = view.aspects.toFlags();
     if (!view.usage.render_attachment or view.native_view == null or
         !view.format_info.caps.renderable or
-        @intFromEnum(view.format_info.format) != @intFromEnum(view.format) or
+        @backingInt(view.format_info.format) != @backingInt(view.format) or
         aspects == 0 or aspects & ~@as(u8, 7) != 0 or
-        aspects & @intFromEnum(view.format_info.aspects) != aspects or
+        aspects & @backingInt(view.format_info.aspects) != aspects or
         view.range.aspects.toFlags() != aspects or
         view.range.level_count != 1 or view.range.layer_count != 1 or
         view.range.base_mip_level >= texture.mip_level_count)
@@ -2004,7 +2004,7 @@ fn attachmentViewShape(
         if (depth_slice >= extent.depth_or_array_layers) return error.InvalidAttachment;
     } else if (depth_slice != 0) return error.InvalidAttachment;
     return .{
-        .format = @intFromEnum(view.format),
+        .format = @backingInt(view.format),
         .sample_count = texture.sample_count,
         .aspects = aspects,
     };
@@ -2145,8 +2145,8 @@ pub fn buildRenderPassCacheQuery(
         query.setColor(.{
             .index = @intCast(index),
             .format = view.format,
-            .load_op = @enumFromInt(@intFromEnum(attachment.load_op)),
-            .store_op = @enumFromInt(@intFromEnum(attachment.store_op)),
+            .load_op = @fromBackingInt(@intCast(@backingInt(attachment.load_op))),
+            .store_op = @fromBackingInt(@intCast(@backingInt(attachment.store_op))),
             .has_resolve_target = attachment.resolve_target != null,
             .render_to_single_sampled = false,
         });
@@ -2173,20 +2173,20 @@ pub fn buildRenderPassCacheQuery(
             .depth_load_op = if (depth.depth_load_op == .undefined_)
                 .load
             else
-                @enumFromInt(@intFromEnum(depth.depth_load_op)),
+                @fromBackingInt(@intCast(@backingInt(depth.depth_load_op))),
             .depth_store_op = if (depth.depth_store_op == .undefined_)
                 .store
             else
-                @enumFromInt(@intFromEnum(depth.depth_store_op)),
+                @fromBackingInt(@intCast(@backingInt(depth.depth_store_op))),
             .depth_read_only = depth.depth_read_only,
             .stencil_load_op = if (depth.stencil_load_op == .undefined_)
                 .load
             else
-                @enumFromInt(@intFromEnum(depth.stencil_load_op)),
+                @fromBackingInt(@intCast(@backingInt(depth.stencil_load_op))),
             .stencil_store_op = if (depth.stencil_store_op == .undefined_)
                 .store
             else
-                @enumFromInt(@intFromEnum(depth.stencil_store_op)),
+                @fromBackingInt(@intCast(@backingInt(depth.stencil_store_op))),
             .stencil_read_only = depth.stencil_read_only,
         });
     }
@@ -2532,7 +2532,7 @@ test "begin semantic rebuild uses actual view formats holes samples and read onl
     const color_value = try buildAttachmentValueLocked(&guard, &colors, .{}, 4, 4);
     try std.testing.expectEqual(@as(u8, 4), color_value.color_attachments_set);
     try std.testing.expectEqual(@as(u32, 4), color_value.sample_count);
-    try std.testing.expectEqual(@intFromEnum(view.format), color_value.color_formats[2]);
+    try std.testing.expectEqual(@backingInt(view.format), color_value.color_formats[2]);
     colors[2].resolve_target = view;
     try std.testing.expectError(
         error.InvalidAttachment,
@@ -2553,7 +2553,7 @@ test "begin semantic rebuild uses actual view formats holes samples and read onl
     };
     const depth_value = try buildAttachmentValueLocked(&guard, &.{}, depth, 4, 4);
     try std.testing.expectEqual(@as(u32, 4), depth_value.sample_count);
-    try std.testing.expectEqual(@intFromEnum(view.format), depth_value.depth_stencil_format);
+    try std.testing.expectEqual(@backingInt(view.format), depth_value.depth_stencil_format);
     view.format = .depth32_float;
     view.format_info = &table[format_mod.computeFormatIndex(view.format).?];
     const other = try buildAttachmentValueLocked(&guard, &.{}, depth, 4, 4);
@@ -2725,8 +2725,8 @@ test "MSAA framebuffer images and clears follow native subpass references with c
     }
     const attachment = try createReplayTestAttachment(&arena, &guard, .{
         .color_attachments_set = 4,
-        .color_formats = .{ 0, 0, @intFromEnum(views[0].format), 0, 0, 0, 0, 0 },
-        .depth_stencil_format = @intFromEnum(views[1].format),
+        .color_formats = .{ 0, 0, @backingInt(views[0].format), 0, 0, 0, 0, 0 },
+        .depth_stencil_format = @backingInt(views[1].format),
         .sample_count = 4,
     });
     defer attachment.header.releaseUserLocked(&guard, std.testing.io) catch unreachable;
@@ -2847,7 +2847,7 @@ const CoupledScopeFixture = struct {
         .memoryTypeCount = 1,
         .memoryTypes = [_]vulkan.VkMemoryType{
             .{ .propertyFlags = vulkan.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT },
-        } ++ ([_]vulkan.VkMemoryType{.{}} ** 31),
+        } ++ @as([31]vulkan.VkMemoryType, @splat(.{})),
     },
 
     fn procs() dispatch.DeviceProcs {
@@ -3009,7 +3009,7 @@ test "scope initializes coupled depth stencil before one union-stage sampled bar
     defer arena.deinit(std.testing.allocator, &guard) catch unreachable;
     var table: format_mod.FormatTable = undefined;
     format_mod.buildFormatTable(.{}, &table);
-    var initialized = [_]bool{false} ** 8;
+    var initialized: [8]bool = @splat(false);
     const texture = try createReplayTestTexture(&arena, &guard, &table[format_mod.computeFormatIndex(.depth24_plus_stencil8).?]);
     defer texture.header.releaseUserLocked(&guard, std.testing.io) catch unreachable;
     texture.dimension = ._2d;
@@ -3171,7 +3171,7 @@ test "single-aspect depth stencil scope aliases share initialization and union s
         var guard = core.ObjectGuard.lockUncancelable(std.testing.io, arena.objectList());
         defer guard.unlock(std.testing.io);
         defer arena.deinit(std.testing.allocator, &guard) catch unreachable;
-        var initialized = [_]bool{false} ** 4;
+        var initialized: [4]bool = @splat(false);
         const texture = try createReplayTestTexture(&arena, &guard, &table[format_mod.computeFormatIndex(case[0]).?]);
         defer texture.header.releaseUserLocked(&guard, std.testing.io) catch unreachable;
         texture.dimension = ._2d;

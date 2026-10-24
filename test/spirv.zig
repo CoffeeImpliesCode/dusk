@@ -1,8 +1,7 @@
 //! The M5 shard: parse, validate and reflect two checked-in fixtures.
 //!
 //! The fixtures are generated, never hand-written. `test/fixtures/*.wgsl` is
-//! the source a reviewer reads, and `docs/50-verification.md` §6.2 records the
-//! command line that produced each `.spv` from it.
+//! the source a reviewer reads.
 //!
 //! **What this file does not claim.** It does not claim the fixtures are the
 //! only shapes a shader can take. It claims what the milestone says: both
@@ -31,7 +30,7 @@ test "spirv: the vertex fixture is a whole number of words and validates clean" 
 
     // A pass that returns has found nothing to report, which is the port's
     // "zero diagnostics". There is no list to inspect because the port has no
-    // channel to report one on; `docs/50-verification.md` §7.1 says so.
+    // channel to report one on.
     try spirv.validate(words);
 }
 
@@ -126,26 +125,19 @@ test "spirv: one synthetic module per failure the reader reports" {
 }
 
 test "spirv: every allocating path releases what it built when an allocation fails" {
-    // `AGENTS.md` §3 asks for this sweep: refusing allocation N from zero up to
-    // the first run that succeeds runs every `error.OutOfMemory` path and every
-    // `errdefer` at least once. `std.testing.allocator` is the back end, so a
-    // path that leaks on the way out fails the test.
     try sweepAllocationFailures(allocateWordsOnly, fragment_fixture);
     try sweepAllocationFailures(allocateReflection, fragment_fixture);
 }
 
 comptime {
-    // `AGENTS.md` §3: sweep the error set at compile time so no member escapes
-    // a test. `rejected_modules` is the sweep, and a member it does not name is
-    // a compile error rather than a silent gap.
-    for (@typeInfo(Error).error_set.?) |member| {
-        if (member.name.len == 0) continue;
+    for (@typeInfo(Error).error_set.error_names.?) |member| {
+        if (member.len == 0) continue;
 
         var named = false;
         for (rejected_modules) |rejected| {
-            if (std.mem.eql(u8, member.name, @errorName(rejected.failure))) named = true;
+            if (std.mem.eql(u8, member, @errorName(rejected.failure))) named = true;
         }
-        if (!named) @compileError("no case in rejected_modules names " ++ member.name);
+        if (!named) @compileError("no case in rejected_modules names " ++ member);
     }
 }
 
@@ -207,7 +199,7 @@ fn overwriteFirstDecoration(words: []Word) !usize {
         if (word_count == 0 or word_count > words.len - index) return error.TruncatedModule;
 
         const opcode = spirv.opcodeOf(words[index]);
-        if (opcode == @intFromEnum(spirv.Opcode.decorate)) {
+        if (opcode == @backingInt(spirv.Opcode.decorate)) {
             if (word_count < 3) return error.TruncatedDecoration;
             words[index + 2] = op_nop;
             return index + 2;

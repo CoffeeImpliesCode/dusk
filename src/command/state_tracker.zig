@@ -3,9 +3,8 @@
 //!
 //! **What this file is.** The port of
 //! `src/dawn/native/CommandBufferStateTracker.{h,cpp}`. Dawn calls it a
-//! *validation* tracker and is explicit that it is lazy
-//! (`docs/02-dawn-design.md` §4.3): five of its six bits are recomputed from
-//! the pipeline only when something needs them.
+//! *validation* tracker and is explicit that it is lazy: five of its six bits
+//! are recomputed from the pipeline only when something needs them.
 //!
 //! **What this file does not claim.** It does not claim to read a pipeline.
 //! Dawn's `RecomputeLazyAspects` (`CommandBufferStateTracker.cpp:534-597`)
@@ -37,7 +36,7 @@ pub const Aspect = enum(u32) {
 };
 
 /// Dawn's `kNumAspects` (`CommandBufferStateTracker.h:84`).
-pub const aspect_count: usize = @typeInfo(Aspect).@"enum".fields.len;
+pub const aspect_count: usize = @typeInfo(Aspect).@"enum".field_names.len;
 
 comptime {
     if (aspect_count != 6) @compileError("the aspect count moved from Dawn's six");
@@ -556,7 +555,7 @@ pub const Tracker = struct {
 /// as `Log2Int(u32)`, which is `u5`. Every mask here is six bits wide, so the
 /// narrowing is lossless and this is the one place it happens.
 fn bit(aspect: Aspect) u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(aspect)));
+    return @as(u32, 1) << @as(u5, @intCast(@backingInt(aspect)));
 }
 
 test "immediate requirements preserve word63 and the full mask" {
@@ -571,7 +570,7 @@ test "immediate requirements preserve word63 and the full mask" {
 
     tracker.setComputePipeline(null, .{ .immediate_slot_mask = std.math.maxInt(u64) });
     try std.testing.expectError(error.MissingImmediateData, tracker.validateCanDispatch());
-    const full_data = [_]u8{0xa5} ** 256;
+    const full_data: [256]u8 = @splat(0xa5);
     try tracker.setImmediateData(0, &full_data);
     try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
     try std.testing.expectEqualSlices(u8, &full_data, &tracker.immediate_data);
@@ -590,7 +589,7 @@ test "immediate range refusal leaves tracker bytes masks and aspects unchanged" 
         .{ .offset = 1, .data = &initial_word, .expected = error.ImmediateDataUnaligned },
         .{ .offset = 0, .data = initial_word[0..3], .expected = error.ImmediateDataUnaligned },
         .{ .offset = 256, .data = &initial_word, .expected = error.ImmediateDataTooLarge },
-        .{ .offset = 252, .data = &([_]u8{0} ** 8), .expected = error.ImmediateDataTooLarge },
+        .{ .offset = 252, .data = &@as([8]u8, @splat(0)), .expected = error.ImmediateDataTooLarge },
         .{ .offset = 0xffff_fffc, .data = &initial_word, .expected = error.ImmediateDataTooLarge },
     };
     for (cases) |case| {

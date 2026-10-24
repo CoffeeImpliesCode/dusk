@@ -680,7 +680,7 @@ fn executeRender(f: *Fixture, pipeline: *engine.native_resources.Pipeline) !void
         try pass.draw(.{ .vertex_count = 3, .instance_count = 1, .first_vertex = 0, .first_instance = 0 });
         try pass.end(io, &guard);
         try encoder.copyTextureToBuffer(.{
-            .source = .{ .texture = target, .format = @intFromEnum(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
+            .source = .{ .texture = target, .format = @backingInt(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 } },
             .destination = .{ .buffer = try readback.ref(&guard), .blocks_per_row = 64, .rows_per_image = extent },
             .copy_size = .{ .width = extent, .height = extent, .depth_or_array_layers = 1 },
         });

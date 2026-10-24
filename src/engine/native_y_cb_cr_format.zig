@@ -448,7 +448,7 @@ test "every core YCbCr format has exact 4x4 plane sizes" {
         .{ .count = 3, .bytes = .{ 32, 32, 32 } },
     };
     for (expected, 0..) |entry, index| {
-        const format: vk.VkFormat = vk.VK_FORMAT_G8B8G8R8_422_UNORM + @as(u32, @intCast(index));
+        const format: vk.VkFormat = @as(vk.VkFormat, vk.VK_FORMAT_G8B8G8R8_422_UNORM) + @as(vk.VkFormat, @intCast(index));
         const traits = try traitsFor(format);
         try std.testing.expectEqual(entry.count, traits.plane_count);
         for (0..3) |plane_index| {

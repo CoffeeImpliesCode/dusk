@@ -101,8 +101,12 @@ fn createImage(_: vk.VkDevice, input: [*c]const vk.VkImageCreateInfo, _: [*c]con
     output.* = @ptrFromInt(0x1000);
     return vk.VK_SUCCESS;
 }
-fn destroyImage(_: vk.VkDevice, _: vk.VkImage, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void { destroys += 1; }
-fn requirements(_: vk.VkDevice, _: vk.VkImage, out: [*c]vk.VkMemoryRequirements) callconv(.c) void { out.* = .{ .size = 64, .alignment = 16, .memoryTypeBits = 6 }; }
+fn destroyImage(_: vk.VkDevice, _: vk.VkImage, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    destroys += 1;
+}
+fn requirements(_: vk.VkDevice, _: vk.VkImage, out: [*c]vk.VkMemoryRequirements) callconv(.c) void {
+    out.* = .{ .size = 64, .alignment = 16, .memoryTypeBits = 6 };
+}
 fn fdProperties(_: vk.VkDevice, handle: vk.VkExternalMemoryHandleTypeFlagBits, _: c_int, out: [*c]vk.VkMemoryFdPropertiesKHR) callconv(.c) vk.VkResult {
     std.debug.assert(handle == vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
     out.*.memoryTypeBits = 12;
@@ -120,7 +124,9 @@ fn allocateMemory(_: vk.VkDevice, input: [*c]const vk.VkMemoryAllocateInfo, _: [
     output.* = @ptrFromInt(0x2000);
     return vk.VK_SUCCESS;
 }
-fn freeMemory(_: vk.VkDevice, _: vk.VkDeviceMemory, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void { frees += 1; }
+fn freeMemory(_: vk.VkDevice, _: vk.VkDeviceMemory, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    frees += 1;
+}
 fn bindImage(_: vk.VkDevice, _: vk.VkImage, _: vk.VkDeviceMemory, offset: vk.VkDeviceSize) callconv(.c) vk.VkResult {
     std.debug.assert(offset == 0);
     return if (failure == .bind) vk.VK_ERROR_OUT_OF_DEVICE_MEMORY else vk.VK_SUCCESS;
@@ -160,8 +166,21 @@ const TestCalls = struct {
         return dma.importDmaBuf(allocator, io, self.options, value, info);
     }
 };
-fn reset() void { format_calls = 0; image_queries = 0; unstable = false; importable = true; modifier_features = vk.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | vk.VK_FORMAT_FEATURE_TRANSFER_SRC_BIT; creates = 0; destroys = 0; frees = 0; allocated_fd = -1; failure = .none; }
-fn query() dma.DmaBufFormatQuery { return .{ .format = vk.VK_FORMAT_R8G8B8A8_UNORM, .drm_format = dma.drmFourcc('A', 'B', '2', '4'), .modifier = 0, .plane_count = 1, .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT }; }
+fn reset() void {
+    format_calls = 0;
+    image_queries = 0;
+    unstable = false;
+    importable = true;
+    modifier_features = vk.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | vk.VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    creates = 0;
+    destroys = 0;
+    frees = 0;
+    allocated_fd = -1;
+    failure = .none;
+}
+fn query() dma.DmaBufFormatQuery {
+    return .{ .format = vk.VK_FORMAT_R8G8B8A8_UNORM, .drm_format = dma.drmFourcc('A', 'B', '2', '4'), .modifier = 0, .plane_count = 1, .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT };
+}
 
 test "DMA-BUF queries exact modifier chain and requires importable properties" {
     reset();

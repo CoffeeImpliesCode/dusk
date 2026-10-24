@@ -123,7 +123,6 @@ fn emitLinux(writer: *std.Io.Writer, options: LinuxOptions) std.Io.Writer.Error!
         \\}
         \\
     );
-
 }
 
 fn emitAndroid(writer: *std.Io.Writer) std.Io.Writer.Error!void {

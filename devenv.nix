@@ -1,16 +1,7 @@
 { pkgs, lib, config, inputs, ... }:
 
 let
-  # Zig 0.16.0 cannot keep its caches on a network filesystem: the package
-  # unpacker mis-stats the files it writes and reports them as "illegal file
-  # type 'unknown'", and the cache-rename path panics on an EINVAL from
-  # `access`. Identical sources build cleanly on local disk, so every cache
-  # lives there and the build root points at it.
-  #
-  # This checkout is under $HOME on NFS, so the default resolves to
-  # $XDG_CACHE_HOME/dusk. `~/.dev-env.sh` points XDG_CACHE_HOME at the host
-  # scratch mount, which is local disk. DUSK_CACHE_ROOT wins over that; set it
-  # explicitly when the XDG default is not local.
+  # Use an external cache root when the checkout is on a network filesystem.
   cacheRoot =
     let
       duskCacheRoot = builtins.getEnv "DUSK_CACHE_ROOT";
@@ -25,9 +16,7 @@ let
 
   # This source reference is fetched only by `zig build fetch-dawn`.
   # The translator uses the same revision but needs a complete source tree.
-  scratchRoot =
-    let s = builtins.getEnv "buildhost_SCRATCH_ROOT";
-    in if s != "" then s else "${builtins.getEnv "HOME"}/.cache/dusk-research";
+  scratchRoot = "${builtins.getEnv "HOME"}/.cache/dusk-research";
   dawnSrc =
     let override = builtins.getEnv "DUSK_DAWN_SRC";
     in if override != "" then override else "${scratchRoot}/research/dawn";
@@ -63,9 +52,7 @@ in
     pkgs.vulkan-tools
     pkgs.spirv-tools
 
-    # `volk` is the Vulkan dispatch loader. It is a C library and a candidate
-    # consume-don't-port dependency for the loader slot; `docs/20-dependencies.md`
-    # owns that decision and the user has not made it yet.
+    # Vulkan dispatch utilities.
     pkgs.vulkan-volk
 
     # The WGSL to SPIR-V translator, built from the pinned Dawn checkout rather
@@ -86,9 +73,7 @@ in
     pkgs.python3Packages.jinja2
     pkgs.python3Packages.markupsafe
 
-    # SPIRV-Tools: `spirv-val` proves a committed `.spv` fixture is well formed
-    # before the engine sees it. The port's own validator is Zig and needs no
-    # C++ at all; see `docs/20-dependencies.md`.
+    # The library's SPIR-V validator does not need these external tools.
 
     # The Khronos validation layer. A verification tool, never a runtime
     # dependency: the library must run correctly with zero layers enabled.
@@ -110,12 +95,7 @@ in
   env.GATE_CACHE_DIR = "${cacheRoot}/build";
   env.GATE_CROSS_OUTPUT = "${cacheRoot}/cross-test";
 
-  # Keep all source checks enabled. Exclude generated caches at any depth, and
-  # the two GENERATED source trees: `src/vulkan.zig` is `zig translate-c`
-  # output over the pinned header and `src/api/` comes from `tools/gen_api.zig`.
-  # Both carry a "do not edit" banner, so a finding in either is a finding in
-  # its generator, not in this tree, and a hand fix would be erased by the next
-  # `zig build generate`. `docs/50-verification.md` §8.1 records the scope.
+  # Generated bindings and API declarations are checked through their generators.
   env.GATE_EXCLUDE = "/[.]zig-cache/ /zig-out/ /zig-cache/ /.jj/ /devenv/ /.direnv/ /src/vulkan[.]zig /src/api/";
 
   # Vulkan-Headers v1.4.365. The source root contains vulkan/vulkan and
@@ -145,14 +125,18 @@ in
   # `VK_LAYER_ENABLES` never reads this variable.
   env.VK_LAYER_VALIDATE_SYNC = "1";
 
-  # Report to stderr. The default log is a file under $HOME, which is NFS here,
-  # and a test that cannot see the layer's output cannot assert on it.
-  # `abort_on_error` stays off: failing an assertion is the test's job, and a
-  # layer that aborts takes the whole shard with it.
+  # Keep validation diagnostics on stderr.
   env.VK_LAYER_LOG_PATH = "stderr";
   env.VK_LAYER_LOG_LEVEL = "info";
+  # Keep lavapipe's worker pool within the test process address-space limit.
+  env.LP_NUM_THREADS = "2";
 
   enterShell = ''
+    if [ "$(zig version)" != "0.17.0" ]; then
+      echo "dusk requires Zig 0.17.0 on PATH" >&2
+      return 1
+    fi
+
     # Create this project's cache targets before linking the build root.
     mkdir -p -- "${cacheRoot}/build" "${cacheRoot}/pkg" "$ZIG_GLOBAL_CACHE_DIR"
 
@@ -161,7 +145,7 @@ in
     # so say so rather than silently moving a populated cache.
     for d in .zig-cache zig-pkg; do
       if [ -e "$d" ] && [ ! -L "$d" ]; then
-        echo "dusk: $PWD/$d is a real directory; Zig 0.16.0 cannot build here." >&2
+        echo "dusk: $PWD/$d is a real directory; external cache linking was skipped." >&2
         echo "dusk: remove it and let devenv link it to ${cacheRoot}." >&2
       else
         case $d in
@@ -171,27 +155,7 @@ in
       fi
     done
 
-    # Vulkan driver discovery. See the note in the `let` block.
-    #
-    # Inside devenv this shell runs in a container whose `/usr` is NOT the
-    # host's `/usr`: `/usr/share/vulkan/icd.d` does not exist in here at all, so
-    # the host NVIDIA ICD is unreachable and `libvulkan` reports
-    # `vkCreateInstance: Found no drivers!`. That is the observed failure, and
-    # it is a container fact, not a search-path bug.
-    #
-    # So the driver inside devenv is lavapipe, Mesa's software rasteriser. It
-    # needs no GPU and no display, which is what a headless test wants, and it
-    # makes the suite reproducible on any machine.
-    #
-    # Mesa also installs intel, freedreno, radeon, nouveau, virtio and ten more
-    # ICDs. They are excluded deliberately: each probes DRM nodes it does not
-    # own and prints a `VK_ERROR_INCOMPATIBLE_DRIVER` error, which would drown
-    # a real failure in noise.
-    #
-    # DUSK_VK_DRIVER_FILES overrides the whole list, which is how a run reaches
-    # real hardware: leave devenv and point it at the NVIDIA ICD, or bind
-    # /usr/share/vulkan/icd.d and /dev/nvidia* into the devenv container.
-    # `docs/50-verification.md` owns that matrix.
+    # Use lavapipe by default; DUSK_VK_DRIVER_FILES selects another ICD.
     _dusk_icds=""
     if [ -n "$DUSK_VK_DRIVER_FILES" ]; then
       _dusk_list="$DUSK_VK_DRIVER_FILES"
@@ -230,13 +194,7 @@ in
   tasks."dusk:vulkan-doctor".exec = "vulkaninfo --summary";
   tasks."dusk:vulkan-doctor".description = "Report the Vulkan devices and layers this shell can see";
 
-  # The WGSL to SPIR-V translator. Built from the pinned Dawn checkout, inside
-  # this shell, so it links against the same glibc the tests run on.
-  #
-  # The result is cached in `tools/` under the scratch cache root and exported
-  # as `DUSK_TINT`. It is a test-time tool: `build.zig.zon` has no entry for it
-  # and the library never links it. `docs/50-verification.md` owns the fixture
-  # pipeline that consumes it.
+  # Build Tint from the same Dawn revision used by the kernel generator.
   tasks."dusk:build-tint" = {
     description = "Build the pinned Dawn tint binary used to compile WGSL test fixtures";
     exec = ''
@@ -246,7 +204,7 @@ in
       build="${scratchRoot}/tint-build"
       if [ ! -d "$src/.git" ]; then
         echo "dusk: no standalone Dawn checkout at $src" >&2
-        echo "dusk: run zig build fetch-dawn first; see docs/20-dependencies.md" >&2
+        echo "dusk: run zig build fetch-dawn first; see README.md" >&2
         exit 1
       fi
       if [ "$(git -C "$src" rev-parse HEAD)" != "${dawnRevision}" ] ||
@@ -261,7 +219,7 @@ in
       fi
       if [ ! -d "$src/tools" ] || [ ! -d "$src/third_party" ]; then
         echo "dusk: sparse source reference is not a complete Tint build tree" >&2
-        echo "dusk: prepare complete pinned sources and dependencies separately; see docs/20-dependencies.md" >&2
+        echo "dusk: prepare complete pinned sources and dependencies separately; see README.md" >&2
         exit 1
       fi
       mkdir -p "$(dirname "$out")"

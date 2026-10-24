@@ -3,12 +3,3 @@ inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
 
-# Non-OSS packages are not needed. The Vulkan headers, the loader and SPIR-V
-# Tools are all OSS. See `docs/20-dependencies.md` for which slots are a C
-# library and which are ported to Zig.
-# allow_unfree: false
-
-# The default openSUSE Leap host has no packages marked unsupported for it, so
-# this stays at the default. Set it only if a future pin disagrees with the
-# host release.
-# allow_unsupported_system: false

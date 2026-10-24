@@ -8,11 +8,9 @@
 //! before they publish a pass, pipeline or bundle owner.
 //!
 //! **What this file does not claim.** It does not claim these names exist
-//! upstream. Dawn has no message-id mechanism at this revision
-//! (`docs/02-dawn-design.md` §4.8): its 772 `DAWN_INVALID_IF` sites each carry
-//! their own text, and `grep -rn DrawVertexCount src/` over the pinned tree
-//! returns nothing. `DrawVertexCount` is the port's own id, and the
-//! `docs/40-plan.md` §M15 acceptance names it for that reason.
+//! upstream. Dawn has no message-id mechanism at this revision: its 772
+//! `DAWN_INVALID_IF` sites each carry their own text. `DrawVertexCount` is the
+//! port's own id.
 //!
 //! It does not claim `core.message_table` renders these. That table is keyed
 //! by `core.nameOf`, and a rule outside `core` has no key there. `describe`

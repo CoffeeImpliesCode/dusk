@@ -7,24 +7,89 @@ pub const max_align_t = extern struct {
     __aro_max_align_ll: c_longlong = 0,
     __aro_max_align_ld: c_longdouble = 0,
 };
-pub const int_least64_t = i64;
-pub const uint_least64_t = u64;
-pub const int_fast64_t = i64;
-pub const uint_fast64_t = u64;
-pub const int_least32_t = i32;
-pub const uint_least32_t = u32;
-pub const int_fast32_t = i32;
-pub const uint_fast32_t = u32;
-pub const int_least16_t = i16;
-pub const uint_least16_t = u16;
-pub const int_fast16_t = i16;
-pub const uint_fast16_t = u16;
-pub const int_least8_t = i8;
-pub const uint_least8_t = u8;
+pub const __u_char = u8;
+pub const __u_short = c_ushort;
+pub const __u_int = c_uint;
+pub const __u_long = c_ulong;
+pub const __int8_t = i8;
+pub const __uint8_t = u8;
+pub const __int16_t = c_short;
+pub const __uint16_t = c_ushort;
+pub const __int32_t = c_int;
+pub const __uint32_t = c_uint;
+pub const __int64_t = c_long;
+pub const __uint64_t = c_ulong;
+pub const __int_least8_t = __int8_t;
+pub const __uint_least8_t = __uint8_t;
+pub const __int_least16_t = __int16_t;
+pub const __uint_least16_t = __uint16_t;
+pub const __int_least32_t = __int32_t;
+pub const __uint_least32_t = __uint32_t;
+pub const __int_least64_t = __int64_t;
+pub const __uint_least64_t = __uint64_t;
+pub const __quad_t = c_long;
+pub const __u_quad_t = c_ulong;
+pub const __intmax_t = c_long;
+pub const __uintmax_t = c_ulong;
+pub const __dev_t = c_ulong;
+pub const __uid_t = c_uint;
+pub const __gid_t = c_uint;
+pub const __ino_t = c_ulong;
+pub const __ino64_t = c_ulong;
+pub const __mode_t = c_uint;
+pub const __nlink_t = c_ulong;
+pub const __off_t = c_long;
+pub const __off64_t = c_long;
+pub const __pid_t = c_int;
+pub const __fsid_t = extern struct {
+    __val: [2]c_int = @import("std").mem.zeroes([2]c_int),
+};
+pub const __clock_t = c_long;
+pub const __rlim_t = c_ulong;
+pub const __rlim64_t = c_ulong;
+pub const __id_t = c_uint;
+pub const __time_t = c_long;
+pub const __useconds_t = c_uint;
+pub const __suseconds_t = c_long;
+pub const __suseconds64_t = c_long;
+pub const __daddr_t = c_int;
+pub const __key_t = c_int;
+pub const __clockid_t = c_int;
+pub const __timer_t = ?*anyopaque;
+pub const __blksize_t = c_long;
+pub const __blkcnt_t = c_long;
+pub const __blkcnt64_t = c_long;
+pub const __fsblkcnt_t = c_ulong;
+pub const __fsblkcnt64_t = c_ulong;
+pub const __fsfilcnt_t = c_ulong;
+pub const __fsfilcnt64_t = c_ulong;
+pub const __fsword_t = c_long;
+pub const __ssize_t = c_long;
+pub const __syscall_slong_t = c_long;
+pub const __syscall_ulong_t = c_ulong;
+pub const __loff_t = __off64_t;
+pub const __caddr_t = [*c]u8;
+pub const __intptr_t = c_long;
+pub const __socklen_t = c_uint;
+pub const __sig_atomic_t = c_int;
+pub const int_least8_t = __int_least8_t;
+pub const int_least16_t = __int_least16_t;
+pub const int_least32_t = __int_least32_t;
+pub const int_least64_t = __int_least64_t;
+pub const uint_least8_t = __uint_least8_t;
+pub const uint_least16_t = __uint_least16_t;
+pub const uint_least32_t = __uint_least32_t;
+pub const uint_least64_t = __uint_least64_t;
 pub const int_fast8_t = i8;
+pub const int_fast16_t = c_long;
+pub const int_fast32_t = c_long;
+pub const int_fast64_t = c_long;
 pub const uint_fast8_t = u8;
-pub const intmax_t = c_long;
-pub const uintmax_t = c_ulong;
+pub const uint_fast16_t = c_ulong;
+pub const uint_fast32_t = c_ulong;
+pub const uint_fast64_t = c_ulong;
+pub const intmax_t = __intmax_t;
+pub const uintmax_t = __uintmax_t;
 pub const VkBool32 = u32;
 pub const VkDeviceAddress = u64;
 pub const VkDeviceSize = u64;
@@ -9014,7 +9079,8 @@ pub const STD_VIDEO_H264_NON_VCL_NALU_TYPE_PRECODED: c_int = 6;
 pub const STD_VIDEO_H264_NON_VCL_NALU_TYPE_INVALID: c_int = 2147483647;
 pub const STD_VIDEO_H264_NON_VCL_NALU_TYPE_MAX_ENUM: c_int = 2147483647;
 pub const enum_StdVideoH264NonVclNaluType = c_uint;
-pub const StdVideoH264NonVclNaluType = enum_StdVideoH264NonVclNaluType; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:186:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH264NonVclNaluType = enum_StdVideoH264NonVclNaluType;
+// vk_video/vulkan_video_codec_h264std.h:186:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH264SpsVuiFlags = opaque {};
 pub const StdVideoH264SpsVuiFlags = struct_StdVideoH264SpsVuiFlags;
 pub const struct_StdVideoH264HrdParameters = extern struct {
@@ -9030,9 +9096,11 @@ pub const struct_StdVideoH264HrdParameters = extern struct {
     dpb_output_delay_length_minus1: u32 = 0,
     time_offset_length: u32 = 0,
 };
-pub const StdVideoH264HrdParameters = struct_StdVideoH264HrdParameters; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:215:41: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH264HrdParameters = struct_StdVideoH264HrdParameters;
+// vk_video/vulkan_video_codec_h264std.h:215:41: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH264SequenceParameterSetVui = opaque {};
-pub const StdVideoH264SequenceParameterSetVui = struct_StdVideoH264SequenceParameterSetVui; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:234:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH264SequenceParameterSetVui = struct_StdVideoH264SequenceParameterSetVui;
+// vk_video/vulkan_video_codec_h264std.h:234:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH264SpsFlags = opaque {};
 pub const StdVideoH264SpsFlags = struct_StdVideoH264SpsFlags;
 pub const struct_StdVideoH264ScalingLists = extern struct {
@@ -9041,11 +9109,14 @@ pub const struct_StdVideoH264ScalingLists = extern struct {
     ScalingList4x4: [6][16]u8 = @import("std").mem.zeroes([6][16]u8),
     ScalingList8x8: [6][64]u8 = @import("std").mem.zeroes([6][64]u8),
 };
-pub const StdVideoH264ScalingLists = struct_StdVideoH264ScalingLists; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:260:51: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH264ScalingLists = struct_StdVideoH264ScalingLists;
+// vk_video/vulkan_video_codec_h264std.h:260:51: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH264SequenceParameterSet = opaque {};
-pub const StdVideoH264SequenceParameterSet = struct_StdVideoH264SequenceParameterSet; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:288:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH264SequenceParameterSet = struct_StdVideoH264SequenceParameterSet;
+// vk_video/vulkan_video_codec_h264std.h:288:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH264PpsFlags = opaque {};
-pub const StdVideoH264PpsFlags = struct_StdVideoH264PpsFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std.h:299:40: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH264PpsFlags = struct_StdVideoH264PpsFlags;
+// vk_video/vulkan_video_codec_h264std.h:299:40: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH264PictureParameterSet = opaque {};
 pub const StdVideoH264PictureParameterSet = struct_StdVideoH264PictureParameterSet;
 pub const struct_StdVideoEncodeH264WeightTableFlags = extern struct {
@@ -9068,13 +9139,17 @@ pub const struct_StdVideoEncodeH264WeightTable = extern struct {
     chroma_weight_l1: [32][2]i8 = @import("std").mem.zeroes([32][2]i8),
     chroma_offset_l1: [32][2]i8 = @import("std").mem.zeroes([32][2]i8),
 };
-pub const StdVideoEncodeH264WeightTable = struct_StdVideoEncodeH264WeightTable; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:54:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH264WeightTable = struct_StdVideoEncodeH264WeightTable;
+// vk_video/vulkan_video_codec_h264std_encode.h:54:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH264SliceHeaderFlags = opaque {};
-pub const StdVideoEncodeH264SliceHeaderFlags = struct_StdVideoEncodeH264SliceHeaderFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:60:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH264SliceHeaderFlags = struct_StdVideoEncodeH264SliceHeaderFlags;
+// vk_video/vulkan_video_codec_h264std_encode.h:60:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH264PictureInfoFlags = opaque {};
-pub const StdVideoEncodeH264PictureInfoFlags = struct_StdVideoEncodeH264PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:69:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH264PictureInfoFlags = struct_StdVideoEncodeH264PictureInfoFlags;
+// vk_video/vulkan_video_codec_h264std_encode.h:69:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH264ReferenceInfoFlags = opaque {};
-pub const StdVideoEncodeH264ReferenceInfoFlags = struct_StdVideoEncodeH264ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:74:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH264ReferenceInfoFlags = struct_StdVideoEncodeH264ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_h264std_encode.h:74:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH264ReferenceListsInfoFlags = opaque {};
 pub const StdVideoEncodeH264ReferenceListsInfoFlags = struct_StdVideoEncodeH264ReferenceListsInfoFlags;
 pub const struct_StdVideoEncodeH264RefListModEntry = extern struct {
@@ -9090,13 +9165,17 @@ pub const struct_StdVideoEncodeH264RefPicMarkingEntry = extern struct {
     long_term_frame_idx: u16 = 0,
     max_long_term_frame_idx_plus1: u16 = 0,
 };
-pub const StdVideoEncodeH264RefPicMarkingEntry = struct_StdVideoEncodeH264RefPicMarkingEntry; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:94:52: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH264RefPicMarkingEntry = struct_StdVideoEncodeH264RefPicMarkingEntry;
+// vk_video/vulkan_video_codec_h264std_encode.h:94:52: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH264ReferenceListsInfo = opaque {};
-pub const StdVideoEncodeH264ReferenceListsInfo = struct_StdVideoEncodeH264ReferenceListsInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:109:52: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH264ReferenceListsInfo = struct_StdVideoEncodeH264ReferenceListsInfo;
+// vk_video/vulkan_video_codec_h264std_encode.h:109:52: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH264PictureInfo = opaque {};
-pub const StdVideoEncodeH264PictureInfo = struct_StdVideoEncodeH264PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:122:45: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH264PictureInfo = struct_StdVideoEncodeH264PictureInfo;
+// vk_video/vulkan_video_codec_h264std_encode.h:122:45: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH264ReferenceInfo = opaque {};
-pub const StdVideoEncodeH264ReferenceInfo = struct_StdVideoEncodeH264ReferenceInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_encode.h:132:47: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH264ReferenceInfo = struct_StdVideoEncodeH264ReferenceInfo;
+// vk_video/vulkan_video_codec_h264std_encode.h:132:47: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH264SliceHeader = opaque {};
 pub const StdVideoEncodeH264SliceHeader = struct_StdVideoEncodeH264SliceHeader;
 pub const VK_VIDEO_ENCODE_H264_CAPABILITY_HRD_COMPLIANCE_BIT_KHR: c_int = 1;
@@ -9373,17 +9452,23 @@ pub const struct_StdVideoH265SubLayerHrdParameters = extern struct {
     bit_rate_du_value_minus1: [32]u32 = @import("std").mem.zeroes([32]u32),
     cbr_flag: u32 = 0,
 };
-pub const StdVideoH265SubLayerHrdParameters = struct_StdVideoH265SubLayerHrdParameters; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:143:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265SubLayerHrdParameters = struct_StdVideoH265SubLayerHrdParameters;
+// vk_video/vulkan_video_codec_h265std.h:143:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265HrdFlags = opaque {};
-pub const StdVideoH265HrdFlags = struct_StdVideoH265HrdFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:153:49: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265HrdFlags = struct_StdVideoH265HrdFlags;
+// vk_video/vulkan_video_codec_h265std.h:153:49: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265HrdParameters = opaque {};
-pub const StdVideoH265HrdParameters = struct_StdVideoH265HrdParameters; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:171:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265HrdParameters = struct_StdVideoH265HrdParameters;
+// vk_video/vulkan_video_codec_h265std.h:171:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265VpsFlags = opaque {};
-pub const StdVideoH265VpsFlags = struct_StdVideoH265VpsFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:178:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265VpsFlags = struct_StdVideoH265VpsFlags;
+// vk_video/vulkan_video_codec_h265std.h:178:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265ProfileTierLevelFlags = opaque {};
-pub const StdVideoH265ProfileTierLevelFlags = struct_StdVideoH265ProfileTierLevelFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:186:42: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265ProfileTierLevelFlags = struct_StdVideoH265ProfileTierLevelFlags;
+// vk_video/vulkan_video_codec_h265std.h:186:42: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265ProfileTierLevel = opaque {};
-pub const StdVideoH265ProfileTierLevel = struct_StdVideoH265ProfileTierLevel; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:192:44: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265ProfileTierLevel = struct_StdVideoH265ProfileTierLevel;
+// vk_video/vulkan_video_codec_h265std.h:192:44: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265VideoParameterSet = opaque {};
 pub const StdVideoH265VideoParameterSet = struct_StdVideoH265VideoParameterSet;
 pub const struct_StdVideoH265ScalingLists = extern struct {
@@ -9394,30 +9479,38 @@ pub const struct_StdVideoH265ScalingLists = extern struct {
     ScalingListDCCoef16x16: [6]u8 = @import("std").mem.zeroes([6]u8),
     ScalingListDCCoef32x32: [2]u8 = @import("std").mem.zeroes([2]u8),
 };
-pub const StdVideoH265ScalingLists = struct_StdVideoH265ScalingLists; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:216:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265ScalingLists = struct_StdVideoH265ScalingLists;
+// vk_video/vulkan_video_codec_h265std.h:216:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265SpsVuiFlags = opaque {};
-pub const StdVideoH265SpsVuiFlags = struct_StdVideoH265SpsVuiFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:237:41: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265SpsVuiFlags = struct_StdVideoH265SpsVuiFlags;
+// vk_video/vulkan_video_codec_h265std.h:237:41: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265SequenceParameterSetVui = opaque {};
 pub const StdVideoH265SequenceParameterSetVui = struct_StdVideoH265SequenceParameterSetVui;
 pub const struct_StdVideoH265PredictorPaletteEntries = extern struct {
     PredictorPaletteEntries: [3][128]u16 = @import("std").mem.zeroes([3][128]u16),
 };
-pub const StdVideoH265PredictorPaletteEntries = struct_StdVideoH265PredictorPaletteEntries; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:270:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265PredictorPaletteEntries = struct_StdVideoH265PredictorPaletteEntries;
+// vk_video/vulkan_video_codec_h265std.h:270:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265SpsFlags = opaque {};
-pub const StdVideoH265SpsFlags = struct_StdVideoH265SpsFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:303:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265SpsFlags = struct_StdVideoH265SpsFlags;
+// vk_video/vulkan_video_codec_h265std.h:303:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265ShortTermRefPicSetFlags = opaque {};
-pub const StdVideoH265ShortTermRefPicSetFlags = struct_StdVideoH265ShortTermRefPicSetFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:308:44: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265ShortTermRefPicSetFlags = struct_StdVideoH265ShortTermRefPicSetFlags;
+// vk_video/vulkan_video_codec_h265std.h:308:44: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265ShortTermRefPicSet = opaque {};
 pub const StdVideoH265ShortTermRefPicSet = struct_StdVideoH265ShortTermRefPicSet;
 pub const struct_StdVideoH265LongTermRefPicsSps = extern struct {
     used_by_curr_pic_lt_sps_flag: u32 = 0,
     lt_ref_pic_poc_lsb_sps: [32]u32 = @import("std").mem.zeroes([32]u32),
 };
-pub const StdVideoH265LongTermRefPicsSps = struct_StdVideoH265LongTermRefPicsSps; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:330:51: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265LongTermRefPicsSps = struct_StdVideoH265LongTermRefPicsSps;
+// vk_video/vulkan_video_codec_h265std.h:330:51: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265SequenceParameterSet = opaque {};
-pub const StdVideoH265SequenceParameterSet = struct_StdVideoH265SequenceParameterSet; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:372:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoH265SequenceParameterSet = struct_StdVideoH265SequenceParameterSet;
+// vk_video/vulkan_video_codec_h265std.h:372:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoH265PpsFlags = opaque {};
-pub const StdVideoH265PpsFlags = struct_StdVideoH265PpsFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std.h:406:51: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoH265PpsFlags = struct_StdVideoH265PpsFlags;
+// vk_video/vulkan_video_codec_h265std.h:406:51: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoH265PictureParameterSet = opaque {};
 pub const StdVideoH265PictureParameterSet = struct_StdVideoH265PictureParameterSet;
 pub const struct_StdVideoEncodeH265WeightTableFlags = extern struct {
@@ -9440,15 +9533,20 @@ pub const struct_StdVideoEncodeH265WeightTable = extern struct {
     delta_chroma_weight_l1: [15][2]i8 = @import("std").mem.zeroes([15][2]i8),
     delta_chroma_offset_l1: [15][2]i8 = @import("std").mem.zeroes([15][2]i8),
 };
-pub const StdVideoEncodeH265WeightTable = struct_StdVideoEncodeH265WeightTable; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:54:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH265WeightTable = struct_StdVideoEncodeH265WeightTable;
+// vk_video/vulkan_video_codec_h265std_encode.h:54:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH265SliceSegmentHeaderFlags = opaque {};
-pub const StdVideoEncodeH265SliceSegmentHeaderFlags = struct_StdVideoEncodeH265SliceSegmentHeaderFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:70:50: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH265SliceSegmentHeaderFlags = struct_StdVideoEncodeH265SliceSegmentHeaderFlags;
+// vk_video/vulkan_video_codec_h265std_encode.h:70:50: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH265SliceSegmentHeader = opaque {};
-pub const StdVideoEncodeH265SliceSegmentHeader = struct_StdVideoEncodeH265SliceSegmentHeader; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:88:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH265SliceSegmentHeader = struct_StdVideoEncodeH265SliceSegmentHeader;
+// vk_video/vulkan_video_codec_h265std_encode.h:88:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH265ReferenceListsInfoFlags = opaque {};
-pub const StdVideoEncodeH265ReferenceListsInfoFlags = struct_StdVideoEncodeH265ReferenceListsInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:94:50: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH265ReferenceListsInfoFlags = struct_StdVideoEncodeH265ReferenceListsInfoFlags;
+// vk_video/vulkan_video_codec_h265std_encode.h:94:50: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH265ReferenceListsInfo = opaque {};
-pub const StdVideoEncodeH265ReferenceListsInfo = struct_StdVideoEncodeH265ReferenceListsInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:104:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH265ReferenceListsInfo = struct_StdVideoEncodeH265ReferenceListsInfo;
+// vk_video/vulkan_video_codec_h265std_encode.h:104:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH265PictureInfoFlags = opaque {};
 pub const StdVideoEncodeH265PictureInfoFlags = struct_StdVideoEncodeH265PictureInfoFlags;
 pub const struct_StdVideoEncodeH265LongTermRefPics = extern struct {
@@ -9460,11 +9558,14 @@ pub const struct_StdVideoEncodeH265LongTermRefPics = extern struct {
     delta_poc_msb_present_flag: [48]u8 = @import("std").mem.zeroes([48]u8),
     delta_poc_msb_cycle_lt: [48]u8 = @import("std").mem.zeroes([48]u8),
 };
-pub const StdVideoEncodeH265LongTermRefPics = struct_StdVideoEncodeH265LongTermRefPics; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:127:52: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH265LongTermRefPics = struct_StdVideoEncodeH265LongTermRefPics;
+// vk_video/vulkan_video_codec_h265std_encode.h:127:52: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH265PictureInfo = opaque {};
-pub const StdVideoEncodeH265PictureInfo = struct_StdVideoEncodeH265PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:142:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeH265PictureInfo = struct_StdVideoEncodeH265PictureInfo;
+// vk_video/vulkan_video_codec_h265std_encode.h:142:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeH265ReferenceInfoFlags = opaque {};
-pub const StdVideoEncodeH265ReferenceInfoFlags = struct_StdVideoEncodeH265ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_encode.h:148:45: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeH265ReferenceInfoFlags = struct_StdVideoEncodeH265ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_h265std_encode.h:148:45: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeH265ReferenceInfo = opaque {};
 pub const StdVideoEncodeH265ReferenceInfo = struct_StdVideoEncodeH265ReferenceInfo;
 pub const VK_VIDEO_ENCODE_H265_CAPABILITY_HRD_COMPLIANCE_BIT_KHR: c_int = 1;
@@ -9686,13 +9787,17 @@ pub const STD_VIDEO_DECODE_H264_FIELD_ORDER_COUNT_BOTTOM: c_int = 1;
 pub const STD_VIDEO_DECODE_H264_FIELD_ORDER_COUNT_INVALID: c_int = 2147483647;
 pub const STD_VIDEO_DECODE_H264_FIELD_ORDER_COUNT_MAX_ENUM: c_int = 2147483647;
 pub const enum_StdVideoDecodeH264FieldOrderCount = c_uint;
-pub const StdVideoDecodeH264FieldOrderCount = enum_StdVideoDecodeH264FieldOrderCount; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_decode.h:41:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoDecodeH264FieldOrderCount = enum_StdVideoDecodeH264FieldOrderCount;
+// vk_video/vulkan_video_codec_h264std_decode.h:41:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeH264PictureInfoFlags = opaque {};
-pub const StdVideoDecodeH264PictureInfoFlags = struct_StdVideoDecodeH264PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_decode.h:50:43: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeH264PictureInfoFlags = struct_StdVideoDecodeH264PictureInfoFlags;
+// vk_video/vulkan_video_codec_h264std_decode.h:50:43: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeH264PictureInfo = opaque {};
-pub const StdVideoDecodeH264PictureInfo = struct_StdVideoDecodeH264PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_decode.h:61:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoDecodeH264PictureInfo = struct_StdVideoDecodeH264PictureInfo;
+// vk_video/vulkan_video_codec_h264std_decode.h:61:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeH264ReferenceInfoFlags = opaque {};
-pub const StdVideoDecodeH264ReferenceInfoFlags = struct_StdVideoDecodeH264ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h264std_decode.h:68:45: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeH264ReferenceInfoFlags = struct_StdVideoDecodeH264ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_h264std_decode.h:68:45: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeH264ReferenceInfo = opaque {};
 pub const StdVideoDecodeH264ReferenceInfo = struct_StdVideoDecodeH264ReferenceInfo;
 pub const VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR: c_int = 0;
@@ -10215,13 +10320,17 @@ pub const struct_VkPhysicalDeviceShaderClockFeaturesKHR = extern struct {
     shaderSubgroupClock: VkBool32 = 0,
     shaderDeviceClock: VkBool32 = 0,
 };
-pub const VkPhysicalDeviceShaderClockFeaturesKHR = struct_VkPhysicalDeviceShaderClockFeaturesKHR; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_decode.h:34:17: warning: struct demoted to opaque type - has bitfield
+pub const VkPhysicalDeviceShaderClockFeaturesKHR = struct_VkPhysicalDeviceShaderClockFeaturesKHR;
+// vk_video/vulkan_video_codec_h265std_decode.h:34:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeH265PictureInfoFlags = opaque {};
-pub const StdVideoDecodeH265PictureInfoFlags = struct_StdVideoDecodeH265PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_decode.h:41:43: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeH265PictureInfoFlags = struct_StdVideoDecodeH265PictureInfoFlags;
+// vk_video/vulkan_video_codec_h265std_decode.h:41:43: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeH265PictureInfo = opaque {};
-pub const StdVideoDecodeH265PictureInfo = struct_StdVideoDecodeH265PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_decode.h:55:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoDecodeH265PictureInfo = struct_StdVideoDecodeH265PictureInfo;
+// vk_video/vulkan_video_codec_h265std_decode.h:55:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeH265ReferenceInfoFlags = opaque {};
-pub const StdVideoDecodeH265ReferenceInfoFlags = struct_StdVideoDecodeH265ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_h265std_decode.h:60:45: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeH265ReferenceInfoFlags = struct_StdVideoDecodeH265ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_h265std_decode.h:60:45: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeH265ReferenceInfo = opaque {};
 pub const StdVideoDecodeH265ReferenceInfo = struct_StdVideoDecodeH265ReferenceInfo;
 pub const struct_VkVideoDecodeH265ProfileInfoKHR = extern struct {
@@ -11548,30 +11657,40 @@ pub const STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_RESERVED: c_int = 3;
 pub const STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_INVALID: c_int = 2147483647;
 pub const STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_MAX_ENUM: c_int = 2147483647;
 pub const enum_StdVideoAV1ChromaSamplePosition = c_uint;
-pub const StdVideoAV1ChromaSamplePosition = enum_StdVideoAV1ChromaSamplePosition; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:208:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1ChromaSamplePosition = enum_StdVideoAV1ChromaSamplePosition;
+// vk_video/vulkan_video_codec_av1std.h:208:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1ColorConfigFlags = opaque {};
-pub const StdVideoAV1ColorConfigFlags = struct_StdVideoAV1ColorConfigFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:216:43: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1ColorConfigFlags = struct_StdVideoAV1ColorConfigFlags;
+// vk_video/vulkan_video_codec_av1std.h:216:43: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1ColorConfig = opaque {};
-pub const StdVideoAV1ColorConfig = struct_StdVideoAV1ColorConfig; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:228:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1ColorConfig = struct_StdVideoAV1ColorConfig;
+// vk_video/vulkan_video_codec_av1std.h:228:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1TimingInfoFlags = opaque {};
-pub const StdVideoAV1TimingInfoFlags = struct_StdVideoAV1TimingInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:233:35: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1TimingInfoFlags = struct_StdVideoAV1TimingInfoFlags;
+// vk_video/vulkan_video_codec_av1std.h:233:35: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1TimingInfo = opaque {};
-pub const StdVideoAV1TimingInfo = struct_StdVideoAV1TimingInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:240:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1TimingInfo = struct_StdVideoAV1TimingInfo;
+// vk_video/vulkan_video_codec_av1std.h:240:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1LoopFilterFlags = opaque {};
-pub const StdVideoAV1LoopFilterFlags = struct_StdVideoAV1LoopFilterFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:246:35: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1LoopFilterFlags = struct_StdVideoAV1LoopFilterFlags;
+// vk_video/vulkan_video_codec_av1std.h:246:35: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1LoopFilter = opaque {};
-pub const StdVideoAV1LoopFilter = struct_StdVideoAV1LoopFilter; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:256:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1LoopFilter = struct_StdVideoAV1LoopFilter;
+// vk_video/vulkan_video_codec_av1std.h:256:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1QuantizationFlags = opaque {};
-pub const StdVideoAV1QuantizationFlags = struct_StdVideoAV1QuantizationFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:262:37: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1QuantizationFlags = struct_StdVideoAV1QuantizationFlags;
+// vk_video/vulkan_video_codec_av1std.h:262:37: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1Quantization = opaque {};
 pub const StdVideoAV1Quantization = struct_StdVideoAV1Quantization;
 pub const struct_StdVideoAV1Segmentation = extern struct {
     FeatureEnabled: [8]u8 = @import("std").mem.zeroes([8]u8),
     FeatureData: [8][8]i16 = @import("std").mem.zeroes([8][8]i16),
 };
-pub const StdVideoAV1Segmentation = struct_StdVideoAV1Segmentation; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:280:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1Segmentation = struct_StdVideoAV1Segmentation;
+// vk_video/vulkan_video_codec_av1std.h:280:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1TileInfoFlags = opaque {};
-pub const StdVideoAV1TileInfoFlags = struct_StdVideoAV1TileInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:285:33: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1TileInfoFlags = struct_StdVideoAV1TileInfoFlags;
+// vk_video/vulkan_video_codec_av1std.h:285:33: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1TileInfo = opaque {};
 pub const StdVideoAV1TileInfo = struct_StdVideoAV1TileInfo;
 pub const struct_StdVideoAV1CDEF = extern struct {
@@ -11592,21 +11711,29 @@ pub const struct_StdVideoAV1GlobalMotion = extern struct {
     GmType: [8]u8 = @import("std").mem.zeroes([8]u8),
     gm_params: [8][6]i32 = @import("std").mem.zeroes([8][6]i32),
 };
-pub const StdVideoAV1GlobalMotion = struct_StdVideoAV1GlobalMotion; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:317:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1GlobalMotion = struct_StdVideoAV1GlobalMotion;
+// vk_video/vulkan_video_codec_av1std.h:317:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1FilmGrainFlags = opaque {};
-pub const StdVideoAV1FilmGrainFlags = struct_StdVideoAV1FilmGrainFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:325:34: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1FilmGrainFlags = struct_StdVideoAV1FilmGrainFlags;
+// vk_video/vulkan_video_codec_av1std.h:325:34: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1FilmGrain = opaque {};
-pub const StdVideoAV1FilmGrain = struct_StdVideoAV1FilmGrain; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:353:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1FilmGrain = struct_StdVideoAV1FilmGrain;
+// vk_video/vulkan_video_codec_av1std.h:353:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoAV1SequenceHeaderFlags = opaque {};
-pub const StdVideoAV1SequenceHeaderFlags = struct_StdVideoAV1SequenceHeaderFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std.h:376:39: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoAV1SequenceHeaderFlags = struct_StdVideoAV1SequenceHeaderFlags;
+// vk_video/vulkan_video_codec_av1std.h:376:39: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoAV1SequenceHeader = opaque {};
-pub const StdVideoAV1SequenceHeader = struct_StdVideoAV1SequenceHeader; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_decode.h:33:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoAV1SequenceHeader = struct_StdVideoAV1SequenceHeader;
+// vk_video/vulkan_video_codec_av1std_decode.h:33:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeAV1PictureInfoFlags = opaque {};
-pub const StdVideoDecodeAV1PictureInfoFlags = struct_StdVideoDecodeAV1PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_decode.h:66:42: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeAV1PictureInfoFlags = struct_StdVideoDecodeAV1PictureInfoFlags;
+// vk_video/vulkan_video_codec_av1std_decode.h:66:42: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeAV1PictureInfo = opaque {};
-pub const StdVideoDecodeAV1PictureInfo = struct_StdVideoDecodeAV1PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_decode.h:93:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoDecodeAV1PictureInfo = struct_StdVideoDecodeAV1PictureInfo;
+// vk_video/vulkan_video_codec_av1std_decode.h:93:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeAV1ReferenceInfoFlags = opaque {};
-pub const StdVideoDecodeAV1ReferenceInfoFlags = struct_StdVideoDecodeAV1ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_decode.h:99:44: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeAV1ReferenceInfoFlags = struct_StdVideoDecodeAV1ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_av1std_decode.h:99:44: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeAV1ReferenceInfo = opaque {};
 pub const StdVideoDecodeAV1ReferenceInfo = struct_StdVideoDecodeAV1ReferenceInfo;
 pub const struct_VkVideoDecodeAV1ProfileInfoKHR = extern struct {
@@ -11657,17 +11784,23 @@ pub const struct_StdVideoEncodeAV1ExtensionHeader = extern struct {
     temporal_id: u8 = 0,
     spatial_id: u8 = 0,
 };
-pub const StdVideoEncodeAV1ExtensionHeader = struct_StdVideoEncodeAV1ExtensionHeader; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:46:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeAV1ExtensionHeader = struct_StdVideoEncodeAV1ExtensionHeader;
+// vk_video/vulkan_video_codec_av1std_encode.h:46:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeAV1OperatingPointInfoFlags = opaque {};
-pub const StdVideoEncodeAV1OperatingPointInfoFlags = struct_StdVideoEncodeAV1OperatingPointInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:53:49: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeAV1OperatingPointInfoFlags = struct_StdVideoEncodeAV1OperatingPointInfoFlags;
+// vk_video/vulkan_video_codec_av1std_encode.h:53:49: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeAV1OperatingPointInfo = opaque {};
-pub const StdVideoEncodeAV1OperatingPointInfo = struct_StdVideoEncodeAV1OperatingPointInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:63:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeAV1OperatingPointInfo = struct_StdVideoEncodeAV1OperatingPointInfo;
+// vk_video/vulkan_video_codec_av1std_encode.h:63:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeAV1PictureInfoFlags = opaque {};
-pub const StdVideoEncodeAV1PictureInfoFlags = struct_StdVideoEncodeAV1PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:96:48: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeAV1PictureInfoFlags = struct_StdVideoEncodeAV1PictureInfoFlags;
+// vk_video/vulkan_video_codec_av1std_encode.h:96:48: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeAV1PictureInfo = opaque {};
-pub const StdVideoEncodeAV1PictureInfo = struct_StdVideoEncodeAV1PictureInfo; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:126:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoEncodeAV1PictureInfo = struct_StdVideoEncodeAV1PictureInfo;
+// vk_video/vulkan_video_codec_av1std_encode.h:126:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoEncodeAV1ReferenceInfoFlags = opaque {};
-pub const StdVideoEncodeAV1ReferenceInfoFlags = struct_StdVideoEncodeAV1ReferenceInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_av1std_encode.h:132:48: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoEncodeAV1ReferenceInfoFlags = struct_StdVideoEncodeAV1ReferenceInfoFlags;
+// vk_video/vulkan_video_codec_av1std_encode.h:132:48: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoEncodeAV1ReferenceInfo = opaque {};
 pub const StdVideoEncodeAV1ReferenceInfo = struct_StdVideoEncodeAV1ReferenceInfo;
 pub const VK_VIDEO_ENCODE_AV1_PREDICTION_MODE_INTRA_ONLY_KHR: c_int = 0;
@@ -11912,21 +12045,29 @@ pub const STD_VIDEO_VP9_COLOR_SPACE_RGB: c_int = 7;
 pub const STD_VIDEO_VP9_COLOR_SPACE_INVALID: c_int = 2147483647;
 pub const STD_VIDEO_VP9_COLOR_SPACE_MAX_ENUM: c_int = 2147483647;
 pub const enum_StdVideoVP9ColorSpace = c_uint;
-pub const StdVideoVP9ColorSpace = enum_StdVideoVP9ColorSpace; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:104:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoVP9ColorSpace = enum_StdVideoVP9ColorSpace;
+// vk_video/vulkan_video_codec_vp9std.h:104:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoVP9ColorConfigFlags = opaque {};
-pub const StdVideoVP9ColorConfigFlags = struct_StdVideoVP9ColorConfigFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:109:36: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoVP9ColorConfigFlags = struct_StdVideoVP9ColorConfigFlags;
+// vk_video/vulkan_video_codec_vp9std.h:109:36: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoVP9ColorConfig = opaque {};
-pub const StdVideoVP9ColorConfig = struct_StdVideoVP9ColorConfig; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:118:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoVP9ColorConfig = struct_StdVideoVP9ColorConfig;
+// vk_video/vulkan_video_codec_vp9std.h:118:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoVP9LoopFilterFlags = opaque {};
-pub const StdVideoVP9LoopFilterFlags = struct_StdVideoVP9LoopFilterFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:124:35: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoVP9LoopFilterFlags = struct_StdVideoVP9LoopFilterFlags;
+// vk_video/vulkan_video_codec_vp9std.h:124:35: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoVP9LoopFilter = opaque {};
-pub const StdVideoVP9LoopFilter = struct_StdVideoVP9LoopFilter; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:134:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoVP9LoopFilter = struct_StdVideoVP9LoopFilter;
+// vk_video/vulkan_video_codec_vp9std.h:134:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoVP9SegmentationFlags = opaque {};
-pub const StdVideoVP9SegmentationFlags = struct_StdVideoVP9SegmentationFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std.h:142:37: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoVP9SegmentationFlags = struct_StdVideoVP9SegmentationFlags;
+// vk_video/vulkan_video_codec_vp9std.h:142:37: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoVP9Segmentation = opaque {};
-pub const StdVideoVP9Segmentation = struct_StdVideoVP9Segmentation; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std_decode.h:33:17: warning: struct demoted to opaque type - has bitfield
+pub const StdVideoVP9Segmentation = struct_StdVideoVP9Segmentation;
+// vk_video/vulkan_video_codec_vp9std_decode.h:33:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_StdVideoDecodeVP9PictureInfoFlags = opaque {};
-pub const StdVideoDecodeVP9PictureInfoFlags = struct_StdVideoDecodeVP9PictureInfoFlags; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vk_video/vulkan_video_codec_vp9std_decode.h:45:42: warning: struct demoted to opaque type - has opaque field
+pub const StdVideoDecodeVP9PictureInfoFlags = struct_StdVideoDecodeVP9PictureInfoFlags;
+// vk_video/vulkan_video_codec_vp9std_decode.h:45:42: warning: struct demoted to opaque type - has opaque field
 pub const struct_StdVideoDecodeVP9PictureInfo = opaque {};
 pub const StdVideoDecodeVP9PictureInfo = struct_StdVideoDecodeVP9PictureInfo;
 pub const struct_VkPhysicalDeviceVideoDecodeVP9FeaturesKHR = extern struct {
@@ -14515,7 +14656,8 @@ pub const struct_VkAabbPositionsKHR = extern struct {
     maxZ: f32 = 0,
 };
 pub const VkAabbPositionsKHR = struct_VkAabbPositionsKHR;
-pub const VkAabbPositionsNV = VkAabbPositionsKHR; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:17977:35: warning: struct demoted to opaque type - has bitfield
+pub const VkAabbPositionsNV = VkAabbPositionsKHR;
+// vulkan/vulkan_core.h:17977:35: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkAccelerationStructureInstanceKHR = opaque {};
 pub const VkAccelerationStructureInstanceKHR = struct_VkAccelerationStructureInstanceKHR;
 pub const VkAccelerationStructureInstanceNV = VkAccelerationStructureInstanceKHR;
@@ -16120,7 +16262,8 @@ pub const struct_VkAccelerationStructureMotionInfoNV = extern struct {
     maxInstances: u32 = 0,
     flags: VkAccelerationStructureMotionInfoFlagsNV = 0,
 };
-pub const VkAccelerationStructureMotionInfoNV = struct_VkAccelerationStructureMotionInfoNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:21055:35: warning: struct demoted to opaque type - has bitfield
+pub const VkAccelerationStructureMotionInfoNV = struct_VkAccelerationStructureMotionInfoNV;
+// vulkan/vulkan_core.h:21055:35: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkAccelerationStructureMatrixMotionInstanceNV = opaque {};
 pub const VkAccelerationStructureMatrixMotionInstanceNV = struct_VkAccelerationStructureMatrixMotionInstanceNV;
 pub const struct_VkSRTDataNV = extern struct {
@@ -16141,11 +16284,14 @@ pub const struct_VkSRTDataNV = extern struct {
     ty: f32 = 0,
     tz: f32 = 0,
 };
-pub const VkSRTDataNV = struct_VkSRTDataNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:21084:35: warning: struct demoted to opaque type - has bitfield
+pub const VkSRTDataNV = struct_VkSRTDataNV;
+// vulkan/vulkan_core.h:21084:35: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkAccelerationStructureSRTMotionInstanceNV = opaque {};
-pub const VkAccelerationStructureSRTMotionInstanceNV = struct_VkAccelerationStructureSRTMotionInstanceNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:21092:54: warning: union demoted to opaque type - has opaque field
+pub const VkAccelerationStructureSRTMotionInstanceNV = struct_VkAccelerationStructureSRTMotionInstanceNV;
+// vulkan/vulkan_core.h:21092:54: warning: union demoted to opaque type - has opaque field
 pub const union_VkAccelerationStructureMotionInstanceDataNV = opaque {};
-pub const VkAccelerationStructureMotionInstanceDataNV = union_VkAccelerationStructureMotionInstanceDataNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:21100:53: warning: struct demoted to opaque type - has opaque field
+pub const VkAccelerationStructureMotionInstanceDataNV = union_VkAccelerationStructureMotionInstanceDataNV;
+// vulkan/vulkan_core.h:21100:53: warning: struct demoted to opaque type - has opaque field
 pub const struct_VkAccelerationStructureMotionInstanceNV = opaque {};
 pub const VkAccelerationStructureMotionInstanceNV = struct_VkAccelerationStructureMotionInstanceNV;
 pub const struct_VkPhysicalDeviceRayTracingMotionBlurFeaturesNV = extern struct {
@@ -18873,7 +19019,8 @@ pub const struct_VkStridedDeviceAddressNV = extern struct {
     startAddress: VkDeviceAddress = 0,
     strideInBytes: VkDeviceSize = 0,
 };
-pub const VkStridedDeviceAddressNV = struct_VkStridedDeviceAddressNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:25552:17: warning: struct demoted to opaque type - has bitfield
+pub const VkStridedDeviceAddressNV = struct_VkStridedDeviceAddressNV;
+// vulkan/vulkan_core.h:25552:17: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkClusterAccelerationStructureGeometryIndexAndGeometryFlagsNV = opaque {};
 pub const VkClusterAccelerationStructureGeometryIndexAndGeometryFlagsNV = struct_VkClusterAccelerationStructureGeometryIndexAndGeometryFlagsNV;
 pub const struct_VkClusterAccelerationStructureMoveObjectsInfoNV = extern struct {
@@ -18885,11 +19032,14 @@ pub const struct_VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV = 
     clusterReferencesStride: u32 = 0,
     clusterReferences: VkDeviceAddress = 0,
 };
-pub const VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV = struct_VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:25570:70: warning: struct demoted to opaque type - has bitfield
+pub const VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV = struct_VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV;
+// vulkan/vulkan_core.h:25570:70: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkClusterAccelerationStructureBuildTriangleClusterInfoNV = opaque {};
-pub const VkClusterAccelerationStructureBuildTriangleClusterInfoNV = struct_VkClusterAccelerationStructureBuildTriangleClusterInfoNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:25590:70: warning: struct demoted to opaque type - has bitfield
+pub const VkClusterAccelerationStructureBuildTriangleClusterInfoNV = struct_VkClusterAccelerationStructureBuildTriangleClusterInfoNV;
+// vulkan/vulkan_core.h:25590:70: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV = opaque {};
-pub const VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV = struct_VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV; // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:25610:33: warning: struct demoted to opaque type - has bitfield
+pub const VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV = struct_VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV;
+// vulkan/vulkan_core.h:25610:33: warning: struct demoted to opaque type - has bitfield
 pub const struct_VkClusterAccelerationStructureInstantiateClusterInfoNV = opaque {};
 pub const VkClusterAccelerationStructureInstantiateClusterInfoNV = struct_VkClusterAccelerationStructureInstantiateClusterInfoNV;
 pub const struct_VkClusterAccelerationStructureGetTemplateIndicesInfoNV = extern struct {
@@ -20266,11 +20416,15 @@ pub const __x86_64__ = @as(c_int, 1);
 pub const __x86_64 = @as(c_int, 1);
 pub const __SEG_GS = @as(c_int, 1);
 pub const __SEG_FS = @as(c_int, 1);
-pub const __seg_gs = @compileError("unable to translate macro: undefined identifier `address_space`"); // <builtin>:33:9
-pub const __seg_fs = @compileError("unable to translate macro: undefined identifier `address_space`"); // <builtin>:34:9
+pub const __seg_gs = @compileError("unable to translate macro: undefined identifier `address_space`");
+// <builtin>:33:9
+pub const __seg_fs = @compileError("unable to translate macro: undefined identifier `address_space`");
+// <builtin>:34:9
 pub const __LAHF_SAHF__ = @as(c_int, 1);
 pub const __AES__ = @as(c_int, 1);
+pub const __VAES__ = @as(c_int, 1);
 pub const __PCLMUL__ = @as(c_int, 1);
+pub const __VPCLMULQDQ__ = @as(c_int, 1);
 pub const __LZCNT__ = @as(c_int, 1);
 pub const __RDRND__ = @as(c_int, 1);
 pub const __FSGSBASE__ = @as(c_int, 1);
@@ -20280,18 +20434,41 @@ pub const __POPCNT__ = @as(c_int, 1);
 pub const __PRFCHW__ = @as(c_int, 1);
 pub const __RDSEED__ = @as(c_int, 1);
 pub const __ADX__ = @as(c_int, 1);
+pub const __MWAITX__ = @as(c_int, 1);
 pub const __MOVBE__ = @as(c_int, 1);
+pub const __SSE4A__ = @as(c_int, 1);
 pub const __FMA__ = @as(c_int, 1);
 pub const __F16C__ = @as(c_int, 1);
+pub const __GFNI__ = @as(c_int, 1);
+pub const __AVX512CD__ = @as(c_int, 1);
+pub const __AVX512VPOPCNTDQ__ = @as(c_int, 1);
+pub const __AVX512VNNI__ = @as(c_int, 1);
+pub const __AVX512BF16__ = @as(c_int, 1);
+pub const __AVX512DQ__ = @as(c_int, 1);
+pub const __AVX512BITALG__ = @as(c_int, 1);
+pub const __AVX512BW__ = @as(c_int, 1);
+pub const __AVX512VL__ = @as(c_int, 1);
+pub const __EVEX256__ = @as(c_int, 1);
+pub const __AVX512VBMI__ = @as(c_int, 1);
+pub const __AVX512VBMI2__ = @as(c_int, 1);
+pub const __AVX512IFMA__ = @as(c_int, 1);
+pub const __SHA__ = @as(c_int, 1);
 pub const __FXSR__ = @as(c_int, 1);
 pub const __XSAVE__ = @as(c_int, 1);
 pub const __XSAVEOPT__ = @as(c_int, 1);
 pub const __XSAVEC__ = @as(c_int, 1);
 pub const __XSAVES__ = @as(c_int, 1);
+pub const __PKU__ = @as(c_int, 1);
 pub const __CLFLUSHOPT__ = @as(c_int, 1);
-pub const __SGX__ = @as(c_int, 1);
+pub const __CLWB__ = @as(c_int, 1);
+pub const __WBNOINVD__ = @as(c_int, 1);
+pub const __SHSTK__ = @as(c_int, 1);
+pub const __CLZERO__ = @as(c_int, 1);
+pub const __RDPID__ = @as(c_int, 1);
+pub const __RDPRU__ = @as(c_int, 1);
 pub const __INVPCID__ = @as(c_int, 1);
 pub const __CRC32__ = @as(c_int, 1);
+pub const __AVX512F__ = @as(c_int, 1);
 pub const __AVX2__ = @as(c_int, 1);
 pub const __AVX__ = @as(c_int, 1);
 pub const __SSE4_2__ = @as(c_int, 1);
@@ -20378,10 +20555,12 @@ pub const __SIZEOF_INT128__ = @as(c_int, 16);
 pub const __INTPTR_TYPE__ = c_long;
 pub const __UINTPTR_TYPE__ = c_ulong;
 pub const __INTMAX_TYPE__ = c_long;
-pub const __INTMAX_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `L`"); // <builtin>:146:9
+pub const __INTMAX_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `L`");
+// <builtin>:171:9
 pub const __INTMAX_C = __helpers.L_SUFFIX;
 pub const __UINTMAX_TYPE__ = c_ulong;
-pub const __UINTMAX_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `UL`"); // <builtin>:149:9
+pub const __UINTMAX_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `UL`");
+// <builtin>:174:9
 pub const __UINTMAX_C = __helpers.UL_SUFFIX;
 pub const __PTRDIFF_TYPE__ = c_long;
 pub const __SIZE_TYPE__ = c_ulong;
@@ -20416,7 +20595,8 @@ pub inline fn __INT32_C(c: anytype) @TypeOf(c) {
 pub const __INT64_TYPE__ = c_long;
 pub const __INT64_FMTd__ = "ld";
 pub const __INT64_FMTi__ = "li";
-pub const __INT64_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `L`"); // <builtin>:175:9
+pub const __INT64_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `L`");
+// <builtin>:200:9
 pub const __INT64_C = __helpers.L_SUFFIX;
 pub const __UINT8_TYPE__ = u8;
 pub const __UINT8_FMTo__ = "hho";
@@ -20447,7 +20627,8 @@ pub const __UINT32_FMTo__ = "o";
 pub const __UINT32_FMTu__ = "u";
 pub const __UINT32_FMTx__ = "x";
 pub const __UINT32_FMTX__ = "X";
-pub const __UINT32_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `U`"); // <builtin>:200:9
+pub const __UINT32_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `U`");
+// <builtin>:225:9
 pub const __UINT32_C = __helpers.U_SUFFIX;
 pub const __UINT32_MAX__ = __helpers.promoteIntLiteral(c_uint, 4294967295, .decimal);
 pub const __INT32_MAX__ = __helpers.promoteIntLiteral(c_int, 2147483647, .decimal);
@@ -20456,7 +20637,8 @@ pub const __UINT64_FMTo__ = "lo";
 pub const __UINT64_FMTu__ = "lu";
 pub const __UINT64_FMTx__ = "lx";
 pub const __UINT64_FMTX__ = "lX";
-pub const __UINT64_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `UL`"); // <builtin>:209:9
+pub const __UINT64_C_SUFFIX__ = @compileError("unable to translate macro: undefined identifier `UL`");
+// <builtin>:234:9
 pub const __UINT64_C = __helpers.UL_SUFFIX;
 pub const __UINT64_MAX__ = __helpers.promoteIntLiteral(c_ulong, 18446744073709551615, .decimal);
 pub const __INT64_MAX__ = __helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal);
@@ -20615,134 +20797,439 @@ pub const VKAPI_CALL = "";
 pub const VKAPI_PTR = "";
 pub const __STDC_VERSION_STDDEF_H__ = @as(c_long, 202311);
 pub const NULL = __helpers.cast(?*anyopaque, @as(c_int, 0));
-pub const offsetof = @compileError("unable to translate macro: undefined identifier `__builtin_offsetof`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/compiler/aro/include/stddef.h:18:9
+pub const offsetof = @compileError("unable to translate macro: undefined identifier `__builtin_offsetof`");
 pub const __CLANG_STDINT_H = "";
-pub const __int_least64_t = i64;
-pub const __uint_least64_t = u64;
-pub const __uint32_t_defined = "";
-pub const __int_least32_t = i32;
-pub const __uint_least32_t = u32;
-pub const __int_least16_t = i16;
-pub const __uint_least16_t = u16;
-pub const __int_least8_t = i8;
-pub const __uint_least8_t = u8;
-pub const __int8_t_defined = "";
-pub const __stdint_join3 = @compileError("unable to translate C expr: unexpected token '##'"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:291:9
+pub const _STDINT_H = @as(c_int, 1);
+pub const _FEATURES_H = @as(c_int, 1);
+pub const __KERNEL_STRICT_NAMES = "";
+pub inline fn __GNUC_PREREQ(maj: anytype, min: anytype) @TypeOf(((__GNUC__ << @as(c_int, 16)) + __GNUC_MINOR__) >= ((maj << @as(c_int, 16)) + min)) {
+    _ = &maj;
+    _ = &min;
+    return ((__GNUC__ << @as(c_int, 16)) + __GNUC_MINOR__) >= ((maj << @as(c_int, 16)) + min);
+}
+pub inline fn __glibc_clang_prereq(maj: anytype, min: anytype) @TypeOf(@as(c_int, 0)) {
+    _ = &maj;
+    _ = &min;
+    return @as(c_int, 0);
+}
+pub const __GLIBC_USE = @compileError("unable to translate macro: undefined identifier `__GLIBC_USE_`");
+// /usr/include/features.h:189:9
+pub const _DEFAULT_SOURCE = @as(c_int, 1);
+pub const __GLIBC_USE_ISOC23 = @as(c_int, 0);
+pub const __USE_ISOC11 = @as(c_int, 1);
+pub const __USE_POSIX_IMPLICITLY = @as(c_int, 1);
+pub const _POSIX_SOURCE = @as(c_int, 1);
+pub const _POSIX_C_SOURCE = @as(c_long, 200809);
+pub const __USE_POSIX = @as(c_int, 1);
+pub const __USE_POSIX2 = @as(c_int, 1);
+pub const __USE_POSIX199309 = @as(c_int, 1);
+pub const __USE_POSIX199506 = @as(c_int, 1);
+pub const __USE_XOPEN2K = @as(c_int, 1);
+pub const __USE_ISOC95 = @as(c_int, 1);
+pub const __USE_ISOC99 = @as(c_int, 1);
+pub const __USE_XOPEN2K8 = @as(c_int, 1);
+pub const _ATFILE_SOURCE = @as(c_int, 1);
+pub const __WORDSIZE = @as(c_int, 64);
+pub const __WORDSIZE_TIME64_COMPAT32 = @as(c_int, 1);
+pub const __SYSCALL_WORDSIZE = @as(c_int, 64);
+pub const __TIMESIZE = __WORDSIZE;
+pub const __USE_TIME_BITS64 = @as(c_int, 1);
+pub const __USE_MISC = @as(c_int, 1);
+pub const __USE_ATFILE = @as(c_int, 1);
+pub const __USE_FORTIFY_LEVEL = @as(c_int, 0);
+pub const __GLIBC_USE_DEPRECATED_GETS = @as(c_int, 0);
+pub const __GLIBC_USE_DEPRECATED_SCANF = @as(c_int, 0);
+pub const __GLIBC_USE_C23_STRTOL = @as(c_int, 0);
+pub const _STDC_PREDEF_H = @as(c_int, 1);
+pub const __STDC_IEC_559__ = @as(c_int, 1);
+pub const __STDC_IEC_60559_BFP__ = @as(c_long, 201404);
+pub const __STDC_IEC_559_COMPLEX__ = @as(c_int, 1);
+pub const __STDC_IEC_60559_COMPLEX__ = @as(c_long, 201404);
+pub const __STDC_ISO_10646__ = @as(c_long, 201706);
+pub const __GNU_LIBRARY__ = @as(c_int, 6);
+pub const __GLIBC__ = @as(c_int, 2);
+pub const __GLIBC_MINOR__ = @as(c_int, 40);
+pub inline fn __GLIBC_PREREQ(maj: anytype, min: anytype) @TypeOf(((__GLIBC__ << @as(c_int, 16)) + __GLIBC_MINOR__) >= ((maj << @as(c_int, 16)) + min)) {
+    _ = &maj;
+    _ = &min;
+    return ((__GLIBC__ << @as(c_int, 16)) + __GLIBC_MINOR__) >= ((maj << @as(c_int, 16)) + min);
+}
+pub const _SYS_CDEFS_H = @as(c_int, 1);
+pub const __glibc_has_attribute = @compileError("unable to translate macro: undefined identifier `__has_attribute`");
+// /usr/include/sys/cdefs.h:45:10
+pub inline fn __glibc_has_builtin(name: anytype) @TypeOf(__builtin.has_builtin(name)) {
+    _ = &name;
+    return __builtin.has_builtin(name);
+}
+pub const __glibc_has_extension = @compileError("unable to translate macro: undefined identifier `__has_extension`");
+// /usr/include/sys/cdefs.h:55:10
+pub const __LEAF = @compileError("unable to translate macro: undefined identifier `__leaf__`");
+// /usr/include/sys/cdefs.h:65:11
+pub const __LEAF_ATTR = @compileError("unable to translate macro: undefined identifier `__leaf__`");
+// /usr/include/sys/cdefs.h:66:11
+pub const __THROW = @compileError("unable to translate macro: undefined identifier `__nothrow__`");
+// /usr/include/sys/cdefs.h:79:11
+pub const __THROWNL = @compileError("unable to translate macro: undefined identifier `__nothrow__`");
+// /usr/include/sys/cdefs.h:80:11
+pub const __NTH = @compileError("unable to translate macro: undefined identifier `__nothrow__`");
+// /usr/include/sys/cdefs.h:81:11
+pub const __NTHNL = @compileError("unable to translate macro: undefined identifier `__nothrow__`");
+// /usr/include/sys/cdefs.h:82:11
+pub const __COLD = @compileError("unable to translate macro: undefined identifier `__cold__`");
+// /usr/include/sys/cdefs.h:102:11
+pub inline fn __P(args: anytype) @TypeOf(args) {
+    _ = &args;
+    return args;
+}
+pub inline fn __PMT(args: anytype) @TypeOf(args) {
+    _ = &args;
+    return args;
+}
+pub const __CONCAT = @compileError("unable to translate C expr: unexpected token '##'");
+// /usr/include/sys/cdefs.h:131:9
+pub const __STRING = @compileError("unable to translate C expr: unexpected token ''");
+// /usr/include/sys/cdefs.h:132:9
+pub const __ptr_t = ?*anyopaque;
+pub const __BEGIN_DECLS = "";
+pub const __END_DECLS = "";
+pub const __attribute_overloadable__ = "";
+pub inline fn __bos(ptr: anytype) @TypeOf(__builtin.object_size(ptr, __USE_FORTIFY_LEVEL > @as(c_int, 1))) {
+    _ = &ptr;
+    return __builtin.object_size(ptr, __USE_FORTIFY_LEVEL > @as(c_int, 1));
+}
+pub inline fn __bos0(ptr: anytype) @TypeOf(__builtin.object_size(ptr, @as(c_int, 0))) {
+    _ = &ptr;
+    return __builtin.object_size(ptr, @as(c_int, 0));
+}
+pub inline fn __glibc_objsize0(__o: anytype) @TypeOf(__bos0(__o)) {
+    _ = &__o;
+    return __bos0(__o);
+}
+pub inline fn __glibc_objsize(__o: anytype) @TypeOf(__bos(__o)) {
+    _ = &__o;
+    return __bos(__o);
+}
+pub const __warnattr = @compileError("unable to translate macro: undefined identifier `__warning__`");
+// /usr/include/sys/cdefs.h:366:10
+pub const __errordecl = @compileError("unable to translate macro: undefined identifier `__error__`");
+// /usr/include/sys/cdefs.h:367:10
+pub const __flexarr = @compileError("unable to translate C expr: unexpected token '['");
+// /usr/include/sys/cdefs.h:379:10
+pub const __glibc_c99_flexarr_available = @as(c_int, 1);
+pub const __REDIRECT = @compileError("unable to translate C expr: unexpected token '__asm__'");
+// /usr/include/sys/cdefs.h:410:10
+pub const __REDIRECT_NTH = @compileError("unable to translate C expr: unexpected token '__asm__'");
+// /usr/include/sys/cdefs.h:417:11
+pub const __REDIRECT_NTHNL = @compileError("unable to translate C expr: unexpected token '__asm__'");
+// /usr/include/sys/cdefs.h:419:11
+pub const __ASMNAME = @compileError("unable to translate macro: undefined identifier `__USER_LABEL_PREFIX__`");
+// /usr/include/sys/cdefs.h:422:10
+pub inline fn __ASMNAME2(prefix: anytype, cname: anytype) @TypeOf(__STRING(prefix) ++ cname) {
+    _ = &prefix;
+    _ = &cname;
+    return __STRING(prefix) ++ cname;
+}
+pub const __REDIRECT_FORTIFY = __REDIRECT;
+pub const __REDIRECT_FORTIFY_NTH = __REDIRECT_NTH;
+pub const __attribute_malloc__ = @compileError("unable to translate macro: undefined identifier `__malloc__`");
+// /usr/include/sys/cdefs.h:452:10
+pub const __attribute_alloc_size__ = @compileError("unable to translate macro: undefined identifier `__alloc_size__`");
+// /usr/include/sys/cdefs.h:460:10
+pub const __attribute_alloc_align__ = @compileError("unable to translate macro: undefined identifier `__alloc_align__`");
+// /usr/include/sys/cdefs.h:469:10
+pub const __attribute_pure__ = @compileError("unable to translate macro: undefined identifier `__pure__`");
+// /usr/include/sys/cdefs.h:479:10
+pub const __attribute_const__ = @compileError("unable to translate C expr: unexpected token '__attribute__'");
+// /usr/include/sys/cdefs.h:486:10
+pub const __attribute_maybe_unused__ = @compileError("unable to translate macro: undefined identifier `__unused__`");
+// /usr/include/sys/cdefs.h:492:10
+pub const __attribute_used__ = @compileError("unable to translate macro: undefined identifier `__used__`");
+// /usr/include/sys/cdefs.h:501:10
+pub const __attribute_noinline__ = @compileError("unable to translate macro: undefined identifier `__noinline__`");
+// /usr/include/sys/cdefs.h:502:10
+pub const __attribute_deprecated__ = @compileError("unable to translate macro: undefined identifier `__deprecated__`");
+// /usr/include/sys/cdefs.h:510:10
+pub const __attribute_deprecated_msg__ = @compileError("unable to translate macro: undefined identifier `__deprecated__`");
+// /usr/include/sys/cdefs.h:520:10
+pub const __attribute_format_arg__ = @compileError("unable to translate macro: undefined identifier `__format_arg__`");
+// /usr/include/sys/cdefs.h:533:10
+pub const __attribute_format_strfmon__ = @compileError("unable to translate macro: undefined identifier `__format__`");
+// /usr/include/sys/cdefs.h:543:10
+pub const __attribute_nonnull__ = @compileError("unable to translate macro: undefined identifier `__nonnull__`");
+// /usr/include/sys/cdefs.h:555:11
+pub inline fn __nonnull(params: anytype) @TypeOf(__attribute_nonnull__(params)) {
+    _ = &params;
+    return __attribute_nonnull__(params);
+}
+pub const __returns_nonnull = @compileError("unable to translate macro: undefined identifier `__returns_nonnull__`");
+// /usr/include/sys/cdefs.h:568:10
+pub const __attribute_warn_unused_result__ = @compileError("unable to translate macro: undefined identifier `__warn_unused_result__`");
+// /usr/include/sys/cdefs.h:577:10
+pub const __wur = "";
+pub const __always_inline = @compileError("unable to translate macro: undefined identifier `__always_inline__`");
+// /usr/include/sys/cdefs.h:595:10
+pub const __attribute_artificial__ = @compileError("unable to translate macro: undefined identifier `__artificial__`");
+// /usr/include/sys/cdefs.h:604:10
+pub const __extern_inline = @compileError("unable to translate C expr: unexpected token 'extern'");
+// /usr/include/sys/cdefs.h:626:11
+pub const __extern_always_inline = @compileError("unable to translate C expr: unexpected token 'extern'");
+// /usr/include/sys/cdefs.h:627:11
+pub const __fortify_function = __extern_always_inline ++ __attribute_artificial__;
+pub const __va_arg_pack = @compileError("unable to translate macro: undefined identifier `__builtin_va_arg_pack`");
+// /usr/include/sys/cdefs.h:638:10
+pub const __va_arg_pack_len = @compileError("unable to translate macro: undefined identifier `__builtin_va_arg_pack_len`");
+// /usr/include/sys/cdefs.h:639:10
+pub const __restrict_arr = @compileError("unable to translate C expr: unexpected token '__restrict'");
+// /usr/include/sys/cdefs.h:666:10
+pub inline fn __glibc_unlikely(cond: anytype) @TypeOf(__builtin.expect(cond, @as(c_int, 0))) {
+    _ = &cond;
+    return __builtin.expect(cond, @as(c_int, 0));
+}
+pub inline fn __glibc_likely(cond: anytype) @TypeOf(__builtin.expect(cond, @as(c_int, 1))) {
+    _ = &cond;
+    return __builtin.expect(cond, @as(c_int, 1));
+}
+pub const __attribute_nonstring__ = "";
+pub inline fn __attribute_copy__(arg: anytype) void {
+    _ = &arg;
+    return;
+}
+pub const __LDOUBLE_REDIRECTS_TO_FLOAT128_ABI = @as(c_int, 0);
+pub inline fn __LDBL_REDIR1(name: anytype, proto: anytype, alias: anytype) @TypeOf(name ++ proto) {
+    _ = &name;
+    _ = &proto;
+    _ = &alias;
+    return name ++ proto;
+}
+pub inline fn __LDBL_REDIR(name: anytype, proto: anytype) @TypeOf(name ++ proto) {
+    _ = &name;
+    _ = &proto;
+    return name ++ proto;
+}
+pub inline fn __LDBL_REDIR1_NTH(name: anytype, proto: anytype, alias: anytype) @TypeOf(name ++ proto ++ __THROW) {
+    _ = &name;
+    _ = &proto;
+    _ = &alias;
+    return name ++ proto ++ __THROW;
+}
+pub inline fn __LDBL_REDIR_NTH(name: anytype, proto: anytype) @TypeOf(name ++ proto ++ __THROW) {
+    _ = &name;
+    _ = &proto;
+    return name ++ proto ++ __THROW;
+}
+pub inline fn __LDBL_REDIR2_DECL(name: anytype) void {
+    _ = &name;
+    return;
+}
+pub inline fn __LDBL_REDIR_DECL(name: anytype) void {
+    _ = &name;
+    return;
+}
+pub inline fn __REDIRECT_LDBL(name: anytype, proto: anytype, alias: anytype) @TypeOf(__REDIRECT(name, proto, alias)) {
+    _ = &name;
+    _ = &proto;
+    _ = &alias;
+    return __REDIRECT(name, proto, alias);
+}
+pub inline fn __REDIRECT_NTH_LDBL(name: anytype, proto: anytype, alias: anytype) @TypeOf(__REDIRECT_NTH(name, proto, alias)) {
+    _ = &name;
+    _ = &proto;
+    _ = &alias;
+    return __REDIRECT_NTH(name, proto, alias);
+}
+pub const __glibc_macro_warning1 = @compileError("unable to translate macro: undefined identifier `_Pragma`");
+// /usr/include/sys/cdefs.h:807:10
+pub const __glibc_macro_warning = @compileError("unable to translate macro: undefined identifier `GCC`");
+// /usr/include/sys/cdefs.h:808:10
+pub const __HAVE_GENERIC_SELECTION = @as(c_int, 1);
+pub inline fn __fortified_attr_access(a: anytype, o: anytype, s: anytype) void {
+    _ = &a;
+    _ = &o;
+    _ = &s;
+    return;
+}
+pub inline fn __attr_access(x: anytype) void {
+    _ = &x;
+    return;
+}
+pub inline fn __attr_access_none(argno: anytype) void {
+    _ = &argno;
+    return;
+}
+pub inline fn __attr_dealloc(dealloc: anytype, argno: anytype) void {
+    _ = &dealloc;
+    _ = &argno;
+    return;
+}
+pub const __attr_dealloc_free = "";
+pub const __attribute_returns_twice__ = @compileError("unable to translate macro: undefined identifier `__returns_twice__`");
+// /usr/include/sys/cdefs.h:872:10
+pub const __attribute_struct_may_alias__ = @compileError("unable to translate macro: undefined identifier `__may_alias__`");
+// /usr/include/sys/cdefs.h:881:10
+pub const __stub___compat_bdflush = "";
+pub const __stub_chflags = "";
+pub const __stub_fchflags = "";
+pub const __stub_gtty = "";
+pub const __stub_revoke = "";
+pub const __stub_setlogin = "";
+pub const __stub_sigreturn = "";
+pub const __stub_stty = "";
+pub const __GLIBC_USE_LIB_EXT2 = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_BFP_EXT = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_BFP_EXT_C23 = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_EXT = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_FUNCS_EXT = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_FUNCS_EXT_C23 = @as(c_int, 0);
+pub const __GLIBC_USE_IEC_60559_TYPES_EXT = @as(c_int, 0);
+pub const _BITS_TYPES_H = @as(c_int, 1);
+pub const __S16_TYPE = c_short;
+pub const __U16_TYPE = c_ushort;
+pub const __S32_TYPE = c_int;
+pub const __U32_TYPE = c_uint;
+pub const __SLONGWORD_TYPE = c_long;
+pub const __ULONGWORD_TYPE = c_ulong;
+pub const __SQUAD_TYPE = c_long;
+pub const __UQUAD_TYPE = c_ulong;
+pub const __SWORD_TYPE = c_long;
+pub const __UWORD_TYPE = c_ulong;
+pub const __SLONG32_TYPE = c_int;
+pub const __ULONG32_TYPE = c_uint;
+pub const __S64_TYPE = c_long;
+pub const __U64_TYPE = c_ulong;
+pub const _BITS_TYPESIZES_H = @as(c_int, 1);
+pub const __SYSCALL_SLONG_TYPE = __SLONGWORD_TYPE;
+pub const __SYSCALL_ULONG_TYPE = __ULONGWORD_TYPE;
+pub const __DEV_T_TYPE = __UQUAD_TYPE;
+pub const __UID_T_TYPE = __U32_TYPE;
+pub const __GID_T_TYPE = __U32_TYPE;
+pub const __INO_T_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __INO64_T_TYPE = __UQUAD_TYPE;
+pub const __MODE_T_TYPE = __U32_TYPE;
+pub const __NLINK_T_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __FSWORD_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __OFF_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __OFF64_T_TYPE = __SQUAD_TYPE;
+pub const __PID_T_TYPE = __S32_TYPE;
+pub const __RLIM_T_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __RLIM64_T_TYPE = __UQUAD_TYPE;
+pub const __BLKCNT_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __BLKCNT64_T_TYPE = __SQUAD_TYPE;
+pub const __FSBLKCNT_T_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __FSBLKCNT64_T_TYPE = __UQUAD_TYPE;
+pub const __FSFILCNT_T_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __FSFILCNT64_T_TYPE = __UQUAD_TYPE;
+pub const __ID_T_TYPE = __U32_TYPE;
+pub const __CLOCK_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __TIME_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __USECONDS_T_TYPE = __U32_TYPE;
+pub const __SUSECONDS_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __SUSECONDS64_T_TYPE = __SQUAD_TYPE;
+pub const __DADDR_T_TYPE = __S32_TYPE;
+pub const __KEY_T_TYPE = __S32_TYPE;
+pub const __CLOCKID_T_TYPE = __S32_TYPE;
+pub const __TIMER_T_TYPE = ?*anyopaque;
+pub const __BLKSIZE_T_TYPE = __SYSCALL_SLONG_TYPE;
+pub const __FSID_T_TYPE = @compileError("unable to translate macro: undefined identifier `__val`");
+// /usr/include/bits/typesizes.h:73:9
+pub const __SSIZE_T_TYPE = __SWORD_TYPE;
+pub const __CPU_MASK_TYPE = __SYSCALL_ULONG_TYPE;
+pub const __OFF_T_MATCHES_OFF64_T = @as(c_int, 1);
+pub const __INO_T_MATCHES_INO64_T = @as(c_int, 1);
+pub const __RLIM_T_MATCHES_RLIM64_T = @as(c_int, 1);
+pub const __STATFS_MATCHES_STATFS64 = @as(c_int, 1);
+pub const __KERNEL_OLD_TIMEVAL_MATCHES_TIMEVAL64 = @as(c_int, 1);
+pub const __FD_SETSIZE = @as(c_int, 1024);
+pub const _BITS_TIME64_H = @as(c_int, 1);
+pub const __TIME64_T_TYPE = __TIME_T_TYPE;
+pub const _BITS_WCHAR_H = @as(c_int, 1);
+pub const __WCHAR_MAX = __WCHAR_MAX__;
+pub const __WCHAR_MIN = -__WCHAR_MAX - @as(c_int, 1);
+pub const _BITS_STDINT_INTN_H = @as(c_int, 1);
+pub const _BITS_STDINT_UINTN_H = @as(c_int, 1);
+pub const _BITS_STDINT_LEAST_H = @as(c_int, 1);
 pub const __intptr_t_defined = "";
-pub const _INTPTR_T = "";
-pub const _UINTPTR_T = "";
-pub inline fn INT64_C(v: anytype) @TypeOf(__INT64_C(v)) {
-    _ = &v;
-    return __INT64_C(v);
+pub const INT8_MIN = -@as(c_int, 128);
+pub const INT16_MIN = -@as(c_int, 32767) - @as(c_int, 1);
+pub const INT32_MIN = -__helpers.promoteIntLiteral(c_int, 2147483647, .decimal) - @as(c_int, 1);
+pub const INT64_MIN = -__INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal)) - @as(c_int, 1);
+pub const INT8_MAX = @as(c_int, 127);
+pub const INT16_MAX = @as(c_int, 32767);
+pub const INT32_MAX = __helpers.promoteIntLiteral(c_int, 2147483647, .decimal);
+pub const INT64_MAX = __INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal));
+pub const UINT8_MAX = @as(c_int, 255);
+pub const UINT16_MAX = __helpers.promoteIntLiteral(c_int, 65535, .decimal);
+pub const UINT32_MAX = __helpers.promoteIntLiteral(c_uint, 4294967295, .decimal);
+pub const UINT64_MAX = __UINT64_C(__helpers.promoteIntLiteral(c_int, 18446744073709551615, .decimal));
+pub const INT_LEAST8_MIN = -@as(c_int, 128);
+pub const INT_LEAST16_MIN = -@as(c_int, 32767) - @as(c_int, 1);
+pub const INT_LEAST32_MIN = -__helpers.promoteIntLiteral(c_int, 2147483647, .decimal) - @as(c_int, 1);
+pub const INT_LEAST64_MIN = -__INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal)) - @as(c_int, 1);
+pub const INT_LEAST8_MAX = @as(c_int, 127);
+pub const INT_LEAST16_MAX = @as(c_int, 32767);
+pub const INT_LEAST32_MAX = __helpers.promoteIntLiteral(c_int, 2147483647, .decimal);
+pub const INT_LEAST64_MAX = __INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal));
+pub const UINT_LEAST8_MAX = @as(c_int, 255);
+pub const UINT_LEAST16_MAX = __helpers.promoteIntLiteral(c_int, 65535, .decimal);
+pub const UINT_LEAST32_MAX = __helpers.promoteIntLiteral(c_uint, 4294967295, .decimal);
+pub const UINT_LEAST64_MAX = __UINT64_C(__helpers.promoteIntLiteral(c_int, 18446744073709551615, .decimal));
+pub const INT_FAST8_MIN = -@as(c_int, 128);
+pub const INT_FAST16_MIN = -__helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal) - @as(c_int, 1);
+pub const INT_FAST32_MIN = -__helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal) - @as(c_int, 1);
+pub const INT_FAST64_MIN = -__INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal)) - @as(c_int, 1);
+pub const INT_FAST8_MAX = @as(c_int, 127);
+pub const INT_FAST16_MAX = __helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal);
+pub const INT_FAST32_MAX = __helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal);
+pub const INT_FAST64_MAX = __INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal));
+pub const UINT_FAST8_MAX = @as(c_int, 255);
+pub const UINT_FAST16_MAX = __helpers.promoteIntLiteral(c_ulong, 18446744073709551615, .decimal);
+pub const UINT_FAST32_MAX = __helpers.promoteIntLiteral(c_ulong, 18446744073709551615, .decimal);
+pub const UINT_FAST64_MAX = __UINT64_C(__helpers.promoteIntLiteral(c_int, 18446744073709551615, .decimal));
+pub const INTPTR_MIN = -__helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal) - @as(c_int, 1);
+pub const INTPTR_MAX = __helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal);
+pub const UINTPTR_MAX = __helpers.promoteIntLiteral(c_ulong, 18446744073709551615, .decimal);
+pub const INTMAX_MIN = -__INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal)) - @as(c_int, 1);
+pub const INTMAX_MAX = __INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal));
+pub const UINTMAX_MAX = __UINT64_C(__helpers.promoteIntLiteral(c_int, 18446744073709551615, .decimal));
+pub const PTRDIFF_MIN = -__helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal) - @as(c_int, 1);
+pub const PTRDIFF_MAX = __helpers.promoteIntLiteral(c_long, 9223372036854775807, .decimal);
+pub const SIG_ATOMIC_MIN = -__helpers.promoteIntLiteral(c_int, 2147483647, .decimal) - @as(c_int, 1);
+pub const SIG_ATOMIC_MAX = __helpers.promoteIntLiteral(c_int, 2147483647, .decimal);
+pub const SIZE_MAX = __helpers.promoteIntLiteral(c_ulong, 18446744073709551615, .decimal);
+pub const WCHAR_MIN = __WCHAR_MIN;
+pub const WCHAR_MAX = __WCHAR_MAX;
+pub const WINT_MIN = @as(c_uint, 0);
+pub const WINT_MAX = __helpers.promoteIntLiteral(c_uint, 4294967295, .decimal);
+pub inline fn INT8_C(c: anytype) @TypeOf(c) {
+    _ = &c;
+    return c;
 }
-pub inline fn UINT64_C(v: anytype) @TypeOf(__UINT64_C(v)) {
-    _ = &v;
-    return __UINT64_C(v);
+pub inline fn INT16_C(c: anytype) @TypeOf(c) {
+    _ = &c;
+    return c;
 }
-pub inline fn INT32_C(v: anytype) @TypeOf(__INT32_C(v)) {
-    _ = &v;
-    return __INT32_C(v);
+pub inline fn INT32_C(c: anytype) @TypeOf(c) {
+    _ = &c;
+    return c;
 }
-pub inline fn UINT32_C(v: anytype) @TypeOf(__UINT32_C(v)) {
-    _ = &v;
-    return __UINT32_C(v);
+pub const INT64_C = __helpers.L_SUFFIX;
+pub inline fn UINT8_C(c: anytype) @TypeOf(c) {
+    _ = &c;
+    return c;
 }
-pub inline fn INT16_C(v: anytype) @TypeOf(__INT16_C(v)) {
-    _ = &v;
-    return __INT16_C(v);
+pub inline fn UINT16_C(c: anytype) @TypeOf(c) {
+    _ = &c;
+    return c;
 }
-pub inline fn UINT16_C(v: anytype) @TypeOf(__UINT16_C(v)) {
-    _ = &v;
-    return __UINT16_C(v);
-}
-pub inline fn INT8_C(v: anytype) @TypeOf(__INT8_C(v)) {
-    _ = &v;
-    return __INT8_C(v);
-}
-pub inline fn UINT8_C(v: anytype) @TypeOf(__UINT8_C(v)) {
-    _ = &v;
-    return __UINT8_C(v);
-}
-pub const INT64_MAX = INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal));
-pub const INT64_MIN = -INT64_C(__helpers.promoteIntLiteral(c_int, 9223372036854775807, .decimal)) - @as(c_int, 1);
-pub const UINT64_MAX = UINT64_C(__helpers.promoteIntLiteral(c_int, 18446744073709551615, .decimal));
-pub const __INT_LEAST64_MIN = INT64_MIN;
-pub const __INT_LEAST64_MAX = INT64_MAX;
-pub const __UINT_LEAST64_MAX = UINT64_MAX;
-pub const INT_LEAST64_MIN = __INT_LEAST64_MIN;
-pub const INT_LEAST64_MAX = __INT_LEAST64_MAX;
-pub const UINT_LEAST64_MAX = __UINT_LEAST64_MAX;
-pub const INT_FAST64_MIN = __INT_LEAST64_MIN;
-pub const INT_FAST64_MAX = __INT_LEAST64_MAX;
-pub const UINT_FAST64_MAX = __UINT_LEAST64_MAX;
-pub const INT32_MAX = INT32_C(__helpers.promoteIntLiteral(c_int, 2147483647, .decimal));
-pub const INT32_MIN = -INT32_C(__helpers.promoteIntLiteral(c_int, 2147483647, .decimal)) - @as(c_int, 1);
-pub const UINT32_MAX = UINT32_C(__helpers.promoteIntLiteral(c_int, 4294967295, .decimal));
-pub const __INT_LEAST32_MIN = INT32_MIN;
-pub const __INT_LEAST32_MAX = INT32_MAX;
-pub const __UINT_LEAST32_MAX = UINT32_MAX;
-pub const INT_LEAST32_MIN = __INT_LEAST32_MIN;
-pub const INT_LEAST32_MAX = __INT_LEAST32_MAX;
-pub const UINT_LEAST32_MAX = __UINT_LEAST32_MAX;
-pub const INT_FAST32_MIN = __INT_LEAST32_MIN;
-pub const INT_FAST32_MAX = __INT_LEAST32_MAX;
-pub const UINT_FAST32_MAX = __UINT_LEAST32_MAX;
-pub const INT16_MAX = INT16_C(@as(c_int, 32767));
-pub const INT16_MIN = -INT16_C(@as(c_int, 32767)) - @as(c_int, 1);
-pub const UINT16_MAX = UINT16_C(__helpers.promoteIntLiteral(c_int, 65535, .decimal));
-pub const __INT_LEAST16_MIN = INT16_MIN;
-pub const __INT_LEAST16_MAX = INT16_MAX;
-pub const __UINT_LEAST16_MAX = UINT16_MAX;
-pub const INT_LEAST16_MIN = __INT_LEAST16_MIN;
-pub const INT_LEAST16_MAX = __INT_LEAST16_MAX;
-pub const UINT_LEAST16_MAX = __UINT_LEAST16_MAX;
-pub const INT_FAST16_MIN = __INT_LEAST16_MIN;
-pub const INT_FAST16_MAX = __INT_LEAST16_MAX;
-pub const UINT_FAST16_MAX = __UINT_LEAST16_MAX;
-pub const INT8_MAX = INT8_C(@as(c_int, 127));
-pub const INT8_MIN = -INT8_C(@as(c_int, 127)) - @as(c_int, 1);
-pub const UINT8_MAX = UINT8_C(@as(c_int, 255));
-pub const __INT_LEAST8_MIN = INT8_MIN;
-pub const __INT_LEAST8_MAX = INT8_MAX;
-pub const __UINT_LEAST8_MAX = UINT8_MAX;
-pub const INT_LEAST8_MIN = __INT_LEAST8_MIN;
-pub const INT_LEAST8_MAX = __INT_LEAST8_MAX;
-pub const UINT_LEAST8_MAX = __UINT_LEAST8_MAX;
-pub const INT_FAST8_MIN = __INT_LEAST8_MIN;
-pub const INT_FAST8_MAX = __INT_LEAST8_MAX;
-pub const UINT_FAST8_MAX = __UINT_LEAST8_MAX;
-pub const __INTN_MIN = @compileError("unable to translate macro: undefined identifier `INT`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:764:10
-pub const __INTN_MAX = @compileError("unable to translate macro: undefined identifier `INT`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:765:10
-pub const __UINTN_MAX = @compileError("unable to translate macro: undefined identifier `UINT`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:766:9
-pub const __INTN_C = @compileError("unable to translate macro: undefined identifier `INT`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:767:10
-pub const __UINTN_C = @compileError("unable to translate macro: undefined identifier `UINT`"); // ~/.cache/dusk/global/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/include/stdint.h:768:9
-pub const INTPTR_MIN = -__INTPTR_MAX__ - @as(c_int, 1);
-pub const INTPTR_MAX = __INTPTR_MAX__;
-pub const UINTPTR_MAX = __UINTPTR_MAX__;
-pub const PTRDIFF_MIN = -__PTRDIFF_MAX__ - @as(c_int, 1);
-pub const PTRDIFF_MAX = __PTRDIFF_MAX__;
-pub const SIZE_MAX = __SIZE_MAX__;
-pub const INTMAX_MIN = -__INTMAX_MAX__ - @as(c_int, 1);
-pub const INTMAX_MAX = __INTMAX_MAX__;
-pub const UINTMAX_MAX = __UINTMAX_MAX__;
-pub const SIG_ATOMIC_MIN = __INTN_MIN(__SIG_ATOMIC_WIDTH__);
-pub const SIG_ATOMIC_MAX = __INTN_MAX(__SIG_ATOMIC_WIDTH__);
-pub const WINT_MIN = __UINTN_C(__WINT_WIDTH__, @as(c_int, 0));
-pub const WINT_MAX = __UINTN_MAX(__WINT_WIDTH__);
-pub const WCHAR_MAX = __WCHAR_MAX__;
-pub const WCHAR_MIN = __INTN_MIN(__WCHAR_WIDTH__);
-pub inline fn INTMAX_C(v: anytype) @TypeOf(__INTMAX_C(v)) {
-    _ = &v;
-    return __INTMAX_C(v);
-}
-pub inline fn UINTMAX_C(v: anytype) @TypeOf(__UINTMAX_C(v)) {
-    _ = &v;
-    return __UINTMAX_C(v);
-}
-pub const VK_DEFINE_HANDLE = @compileError("unable to translate macro: untranslatable usage of arg `object`"); // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:27:9
+pub const UINT32_C = __helpers.U_SUFFIX;
+pub const UINT64_C = __helpers.UL_SUFFIX;
+pub const INTMAX_C = __helpers.L_SUFFIX;
+pub const UINTMAX_C = __helpers.UL_SUFFIX;
+pub const VK_DEFINE_HANDLE = @compileError("unable to translate macro: untranslatable usage of arg `object`");
+// vulkan/vulkan_core.h:27:9
 pub const VK_USE_64_BIT_PTR_DEFINES = @as(c_int, 1);
 pub const VK_NULL_HANDLE = __helpers.cast(?*anyopaque, @as(c_int, 0));
-pub const VK_DEFINE_NON_DISPATCHABLE_HANDLE = @compileError("unable to translate macro: untranslatable usage of arg `object`"); // /nix/store/q4y92hvwlq8k1bj7icm6xiyg7cvcyqr4-source/vulkan/vulkan/vulkan_core.h:54:17
+pub const VK_DEFINE_NON_DISPATCHABLE_HANDLE = @compileError("unable to translate macro: untranslatable usage of arg `object`");
+// vulkan/vulkan_core.h:54:17
 pub inline fn VK_MAKE_API_VERSION(variant: anytype, major: anytype, minor: anytype, patch: anytype) @TypeOf((((__helpers.cast(u32, variant) << @as(c_uint, 29)) | (__helpers.cast(u32, major) << @as(c_uint, 22))) | (__helpers.cast(u32, minor) << @as(c_uint, 12))) | __helpers.cast(u32, patch)) {
     _ = &variant;
     _ = &major;

@@ -6,19 +6,21 @@ const leaf = @import("../src/platform/external_memory_import.zig");
 
 test "memory import requires exactly one supported arm before native access" {
     try std.testing.expectError(error.DescriptorChainEmpty, translator.validateDescriptor(&.{}));
-    const opaque: api.descriptors.SharedTextureMemoryOpaqueFDDescriptor = .{
-        .memory_fd = 3, .memory_type_index = 0, .allocation_size = 4096,
+    const opaque_fd: api.descriptors.SharedTextureMemoryOpaqueFDDescriptor = .{
+        .memory_fd = 3,
+        .memory_type_index = 0,
+        .allocation_size = 4096,
         .dedicated_allocation = true,
     };
     try std.testing.expectError(error.MultipleMemoryHandleArms, translator.validateDescriptor(&.{
-        .shared_texture_memory_opaque_fd_descriptor = opaque,
+        .shared_texture_memory_opaque_fd_descriptor = opaque_fd,
         .shared_texture_memory_a_hardware_buffer_descriptor = .{},
     }));
     try std.testing.expectError(error.UnsupportedMemoryHandleType, translator.validateDescriptor(&.{
         .shared_texture_memory_zircon_handle_descriptor = .{ .memory_fd = 1 },
     }));
     try std.testing.expectError(error.InvalidImageCreateInfo, translator.validateDescriptor(&.{
-        .shared_texture_memory_opaque_fd_descriptor = opaque,
+        .shared_texture_memory_opaque_fd_descriptor = opaque_fd,
     }));
     try std.testing.expectError(error.InvalidAHardwareBuffer, translator.validateDescriptor(&.{
         .shared_texture_memory_a_hardware_buffer_descriptor = .{},
@@ -26,28 +28,30 @@ test "memory import requires exactly one supported arm before native access" {
 }
 
 test "format projection preserves actual Vulkan format and rejects unknown formats" {
-    try std.testing.expectEqual(api.enums.TextureFormat.bgra8_unorm,
-        try translator.apiFormat(vk.VK_FORMAT_B8G8R8A8_UNORM));
-    try std.testing.expectEqual(api.enums.TextureFormat.depth32_float,
-        try translator.apiFormat(vk.VK_FORMAT_D32_SFLOAT));
-    try std.testing.expectError(error.InvalidExternalMemoryFormat,
-        translator.apiFormat(vk.VK_FORMAT_UNDEFINED));
-    try std.testing.expectError(error.InvalidExternalMemoryFormat,
-        translator.apiFormat(vk.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM));
+    try std.testing.expectEqual(api.enums.TextureFormat.bgra8_unorm, try translator.apiFormat(vk.VK_FORMAT_B8G8R8A8_UNORM));
+    try std.testing.expectEqual(api.enums.TextureFormat.depth32_float, try translator.apiFormat(vk.VK_FORMAT_D32_SFLOAT));
+    try std.testing.expectError(error.InvalidExternalMemoryFormat, translator.apiFormat(vk.VK_FORMAT_UNDEFINED));
+    try std.testing.expectError(error.InvalidExternalMemoryFormat, translator.apiFormat(vk.VK_FORMAT_G8_B8R8_2PLANE_420_UNORM));
 }
 
 test "image chain snapshot owns format arrays and rejects cycles" {
     var formats = [_]vk.VkFormat{vk.VK_FORMAT_R8G8B8A8_UNORM};
     var list: vk.VkImageFormatListCreateInfo = .{
         .sType = vk.VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
-        .viewFormatCount = 1, .pViewFormats = &formats,
+        .viewFormatCount = 1,
+        .pViewFormats = &formats,
     };
     var info: vk.VkImageCreateInfo = .{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = &list,
-        .imageType = vk.VK_IMAGE_TYPE_2D, .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
-        .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mipLevels = 1,
-        .arrayLayers = 1, .samples = vk.VK_SAMPLE_COUNT_1_BIT,
-        .tiling = vk.VK_IMAGE_TILING_OPTIMAL, .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &list,
+        .imageType = vk.VK_IMAGE_TYPE_2D,
+        .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = .{ .width = 8, .height = 8, .depth = 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+        .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
     };
@@ -56,30 +60,25 @@ test "image chain snapshot owns format arrays and rejects cycles" {
     formats[0] = vk.VK_FORMAT_B8G8R8A8_UNORM;
     try std.testing.expectEqual(@as(vk.VkFormat, vk.VK_FORMAT_R8G8B8A8_UNORM), snapshot.formats[0]);
     list.pNext = &list;
-    try std.testing.expectError(error.InvalidImageCreateChain,
-        leaf.OwnedImageCreateInfo.init(std.testing.allocator, &info));
+    try std.testing.expectError(error.InvalidImageCreateChain, leaf.OwnedImageCreateInfo.init(std.testing.allocator, &info));
 }
 
 test "usage projection does not claim unsupported attachment or storage bits" {
-    const usage = try translator.apiUsage(vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        vk.VK_FORMAT_R8G8B8A8_UNORM);
+    const usage = try translator.apiUsage(vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, vk.VK_FORMAT_R8G8B8A8_UNORM);
     try std.testing.expectEqual(@as(u32, 5), usage.toFlags());
-    try std.testing.expectError(error.InvalidImageCreateInfo,
-        translator.apiUsage(vk.VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, vk.VK_FORMAT_R8G8B8A8_UNORM));
+    try std.testing.expectError(error.InvalidImageCreateInfo, translator.apiUsage(vk.VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, vk.VK_FORMAT_R8G8B8A8_UNORM));
 }
 
 const Retirement = struct {
     step: u32 = 0,
-    fn destroyImage(device: vk.VkDevice, image: vk.VkImage,
-        callbacks: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    fn destroyImage(device: vk.VkDevice, image: vk.VkImage, callbacks: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
         const self: *Retirement = @ptrCast(@alignCast(device.?));
         std.debug.assert(self.step == 0);
         std.debug.assert(image != null);
         std.debug.assert(callbacks == null);
         self.step = 1;
     }
-    fn freeMemory(device: vk.VkDevice, memory: vk.VkDeviceMemory,
-        callbacks: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    fn freeMemory(device: vk.VkDevice, memory: vk.VkDeviceMemory, callbacks: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
         const self: *Retirement = @ptrCast(@alignCast(device.?));
         std.debug.assert(self.step == 1);
         std.debug.assert(memory != null);
@@ -101,16 +100,20 @@ test "publication rollback destroys image before memory before AHB retain exactl
     procs.destroy_image = Retirement.destroyImage;
     procs.free_memory = Retirement.freeMemory;
     var imported: shared.ImportedImage = .{
-        .device = @ptrCast(&state), .procs = &procs,
-        .image = @ptrFromInt(16), .memory = @ptrFromInt(32),
+        .device = @ptrCast(&state),
+        .procs = &procs,
+        .image = @ptrFromInt(16),
+        .memory = @ptrFromInt(32),
         .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
-        .properties = .{ .format = .rgba8_unorm,
-            .size = .{ .width = 1, .height = 1, .depth_or_array_layers = 1 },
-            .usage = api.bitmask.TextureUsage.fromFlags(4) },
-        .mip_levels = 1, .array_layers = 1, .aspect_mask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+        .properties = .{ .format = .rgba8_unorm, .size = .{ .width = 1, .height = 1, .depth_or_array_layers = 1 }, .usage = api.bitmask.TextureUsage.fromFlags(4) },
+        .mip_levels = 1,
+        .array_layers = 1,
+        .aspect_mask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
         .external_queue_family = vk.VK_QUEUE_FAMILY_FOREIGN_EXT,
-        .initial_layout = vk.VK_IMAGE_LAYOUT_UNDEFINED, .provenance = .android_hardware_buffer,
-        .platform_retain = &state, .release_platform_retain = Retirement.releaseBuffer,
+        .initial_layout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        .provenance = .android_hardware_buffer,
+        .platform_retain = &state,
+        .release_platform_retain = Retirement.releaseBuffer,
     };
     translator.destroyImported(&imported);
     try std.testing.expectEqual(@as(u32, 3), state.step);
@@ -125,14 +128,20 @@ fn snapshotAllocationFailure(allocator: std.mem.Allocator) !void {
     const formats = [_]vk.VkFormat{vk.VK_FORMAT_R8G8B8A8_UNORM};
     var list: vk.VkImageFormatListCreateInfo = .{
         .sType = vk.VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
-        .viewFormatCount = 1, .pViewFormats = &formats,
+        .viewFormatCount = 1,
+        .pViewFormats = &formats,
     };
     const info: vk.VkImageCreateInfo = .{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = &list,
-        .imageType = vk.VK_IMAGE_TYPE_2D, .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &list,
+        .imageType = vk.VK_IMAGE_TYPE_2D,
+        .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
         .extent = .{ .width = 8, .height = 8, .depth = 1 },
-        .mipLevels = 1, .arrayLayers = 1, .samples = vk.VK_SAMPLE_COUNT_1_BIT,
-        .tiling = vk.VK_IMAGE_TILING_OPTIMAL, .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+        .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
     };
@@ -151,14 +160,15 @@ test "DMA descriptor preflight rejects disjoint plane handles before native impo
         .{ .fd = 4, .offset = 64, .stride = 8 },
     };
     const dma = @import("../src/platform/dma_buf.zig");
-    try std.testing.expectError(error.DisjointDmaBufUnsupported,
-        translator.validateDescriptor(&.{
-            .shared_texture_memory_dma_buf_descriptor = .{
-                .size = .{ .width = 8, .height = 8, .depth_or_array_layers = 1 },
-                .drm_format = dma.drmFourcc('N', 'V', '1', '2'),
-                .drm_modifier = 0, .plane_count = 2, .planes = &planes,
-            },
-        }));
+    try std.testing.expectError(error.DisjointDmaBufUnsupported, translator.validateDescriptor(&.{
+        .shared_texture_memory_dma_buf_descriptor = .{
+            .size = .{ .width = 8, .height = 8, .depth_or_array_layers = 1 },
+            .drm_format = dma.drmFourcc('N', 'V', '1', '2'),
+            .drm_modifier = 0,
+            .plane_count = 2,
+            .planes = &planes,
+        },
+    }));
 }
 
 test "native transient usage projects only its real render attachment combination" {

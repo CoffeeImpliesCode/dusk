@@ -1,9 +1,8 @@
 //! Dynamic library loading: one `dlopen` call behind a declared error set.
 //!
 //! **What this file is.** The port of `src/dawn/common/DynamicLib.cpp` at Dawn
-//! revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. It holds `open`, `lookup`,
-//! `close` and `isOpen`. `docs/40-plan.md` §3.2 carries its ten rows.
+//! revision `32f77c02294310054a660c393feded4bcb3f203c`. It holds `open`, `lookup`,
+//! `close` and `isOpen`.
 //!
 //! **What this file does not claim.** It does not claim the Windows behaviour.
 //! `DynamicLib::OpenSystemLibrary` (`DynamicLib.cpp:68`) has no row because its
@@ -12,15 +11,14 @@
 //! `DynamicLib::OpenLoaded` (`DynamicLib.cpp:118`) has no row because its only
 //! caller is `native/utils/RenderDoc.cpp:60`, which is skipped. It does not
 //! return the `dlerror()` text that `DynamicLib.cpp:106-108` copies into an
-//! out-parameter. `docs/40-plan.md` §3.2 replaces that out-parameter with a
-//! member of the declared error set.
+//! out-parameter. A member of the declared error set replaces it.
 //!
 //! **One difference from upstream, named.** Dawn opens with `RTLD_NOW`
 //! (`DynamicLib.cpp:104`), so a missing symbol fails the open.
 //! `std.DynLib` opens with `RTLD_LAZY` (`lib/std/dynamic_library.zig:576`), so a
 //! missing symbol faults at the call. The Vulkan loader tier tolerates that,
 //! because `loadInstanceProcs` and `loadDeviceProcs` already treat a null proc as
-//! a missing entry point (`docs/40-plan.md` §3.2, row `VulkanFunctions.cpp:120`),
+//! a missing entry point (`VulkanFunctions.cpp:120`),
 //! and the tier never calls a proc it did not load.
 
 const std = @import("std");
@@ -98,7 +96,7 @@ pub const Loader = struct {
             // A refusal moves to the next candidate, so no `std.DynLib.Error`
             // member reaches `OpenError` above. `dlerror()` explains a refusal,
             // and Dawn copied that text into a string (`DynamicLib.cpp:106-108`)
-            // which `error.OpenFailed` below replaces (`docs/40-plan.md` §3.2).
+            // which `error.OpenFailed` below replaces.
             loader.lib = std.DynLib.open(joined orelse options.path) catch continue;
             loader.needs_close = true;
             return;

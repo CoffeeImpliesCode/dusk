@@ -28,9 +28,9 @@ pub const Descriptor = struct { handle_type: external.HandleType, fd: external.E
 /// Snapshots one supported FD arm without retaining caller descriptor pointers.
 pub fn validateDescriptor(descriptor: api.descriptors.SharedFenceDescriptorChain) DescriptorError!Descriptor {
     var count: usize = 0;
-    inline for (@typeInfo(api.descriptors.SharedFenceDescriptorChain).@"struct".fields) |field| {
-        if (comptime !std.mem.eql(u8, field.name, "label")) {
-            if (@field(descriptor, field.name) != null) count += 1;
+    inline for (@typeInfo(api.descriptors.SharedFenceDescriptorChain).@"struct".field_names) |field_name| {
+        if (comptime !std.mem.eql(u8, field_name, "label")) {
+            if (@field(descriptor, field_name) != null) count += 1;
         }
     }
     if (count == 0) return error.DescriptorChainEmpty;
@@ -140,7 +140,10 @@ pub const SharedFence = struct {
         label: []const u8,
     ) core.CreateError!*SharedFence {
         const self = try arena.create(allocator, guard, SharedFence, .{
-            .kind = .shared_fence, .state = .initializing, .initial_reference = .user, .label = label,
+            .kind = .shared_fence,
+            .state = .initializing,
+            .initial_reference = .user,
+            .label = label,
         });
         self.owner = owner;
         self.semaphore = semaphore;
@@ -259,14 +262,14 @@ pub const SharedFence = struct {
         defer guard.unlock(io);
         if (context.terminal_loss) return error.DeviceLost;
         try self.checkLive(&guard);
-        const opaque = out.shared_fence_vk_semaphore_opaque_fd_export_info != null;
+        const opaque_fd = out.shared_fence_vk_semaphore_opaque_fd_export_info != null;
         const sync = out.shared_fence_sync_fd_export_info != null;
-        if (opaque == sync) return error.InvalidExportInfo;
-        if (opaque != (self.service.handle_type == .opaque_fd)) return error.InvalidExportInfo;
+        if (opaque_fd == sync) return error.InvalidExportInfo;
+        if (opaque_fd != (self.service.handle_type == .opaque_fd)) return error.InvalidExportInfo;
         try self.ensureExportedLocked(io, &guard);
         const fd = try self.takeExportedHandleLocked(&guard);
         var result = out.*;
-        if (opaque) {
+        if (opaque_fd) {
             result.type_ = .vk_semaphore_opaque_fd;
             result.shared_fence_vk_semaphore_opaque_fd_export_info.?.handle = fd;
         } else {

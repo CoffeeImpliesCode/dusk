@@ -1,25 +1,8 @@
 //! The M20 shard: a surface request on a host with no display server.
 //!
-//! **What this file is.** The negative half of the M20 acceptance
-//! (`docs/40-plan.md:716-722`). It asks for a surface and asserts three
-//! things: the call returns `error.SurfaceUnavailable`, the message names the
-//! environment that is missing, and no Vulkan handle was created.
-//!
-//! **What this file does not claim.** It does not claim a driver lacks an
-//! extension. `docs/40-plan.md:716` says the host has no
-//! `VK_EXT_headless_surface`; that is false inside devenv, where lavapipe
-//! advertises it, and `docs/50-verification.md:79-86` records the correction
-//! and points at `AGENTS.md:174-176`, which states the corrected form. An
-//! assertion of the form "the driver lacks `VK_EXT_headless_surface`" would be
-//! red in one configuration and green in the other, so nothing here reads an
-//! extension list. Every assertion below is a property of the port and holds on
-//! every configuration on this machine.
-//!
-//! **What is missing.** `DISPLAY` and `WAYLAND_DISPLAY` are unset in both
-//! configurations (`docs/50-verification.md:30-31`, grade A), and neither the
-//! host extension list (`:44-54`) nor the devenv one (`:56-82`) carries both
-//! `VK_KHR_display` and `VK_EXT_headless_surface`, so no configuration on this
-//! machine can name a display for a surface.
+//! It asks for a surface and asserts three things: the call returns
+//! `error.SurfaceUnavailable`, the message names the missing environment,
+//! and no Vulkan handle was created.
 //!
 //! **The import is `@import("dusk")`.** The published module exposes `platform`
 //! through `src/root.zig`, and this shard reaches the library through it like
@@ -52,11 +35,8 @@ const xlib_request: SurfaceRequest = .{
 };
 
 test "every member of the surface error set has a message" {
-    // `AGENTS.md` §3: sweep the set at compile time, one member per assertion.
-    // A member is a `builtin.Error`, so `@field` gives the error value
-    // (`x11_functions.zig:183-186`).
-    inline for (@typeInfo(SurfaceError).error_set.?) |member| {
-        const text = platform.surfaceMessage(@field(SurfaceError, member.name));
+    inline for (@typeInfo(SurfaceError).error_set.error_names.?) |member| {
+        const text = platform.surfaceMessage(@field(SurfaceError, member));
         try std.testing.expect(text.len > 0);
     }
 }
@@ -66,7 +46,7 @@ test "the surface error set is the fourteen rules the port declares" {
     // one removed fails. The count is the sweep's own census.
     try std.testing.expectEqual(
         @as(usize, 14),
-        @typeInfo(SurfaceError).error_set.?.len,
+        @typeInfo(SurfaceError).error_set.error_names.?.len,
     );
 }
 
@@ -94,9 +74,6 @@ test "the message names the missing environment" {
 }
 
 test "the message does not blame an extension the host may have" {
-    // `docs/50-verification.md:63` records `VK_EXT_headless_surface` present
-    // inside devenv on lavapipe. Naming it as the missing thing would make
-    // this message a false statement in the configuration the gate runs in.
     const text = platform.surfaceMessage(error.SurfaceUnavailable);
     try std.testing.expect(std.mem.indexOf(u8, text, "VK_EXT_headless_surface") == null);
 }
@@ -251,8 +228,8 @@ test "the nine source types have nine names and every name round-trips" {
     // `AbslFormatConvert` (`Surface.cpp:59-93`) is the only formatter upstream
     // has for the sum type, and a collision would make `fromName` return the
     // wrong type.
-    inline for (@typeInfo(SourceType).@"enum".fields) |field| {
-        const source_type: SourceType = @enumFromInt(field.value);
+    inline for (@typeInfo(SourceType).@"enum".field_values) |field_value| {
+        const source_type: SourceType = @fromBackingInt(@intCast(field_value));
         try std.testing.expectEqual(source_type, SourceType.fromName(source_type.name()).?);
     }
     try std.testing.expectEqual(@as(?SourceType, null), SourceType.fromName("NoSuchSurface"));

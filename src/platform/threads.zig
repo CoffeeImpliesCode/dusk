@@ -8,9 +8,7 @@
 //! `WaitListEvent.{h,cpp}`), and the thread pool
 //! (`src/dawn/platform/WorkerThread.{h,cpp}` with the factory at
 //! `src/dawn/platform/DawnPlatform.cpp:90-97`). Dawn revision
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §3.3 carries
-//! the rows.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **What this file does not claim.** It does not claim the callback task
 //! manager. `CallbackTaskManager` (`src/dawn/native/CallbackTaskManager.{h,cpp}`)

@@ -4,12 +4,11 @@
 //! declared set, not a formatted message. Dawn reaches for SPIRV-Tools and
 //! forwards its text to a log emitter
 //! (`src/dawn/native/SpirvValidation.cpp:39-63`); the port links no validator
-//! and owns no log emitter (`docs/20-dependencies.md`, "SPIR-V — validate in
-//! Zig, no optimiser"), so a rule fires as an error.
+//! and owns no log emitter, so a rule fires as an error.
 //!
 //! **What this file does not claim.** It does not claim the port rejects every
-//! module SPIRV-Tools rejects; `docs/50-verification.md` §7.1 says the two are
-//! separate implementations. Every member below is raised by a rule in
+//! module SPIRV-Tools rejects; the two are separate implementations.
+//! Every member below is raised by a rule in
 //! `validate.zig` and is named by a test in `test/spirv.zig`.
 
 const std = @import("std");

@@ -50,8 +50,8 @@ test "ten thousand owned aliases release after device payload retirement" {
     var mutex: std.Io.Mutex = .init;
     var log: TeardownLog = .{};
     defer log.deinit(std.testing.allocator);
-    var child: std.heap.DebugAllocator(.{}) = .{};
-    defer std.testing.expect(child.deinit() == .ok) catch @panic("device block leaked");
+    var child: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(child.deinit() == 0) catch @panic("device block leaked");
     const gpa = child.allocator();
     var device = core.Device.init(gpa, .{
         .object_mutex = &mutex,

@@ -10,12 +10,10 @@
 //! **What this module is not.** It holds no Vulkan type.
 //! `docs/10-architecture.md` "Module boundaries" gives that to `vk`, and a
 //! reflection result has to be readable without a device. It also parses no
-//! WGSL: the input is a SPIR-V binary, and `AGENTS.md` §3.2 forbids the other
-//! direction.
+//! WGSL: the input is a SPIR-V binary.
 //!
 //! **What it does not claim.** It does not claim to accept exactly what
-//! SPIRV-Tools accepts; `docs/50-verification.md` §7.1 records the two as
-//! separate implementations and `spirv-val` as the one that proves a fixture.
+//! SPIRV-Tools accepts; these are separate implementations.
 //! It does not claim a type checker: `validate` reads the shape, the id space
 //! and the closed enumerations, and stops there.
 

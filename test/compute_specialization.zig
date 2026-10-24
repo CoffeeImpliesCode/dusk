@@ -114,7 +114,6 @@ fn runCases(io: std.Io, handles: *native.HandleSet, kind: FixtureKind) !void {
     });
     defer high_device.release(allocator, io, layout) catch
         @panic("specialization pipeline layout teardown failed");
-    const group_layout = bind_group_layout.native;
     var guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
     defer guard.unlock(io);
     try high_device.bindObjectsLocked(&guard, allocator);
@@ -126,49 +125,31 @@ fn runCases(io: std.Io, handles: *native.HandleSet, kind: FixtureKind) !void {
                 @panic("specialization pipeline reference release failed");
         }
     };
-    const resource_device: dusk.engine.buffer.Device = .{
-        .allocator = allocator,
-        .dispatch = device.dispatchTable(),
-        .vk_device = target,
-        .memory_properties = device.memoryProperties(),
-        .non_coherent_atom_size = 1,
-        .max_buffer_size = std.math.maxInt(u64),
-        .handles = handles,
-    };
-    var output_buffer = triangle.borrowBuffer(resource_device, output, 8, .{ .storage = true });
-    const descriptor_sets = dusk.pipeline.bind_group_descriptor_set;
-    var descriptor_allocator = try descriptor_sets.DescriptorSetAllocator.init(
-        allocator,
-        procs,
-        target,
-        group_layout.handle,
-        &.{.{ .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 }},
-    );
-    defer descriptor_allocator.deinit() catch @panic("specialization descriptor teardown failed");
-    const group = try dusk.engine.bind_group.BindGroup.create(allocator, io, &guard, .{
-        .objects = core_device.borrow().objects,
-        .descriptor_allocator = &descriptor_allocator,
-        .pipeline_layout = layout.native.handle,
-        .group_index = 0,
-        .group_layout = group_layout,
-        .buffer_limits = dusk.engine.bind_group.BufferLimits.fromPhysicalDeviceLimits(
-            &device.physicalProperties().limits,
-        ),
-        .bindings = &.{.{ .buffer = .{
-            .binding = 0,
-            .buffer = &output_buffer,
-            .offset = 0,
-            .size = 8,
-            .kind = .storage,
-            .stages = .{ .compute = true },
-        } }},
+    const output_buffer = try triangle.borrowBuffer(io, &guard, &high_device, output, 8, .{
+        .storage = true,
     });
-    defer {
-        group.destroy(allocator, io, &guard, q.timeline.lastSubmittedSerial()) catch
-            @panic("specialization bind group teardown failed");
-        descriptor_allocator.finishDeallocation(q.timeline.lastSubmittedSerial()) catch
-            @panic("specialization descriptor retirement failed");
-    }
+    defer triangle.releaseBorrowedBuffer(io, &guard, output_buffer);
+    const group = try dusk.engine.native_resources.createBindGroup(
+        allocator,
+        io,
+        &guard,
+        &core_device.arena,
+        context.resourceDevice(),
+        .{
+            .layout = layout,
+            .group_index = 0,
+            .bindings = &.{.{ .buffer = .{
+                .binding = 0,
+                .buffer = output_buffer,
+                .offset = 0,
+                .size = 8,
+                .kind = .storage,
+                .stages = .{ .compute = true },
+            } }},
+        },
+    );
+    defer group.header.releaseUserLocked(&guard, io) catch
+        @panic("specialization bind group teardown failed");
     const passes = &context.render_pass_cache;
     const frames = &context.framebuffer_cache;
     var mapped: ?*anyopaque = null;
@@ -352,11 +333,11 @@ fn runCases(io: std.Io, handles: *native.HandleSet, kind: FixtureKind) !void {
         });
         try pass.setBindGroup(.{
             .index = 0,
-            .group = group,
+            .group = try group.ref(&guard),
             .layout_id = layout_id,
             .min_binding_buffer_size = 8,
             .buffers = &.{.{
-                .buffer = &output_buffer,
+                .buffer = try output_buffer.ref(&guard),
                 .usage = (dusk.api.BufferUsage{ .storage = true }).toFlags(),
             }},
         });

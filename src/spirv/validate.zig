@@ -1,13 +1,11 @@
 //! The pass that decides whether a module may reach `vkCreateShaderModule`.
 //!
 //! `docs/10-architecture.md` "Shaders" puts this between the caller's bytes and
-//! Vulkan, and `AGENTS.md` §3.2 fixes the two halves of the contract: the port
-//! validates and reflects, and the caller's own words reach Vulkan. This file
+//! Vulkan. The port validates and reflects, and the caller's own words reach Vulkan. This file
 //! only reads.
 //!
 //! **What this file does not claim.** It does not claim the port accepts
-//! exactly what SPIRV-Tools accepts. `docs/50-verification.md` §7.1 calls the
-//! two separate implementations of one specification, and the port checks the
+//! exactly what SPIRV-Tools accepts. The two implement one specification, and the port checks the
 //! shape, the id space and the closed enumerations, not the type system: a
 //! module that type-checks wrongly can still pass here.
 

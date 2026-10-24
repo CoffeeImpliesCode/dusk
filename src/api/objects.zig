@@ -78,7 +78,7 @@ pub const Buffer = struct {
 
     /// Generated from dawn.json "buffer" method "map async" (src/dawn/dawn.json:653).
     /// dawn.json marks this method `no autolock`.
-    /// 2 parameters of `usize` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `usize` become this struct.
     pub const MapAsyncOffsetOptions = struct {
         offset: usize,
         size: usize,
@@ -87,7 +87,7 @@ pub const Buffer = struct {
 
     /// Generated from dawn.json "buffer" method "get mapped range" (src/dawn/dawn.json:664).
     /// dawn.json marks this method `no autolock`.
-    /// 2 parameters of `usize` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `usize` become this struct.
     pub const GetMappedRangeOffsetOptions = struct {
         offset: usize,
         size: usize,
@@ -96,7 +96,7 @@ pub const Buffer = struct {
 
     /// Generated from dawn.json "buffer" method "get const mapped range" (src/dawn/dawn.json:673).
     /// dawn.json marks this method `no autolock`.
-    /// 2 parameters of `usize` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `usize` become this struct.
     pub const GetConstMappedRangeOffsetOptions = struct {
         offset: usize,
         size: usize,
@@ -105,7 +105,7 @@ pub const Buffer = struct {
 
     /// Generated from dawn.json "buffer" method "write mapped range" (src/dawn/dawn.json:682).
     /// dawn.json marks this method `no autolock`.
-    /// 2 parameters of `usize` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `usize` become this struct.
     pub const WriteMappedRangeOffsetOptions = struct {
         offset: usize,
         size: usize,
@@ -114,7 +114,7 @@ pub const Buffer = struct {
 
     /// Generated from dawn.json "buffer" method "read mapped range" (src/dawn/dawn.json:692).
     /// dawn.json marks this method `no autolock`.
-    /// 2 parameters of `usize` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `usize` become this struct.
     pub const ReadMappedRangeOffsetOptions = struct {
         offset: usize,
         size: usize,
@@ -180,12 +180,12 @@ pub const CommandEncoder = struct {
     pub const beginRenderPass = fn (self: CommandEncoder, descriptor: *const descriptors.RenderPassDescriptorChain) errors.Error!RenderPassEncoder;
 
     /// Generated from dawn.json "command encoder" method "copy buffer to buffer" (src/dawn/dawn.json:903).
-    /// 2 parameters of `Buffer` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `Buffer` become this struct.
     pub const CopyBufferToBufferSourceOptions = struct {
         source: Buffer,
         destination: Buffer,
     };
-    /// 3 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 3 parameters of `u64` become this struct.
     pub const CopyBufferToBufferSourceOffsetOptions = struct {
         source_offset: u64,
         destination_offset: u64,
@@ -200,7 +200,7 @@ pub const CommandEncoder = struct {
     pub const copyTextureToBuffer = fn (self: CommandEncoder, source: *const descriptors.TexelCopyTextureInfo, destination: *const descriptors.TexelCopyBufferInfo, copy_size: *const descriptors.Extent3D) void;
 
     /// Generated from dawn.json "command encoder" method "copy texture to texture" (src/dawn/dawn.json:929).
-    /// 2 parameters of `*const descriptors.TexelCopyTextureInfo` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `*const descriptors.TexelCopyTextureInfo` become this struct.
     pub const CopyTextureToTextureSourceOptions = struct {
         source: *const descriptors.TexelCopyTextureInfo,
         destination: *const descriptors.TexelCopyTextureInfo,
@@ -208,7 +208,7 @@ pub const CommandEncoder = struct {
     pub const copyTextureToTexture = fn (self: CommandEncoder, source_options: CopyTextureToTextureSourceOptions, copy_size: *const descriptors.Extent3D) void;
 
     /// Generated from dawn.json "command encoder" method "clear buffer" (src/dawn/dawn.json:937).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const ClearBufferOffsetOptions = struct {
         offset: u64,
         size: u64,
@@ -228,7 +228,7 @@ pub const CommandEncoder = struct {
     pub const pushDebugGroup = fn (self: CommandEncoder, group_label: []const u8) void;
 
     /// Generated from dawn.json "command encoder" method "resolve query set" (src/dawn/dawn.json:968).
-    /// 2 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u32` become this struct.
     pub const ResolveQuerySetFirstQueryOptions = struct {
         first_query: u32,
         query_count: u32,
@@ -273,7 +273,7 @@ pub const ComputePassEncoder = struct {
     pub const writeTimestamp = fn (self: ComputePassEncoder, query_set: QuerySet, query_index: u32) void;
 
     /// Generated from dawn.json "compute pass encoder" method "dispatch workgroups" (src/dawn/dawn.json:1138).
-    /// 3 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 3 parameters of `u32` become this struct.
     pub const DispatchWorkgroupsWorkgroupCountXOptions = struct {
         workgroupcountx: u32,
         workgroupcounty: u32,
@@ -645,7 +645,7 @@ pub const Queue = struct {
     pub const writeTexture = fn (self: Queue, destination: *const descriptors.TexelCopyTextureInfo, data: ?[]const u8, data_size: usize, data_layout: *const descriptors.TexelCopyBufferLayout, write_size: *const descriptors.Extent3D) void;
 
     /// Generated from dawn.json "queue" method "copy texture for browser" (src/dawn/dawn.json:3088).
-    /// 2 parameters of `*const descriptors.TexelCopyTextureInfo` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `*const descriptors.TexelCopyTextureInfo` become this struct.
     pub const CopyTextureForBrowserSourceOptions = struct {
         source: *const descriptors.TexelCopyTextureInfo,
         destination: *const descriptors.TexelCopyTextureInfo,
@@ -688,7 +688,7 @@ pub const RenderBundleEncoder = struct {
     pub const setBindGroup = fn (self: RenderBundleEncoder, group_index: u32, group: ?BindGroup, dynamic_offset_count: usize, dynamic_offsets: ?[]const u32) void;
 
     /// Generated from dawn.json "render bundle encoder" method "draw" (src/dawn/dawn.json:3182).
-    /// 4 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 4 parameters of `u32` become this struct.
     pub const DrawVertexCountOptions = struct {
         vertex_count: u32,
         instance_count: u32,
@@ -698,7 +698,7 @@ pub const RenderBundleEncoder = struct {
     pub const draw = fn (self: RenderBundleEncoder, vertex_count_options: DrawVertexCountOptions) void;
 
     /// Generated from dawn.json "render bundle encoder" method "draw indexed" (src/dawn/dawn.json:3191).
-    /// 4 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 4 parameters of `u32` become this struct.
     pub const DrawIndexedIndexCountOptions = struct {
         index_count: u32,
         instance_count: u32,
@@ -723,7 +723,7 @@ pub const RenderBundleEncoder = struct {
     pub const pushDebugGroup = fn (self: RenderBundleEncoder, group_label: []const u8) void;
 
     /// Generated from dawn.json "render bundle encoder" method "set vertex buffer" (src/dawn/dawn.json:3231).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const SetVertexBufferOffsetOptions = struct {
         offset: u64,
         size: u64,
@@ -731,7 +731,7 @@ pub const RenderBundleEncoder = struct {
     pub const setVertexBuffer = fn (self: RenderBundleEncoder, slot: u32, buffer: ?Buffer, offset_options: SetVertexBufferOffsetOptions) void;
 
     /// Generated from dawn.json "render bundle encoder" method "set index buffer" (src/dawn/dawn.json:3240).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const SetIndexBufferOffsetOptions = struct {
         offset: u64,
         size: u64,
@@ -764,7 +764,7 @@ pub const RenderPassEncoder = struct {
     pub const setBindGroup = fn (self: RenderPassEncoder, group_index: u32, group: ?BindGroup, dynamic_offset_count: usize, dynamic_offsets: ?[]const u32) void;
 
     /// Generated from dawn.json "render pass encoder" method "draw" (src/dawn/dawn.json:3429).
-    /// 4 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 4 parameters of `u32` become this struct.
     pub const DrawVertexCountOptions = struct {
         vertex_count: u32,
         instance_count: u32,
@@ -774,7 +774,7 @@ pub const RenderPassEncoder = struct {
     pub const draw = fn (self: RenderPassEncoder, vertex_count_options: DrawVertexCountOptions) void;
 
     /// Generated from dawn.json "render pass encoder" method "draw indexed" (src/dawn/dawn.json:3438).
-    /// 4 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 4 parameters of `u32` become this struct.
     pub const DrawIndexedIndexCountOptions = struct {
         index_count: u32,
         instance_count: u32,
@@ -790,7 +790,7 @@ pub const RenderPassEncoder = struct {
     pub const drawIndexedIndirect = fn (self: RenderPassEncoder, indirect_buffer: Buffer, indirect_offset: u64) void;
 
     /// Generated from dawn.json "render pass encoder" method "multi draw indirect" (src/dawn/dawn.json:3462).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const MultiDrawIndirectIndirectOffsetOptions = struct {
         indirect_offset: u64,
         draw_count_buffer_offset: u64,
@@ -798,7 +798,7 @@ pub const RenderPassEncoder = struct {
     pub const multiDrawIndirect = fn (self: RenderPassEncoder, indirect_buffer: Buffer, indirect_offset_options: MultiDrawIndirectIndirectOffsetOptions, max_draw_count: u32, draw_count_buffer: ?Buffer) void;
 
     /// Generated from dawn.json "render pass encoder" method "multi draw indexed indirect" (src/dawn/dawn.json:3474).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const MultiDrawIndexedIndirectIndirectOffsetOptions = struct {
         indirect_offset: u64,
         draw_count_buffer_offset: u64,
@@ -824,7 +824,7 @@ pub const RenderPassEncoder = struct {
     pub const setBlendConstant = fn (self: RenderPassEncoder, color: *const descriptors.Color) void;
 
     /// Generated from dawn.json "render pass encoder" method "set viewport" (src/dawn/dawn.json:3520).
-    /// 6 parameters of `f32` become this struct (`AGENTS.md` section 2).
+    /// 6 parameters of `f32` become this struct.
     pub const SetViewportXOptions = struct {
         x: f32,
         y: f32,
@@ -836,7 +836,7 @@ pub const RenderPassEncoder = struct {
     pub const setViewport = fn (self: RenderPassEncoder, x_options: SetViewportXOptions) void;
 
     /// Generated from dawn.json "render pass encoder" method "set scissor rect" (src/dawn/dawn.json:3531).
-    /// 4 parameters of `u32` become this struct (`AGENTS.md` section 2).
+    /// 4 parameters of `u32` become this struct.
     pub const SetScissorRectXOptions = struct {
         x: u32,
         y: u32,
@@ -846,7 +846,7 @@ pub const RenderPassEncoder = struct {
     pub const setScissorRect = fn (self: RenderPassEncoder, x_options: SetScissorRectXOptions) void;
 
     /// Generated from dawn.json "render pass encoder" method "set vertex buffer" (src/dawn/dawn.json:3540).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const SetVertexBufferOffsetOptions = struct {
         offset: u64,
         size: u64,
@@ -854,7 +854,7 @@ pub const RenderPassEncoder = struct {
     pub const setVertexBuffer = fn (self: RenderPassEncoder, slot: u32, buffer: ?Buffer, offset_options: SetVertexBufferOffsetOptions) void;
 
     /// Generated from dawn.json "render pass encoder" method "set index buffer" (src/dawn/dawn.json:3549).
-    /// 2 parameters of `u64` become this struct (`AGENTS.md` section 2).
+    /// 2 parameters of `u64` become this struct.
     pub const SetIndexBufferOffsetOptions = struct {
         offset: u64,
         size: u64,

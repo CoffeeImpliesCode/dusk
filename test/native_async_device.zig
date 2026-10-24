@@ -744,8 +744,8 @@ test "dispatch errors are the finite registry union exposed by high operations a
     const entry_error = @typeInfo(entry_fn.return_type.?).error_union.error_set;
     const Expected = entry_error || api.ProcessEventsError;
     try t.expect(native.DispatchError == Expected);
-    inline for (@typeInfo(native.DispatchError).error_set.?) |field| {
-        const dispatch: native.DispatchError = @field(native.DispatchError, field.name);
+    inline for (@typeInfo(native.DispatchError).error_set.error_names.?) |field| {
+        const dispatch: native.DispatchError = @field(native.DispatchError, field);
         const operation: engine.device.OperationError = dispatch;
         const cleanup: engine.device.CleanupError = dispatch;
         try t.expectEqual(dispatch, operation);

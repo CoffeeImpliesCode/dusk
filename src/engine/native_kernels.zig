@@ -373,7 +373,7 @@ fn validateKeyOwner(context: Context, key: KernelKey, definition: *const Definit
             for (state.value.color_formats, 0..) |wire_format, index| {
                 const bit = @as(u8, 1) << @as(u3, @intCast(index));
                 if (state.value.color_attachments_set & bit == 0) continue;
-                const format_index = format.computeFormatIndex(@enumFromInt(wire_format)) orelse
+                const format_index = format.computeFormatIndex(@fromBackingInt(@intCast(wire_format))) orelse
                     return error.InvalidKernelKey;
                 const info = &context.cache.formats[format_index];
                 if (!info.isSupported() or !info.caps.renderable or
@@ -392,7 +392,7 @@ fn validateKeyOwner(context: Context, key: KernelKey, definition: *const Definit
             if (render.fixed_state.depth_output or render.fixed_state.stencil_replace) {
                 if (state.value.depth_stencil_format == 0) return error.InvalidKernelKey;
                 const format_index = format.computeFormatIndex(
-                    @enumFromInt(state.value.depth_stencil_format),
+                    @fromBackingInt(@intCast(state.value.depth_stencil_format)),
                 ) orelse return error.InvalidKernelKey;
                 const info = &context.cache.formats[format_index];
                 if ((render.fixed_state.depth_output and !info.hasDepth()) or
@@ -486,7 +486,7 @@ fn validateBindings(context: Context, key: KernelKey, definition: *const Definit
                 return error.BindingTextureAspectInvalid;
             if (!schema.depth_view and view.aspects.depth != 0 and schema.sample_type != .depth)
                 return error.KernelBindingTypeMismatch;
-            const aspect: format.Aspect = @enumFromInt(view.aspects.toFlags());
+            const aspect: format.Aspect = @fromBackingInt(@intCast(view.aspects.toFlags()));
             const info = view.format_info.getAspectInfoForAspect(aspect) catch
                 return error.BindingTextureAspectInvalid;
             const matches = if (schema.depth_view) info.supported_sample_types.depth else switch (schema.sample_type) {
@@ -716,7 +716,7 @@ fn createPipeline(context: Context, key: KernelKey, definition: *const Definitio
                 const mask = @as(u8, 1) << @as(u3, @intCast(index));
                 const present = state.color_attachments_set & mask != 0;
                 colors[index] = .{
-                    .format = if (present) vulkan_format.vkFormat(@enumFromInt(state.color_formats[index])) else 0,
+                    .format = if (present) vulkan_format.vkFormat(@fromBackingInt(@intCast(state.color_formats[index]))) else 0,
                     .write_mask = if (key.color_write_slots & mask != 0) 0xF else 0,
                     .blend = null,
                 };
@@ -725,7 +725,7 @@ fn createPipeline(context: Context, key: KernelKey, definition: *const Definitio
             var depth: ?pipeline.DepthStencilState = null;
             if (state.depth_stencil_format != 0) {
                 depth = .{
-                    .format = vulkan_format.vkFormat(@enumFromInt(state.depth_stencil_format)),
+                    .format = vulkan_format.vkFormat(@fromBackingInt(@intCast(state.depth_stencil_format))),
                     .depth_write_enabled = render.fixed_state.depth_output,
                     .depth_compare = .always,
                     .stencil_write_mask = if (render.fixed_state.stencil_replace)

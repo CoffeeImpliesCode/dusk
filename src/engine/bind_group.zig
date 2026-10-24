@@ -600,6 +600,16 @@ fn textureDescriptorRoundTrip(
         ).?
     ];
     texture.internal_usage = .{ .texture_binding = true, .storage_binding = true };
+    var native_texture: @TypeOf(texture.native.?.*) = .{
+        .allocator = std.testing.allocator,
+        .context = undefined,
+        .procs = &procs,
+        .image = @ptrFromInt(7),
+        .memory = null,
+        .states = &.{},
+    };
+    texture.native = &native_texture;
+    texture.native_y_cb_cr = null;
     // The view owns its parent lease, independently of the group's view lease.
     var view: texture_mod.TextureView = undefined;
     try texture.header.retainLeaseLocked(&guard);
@@ -1324,8 +1334,8 @@ test "combined descriptor fail N rolls back view leases and immutable sampler co
 }
 
 test "combined descriptor rejects invalid owner and immutable schema before allocating a set" {
-    inline for (@typeInfo(CombinedFixtureFailure).@"enum".fields) |field| {
-        const failure: CombinedFixtureFailure = @enumFromInt(field.value);
+    inline for (@typeInfo(CombinedFixtureFailure).@"enum".field_values) |field_value| {
+        const failure: CombinedFixtureFailure = @fromBackingInt(@intCast(field_value));
         if (failure != .none) try combinedDescriptorRoundTrip(std.testing.allocator, failure);
     }
 }
@@ -1574,7 +1584,7 @@ fn combinedDescriptorRoundTrip(
         @as(u32, vulkan.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         fixture.descriptor_type,
     );
-    try std.testing.expect(group.group_layout.bindings[0].pImmutableSamplers != &immutable);
+    try std.testing.expect(group.group_layout.bindings[0].pImmutableSamplers != @as([*c]const vulkan.VkSampler, &immutable));
     try std.testing.expectEqual(
         owner.native.?.sampler,
         group.group_layout.bindings[0].pImmutableSamplers[0],

@@ -2,12 +2,10 @@
 //! the packed layout `layout_internal.zig` builds.
 //!
 //! **What this file is.** The port of `native/BindGroupLayout.{h,cpp}` at Dawn
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. Dawn's frontend layout holds a
+//! `32f77c02294310054a660c393feded4bcb3f203c`. Dawn's frontend layout holds a
 //! reference to a deduplicated internal layout and one `u64` token
 //! (`BindGroupLayout.h:69`-`:72`); the port holds the packed layout by value
-//! and gives it back to the caller to free, because `AGENTS.md` §1 fixes the
-//! allocator as a parameter and the arena as M3's, not this file's.
+//! and gives it back to the caller to free.
 //!
 //! **The token, and what it decides.** `PipelineCompatibilityToken` is a
 //! `TypedInteger` over `u64` (`src/dawn/native/IntegerTypes.h:139`-`:140`).
@@ -58,8 +56,7 @@ pub const explicit_compatibility_token: PipelineCompatibilityToken = 0;
 
 /// The device-atomic counter Dawn mints tokens from
 /// (`Device.cpp:283`, `:2522`-`:2524`). The port keeps the counter in the
-/// object that owns it rather than in a file-scope global, because
-/// `AGENTS.md` §2 makes hidden state a review finding.
+/// object that owns it rather than in a file-scope global.
 pub const TokenCounter = struct {
     /// Dawn starts the counter at one so that the first token is not the
     /// explicit token (`Device.cpp:283`).
@@ -212,9 +209,8 @@ pub const BindGroupLayout = struct {
 // M11 extended; the layout's own members are declared in `layout_internal.zig`
 // because the packed layout is what enforces them.
 comptime {
-    // `AGENTS.md` §3 asks for a compile-time sweep over an error domain. A rule
-    // the packed layout can report but this set cannot would reach no caller,
-    // so every one of them is checked for membership here.
+    // A rule the packed layout can report but this set cannot would reach no
+    // caller, so every one is checked for membership here.
     //
     // The two lists are walked together rather than one rule against every
     // exposed member. A joined error set appends the members it adds, so the
@@ -225,8 +221,8 @@ comptime {
     // calls, so the sweep runs out of quota inside a single comparison. A set
     // that lost its packed prefix fails here loudly rather than silently, and
     // the member it names is the first rule out of place.
-    const packed_rules = @typeInfo(layout_internal.Error).error_set.?;
-    const exposed_rules = @typeInfo(Error).error_set.?;
+    const packed_rules = @typeInfo(layout_internal.Error).error_set.error_names.?;
+    const exposed_rules = @typeInfo(Error).error_set.error_names.?;
     if (exposed_rules.len < packed_rules.len) {
         @compileError(std.fmt.comptimePrint(
             "the exposed error set has {d} members and the packed layout has {d}",
@@ -235,8 +231,8 @@ comptime {
     }
     var swept_count: usize = 0;
     for (packed_rules, exposed_rules[0..packed_rules.len]) |rule, exposed| {
-        if (!exposedNames(exposed.name, rule.name)) {
-            @compileError("a packed-layout rule is not in the exposed error set: " ++ rule.name);
+        if (!exposedNames(exposed, rule)) {
+            @compileError("a packed-layout rule is not in the exposed error set: " ++ rule);
         }
         swept_count += 1;
     }

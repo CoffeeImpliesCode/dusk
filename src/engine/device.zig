@@ -815,10 +815,10 @@ pub const Device = struct {
             return error.DepthClipControlNotEnabled;
         var color_formats: [8]u32 = @splat(0);
         if (options.color_targets.len > color_formats.len) return error.TooManyAttachments;
-        for (options.color_targets, 0..) |target, index| color_formats[index] = @intFromEnum(target.format);
+        for (options.color_targets, 0..) |target, index| color_formats[index] = @backingInt(target.format);
         const value = try self.renderAttachmentLayout(.{
             .color_formats = color_formats[0..options.color_targets.len],
-            .depth_stencil_format = if (options.depth_stencil) |depth| @intFromEnum(depth.format) else 0,
+            .depth_stencil_format = if (options.depth_stencil) |depth| @backingInt(depth.format) else 0,
             .sample_count = options.multisample.count,
             .expand_resolve = .{},
             .pls = null,
@@ -1273,10 +1273,10 @@ pub const Device = struct {
         if (!context.accepting_operations) return error.NativeDeviceStopped;
         var color_formats: [8]u32 = @splat(0);
         if (options.color_formats.len > color_formats.len) return error.TooManyAttachments;
-        for (options.color_formats, 0..) |value, index| color_formats[index] = @intFromEnum(value);
+        for (options.color_formats, 0..) |value, index| color_formats[index] = @backingInt(value);
         const value = try self.renderAttachmentLayout(.{
             .color_formats = color_formats[0..options.color_formats.len],
-            .depth_stencil_format = @intFromEnum(options.depth_stencil_format),
+            .depth_stencil_format = @backingInt(options.depth_stencil_format),
             .sample_count = options.sample_count,
             .expand_resolve = .{},
             .pls = null,
@@ -1305,14 +1305,14 @@ pub const Device = struct {
             return error.TooManyAttachments;
         for (input.color_formats) |wire| {
             if (wire == 0) continue;
-            const info = self.formatInfo(@enumFromInt(wire)) orelse return error.ColorTargetFormatNotRenderable;
+            const info = self.formatInfo(@fromBackingInt(@intCast(wire))) orelse return error.ColorTargetFormatNotRenderable;
             if (!info.isSupported() or !info.caps.renderable or !info.isColor())
                 return error.ColorTargetFormatNotRenderable;
             if (input.sample_count > 1 and !info.caps.multisample)
                 return error.AttachmentSampleCountUnsupported;
         }
         if (input.depth_stencil_format != 0) {
-            const info = self.formatInfo(@enumFromInt(input.depth_stencil_format)) orelse
+            const info = self.formatInfo(@fromBackingInt(@intCast(input.depth_stencil_format))) orelse
                 return error.DepthStencilFormatNotRenderable;
             if (!info.isSupported() or !info.caps.renderable or info.isColor())
                 return error.DepthStencilFormatNotRenderable;

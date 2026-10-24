@@ -155,7 +155,7 @@ fn exerciseCompute(allocator: std.mem.Allocator, io: std.Io, device: *engine.Dev
     {
         var guard = core.ObjectGuard.lockUncancelable(io, device.coreDevice().arena.objectList());
         defer guard.unlock(io);
-        const padding = [_]u8{sentinel} ** 16;
+        const padding: [16]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
         const layout_input = try layout.input(&guard);
         const layout_id = @intFromPtr(&group_layout.header);
@@ -292,7 +292,7 @@ fn exerciseRender(allocator: std.mem.Allocator, io: std.Io, device: *engine.Devi
     {
         var guard = core.ObjectGuard.lockUncancelable(io, device.coreDevice().arena.objectList());
         defer guard.unlock(io);
-        const padding = [_]u8{sentinel} ** 256;
+        const padding: [256]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
     }
     // This high factory takes its own guard; never enter it under ObjectGuard.
@@ -333,7 +333,7 @@ fn exerciseRender(allocator: std.mem.Allocator, io: std.Io, device: *engine.Devi
         try encoder.copyTextureToBuffer(.{
             .source = .{
                 .texture = target,
-                .format = @intFromEnum(api.TextureFormat.rgba8_unorm),
+                .format = @backingInt(api.TextureFormat.rgba8_unorm),
                 .dimension = ._2d,
                 .aspect = .all,
                 .extent = .{ .width = 4, .height = 1, .depth_or_array_layers = 1 },

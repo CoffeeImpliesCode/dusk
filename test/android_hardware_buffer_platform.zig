@@ -32,7 +32,9 @@ fn describe(_: ?*const android.AHardwareBuffer, out: [*c]android.AHardwareBuffer
     out.format = if (odd_height_yuv_format != 0) odd_height_yuv_format else android.AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
     out.usage = android.AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | android.AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER;
 }
-fn acquire(_: ?*android.AHardwareBuffer) callconv(.c) void { acquired += 1; }
+fn acquire(_: ?*android.AHardwareBuffer) callconv(.c) void {
+    acquired += 1;
+}
 fn release(_: ?*android.AHardwareBuffer) callconv(.c) void {
     released += 1;
     destruction_order = destruction_order * 10 + 3;
@@ -112,10 +114,20 @@ fn memoryProperties(_: vk.VkPhysicalDevice, out: [*c]vk.VkPhysicalDeviceMemoryPr
     out.memoryTypeCount = 3;
 }
 fn service() ahb.AndroidHardwareBufferService {
-    acquired = 0; released = 0; destroyed = 0; freed = 0; query_count = 0;
-    bind_fails = false; invalid_description = false; saw_external_format = false;
-    external_only = false; property_fails = false; required_usage_missing = false;
-    allocation_fails = false; create_fails = false; destruction_order = 0;
+    acquired = 0;
+    released = 0;
+    destroyed = 0;
+    freed = 0;
+    query_count = 0;
+    bind_fails = false;
+    invalid_description = false;
+    saw_external_format = false;
+    external_only = false;
+    property_fails = false;
+    required_usage_missing = false;
+    allocation_fails = false;
+    create_fails = false;
+    destruction_order = 0;
     single_transfer_only = false;
     odd_height_yuv_format = 0;
     return .initWithHooks(.{
@@ -136,8 +148,11 @@ const instance_procs: dispatch.InstanceProcs = blk: {
 };
 const device_procs: dispatch.DeviceProcs = blk: {
     var p = std.mem.zeroes(dispatch.DeviceProcs);
-    p.create_image = &create; p.destroy_image = &destroy;
-    p.allocate_memory = &allocate; p.free_memory = &free; p.bind_image_memory = &bind;
+    p.create_image = &create;
+    p.destroy_image = &destroy;
+    p.allocate_memory = &allocate;
+    p.free_memory = &free;
+    p.bind_image_memory = &bind;
     break :blk p;
 };
 const android_procs: platform_dispatch.DeviceProcs = .{ .get_android_hardware_buffer_properties = &properties };

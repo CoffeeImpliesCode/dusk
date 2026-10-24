@@ -1,8 +1,7 @@
 //! The libX11 loader: four symbols behind two `dlopen` calls.
 //!
 //! **What this file is.** The port of `src/dawn/native/X11Functions.{h,cpp}` at
-//! Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. It opens `libX11.so.6` and
+//! Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`. It opens `libX11.so.6` and
 //! `libX11-xcb.so.1` and resolves four function pointers.
 //!
 //! **What this file does not claim.** It does not claim an X11 binding. Dawn
@@ -24,8 +23,7 @@ const loader_mod = @import("loader.zig");
 ///
 /// Dawn has no error here: `X11Functions::X11Functions` (`X11Functions.cpp:37`)
 /// closes the library and leaves `IsX11Loaded()` false, and every caller asks
-/// that predicate instead. `AGENTS.md` §2 wants a declared set, so the three
-/// ways the load can fail are named.
+/// that predicate instead. The three ways the load can fail are named.
 pub const X11Error = error{
     /// `libX11.so.6` did not open, or one of its three symbols did not resolve
     /// (`X11Functions.cpp:37-43`).
@@ -106,9 +104,8 @@ pub const X11Functions = struct {
     }
 
     /// Releases both libraries and destroys the struct. Ports
-    /// `X11Functions::~X11Functions` (`X11Functions.cpp:49`), which the
-    /// counting rule at `docs/40-plan.md:36-37` excludes from the row budget
-    /// and which is spelled `deinit` here because an owner calls it by name.
+    /// `X11Functions::~X11Functions` (`X11Functions.cpp:49`), spelled `deinit`
+    /// here because an owner calls it by name.
     ///
     /// The four slots point into the two libraries `dlclose` just released,
     /// so nothing may read them afterwards and the whole value goes.
@@ -180,16 +177,13 @@ test "an unopened loader resolves nothing" {
 }
 
 test "every error member has a message" {
-    // An `@typeInfo` element is a `builtin.Error`, a struct holding the name,
-    // and `switch` takes neither a struct nor a string, so the table is
-    // reached by comparing names. A member it does not name falls to the
-    // empty arm, and that is the failure this test exists to catch.
-    inline for (@typeInfo(X11Error).error_set.?) |member| {
-        const text = if (std.mem.eql(u8, member.name, "LibraryMissing"))
+    // Compare reflected names with the message table.
+    inline for (@typeInfo(X11Error).error_set.error_names.?) |member_name| {
+        const text = if (std.mem.eql(u8, member_name, "LibraryMissing"))
             "libX11.so.6 is not installed"
-        else if (std.mem.eql(u8, member.name, "XcbLibraryMissing"))
+        else if (std.mem.eql(u8, member_name, "XcbLibraryMissing"))
             "libX11-xcb.so.1 is not installed"
-        else if (std.mem.eql(u8, member.name, "SymbolMissing"))
+        else if (std.mem.eql(u8, member_name, "SymbolMissing"))
             "libX11 does not export the symbol"
         else
             "";

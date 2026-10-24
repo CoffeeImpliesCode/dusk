@@ -20,8 +20,6 @@
 //! **Why the two offsets do not share a name.** `mBlockOffset` is
 //! allocator-global and `mOffset` is heap-local; `BuddyMemoryAllocator.cpp:104`
 //! computes the second from the first as `blockOffset % mMemoryBlockSize`.
-//! `AGENTS.md` §2 forbids abbreviating, and one name for two numbers is an
-//! abbreviation of the wrong kind.
 //!
 //! **Why the accessors return errors.** `GetResourceHeap` (`.cpp:43`) and
 //! `GetOffset` (`.cpp:48`) each assert `mMethod != kInvalid`, and

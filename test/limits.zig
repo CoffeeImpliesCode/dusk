@@ -1,9 +1,8 @@
 //! The M7 shard for the limit table: 36 rows, and a compat column that is
 //! never the better answer.
 //!
-//! `docs/40-plan.md` §M7 "The five claims the census tests read" fixes the
-//! two claims this file makes: `row_count == 36`, and for every `.maximum`
-//! row `compat <= tiers[0]`.
+//! This file asserts `row_count == 36` and, for every `.maximum` row,
+//! `compat <= tiers[0]`.
 //!
 //! **Why the comparison reads the row's own class.** `CheckLimit<C>::IsBetter`
 //! is `lhs < rhs` for `Alignment` (`Limits.h:53-54`) and `lhs > rhs` for
@@ -30,14 +29,14 @@ test "the limits table carries exactly 36 rows" {
     try std.testing.expectEqual(@as(usize, 36), limits.rows.len);
     try std.testing.expectEqual(
         @as(usize, 36),
-        @typeInfo(limits.Field).@"enum".fields.len,
+        @typeInfo(limits.Field).@"enum".field_names.len,
     );
 
     // Row `i` carries `@enumFromInt(i)`, which is what makes `fieldOf` an index
     // and not a search. A row written out of order would make every value wrong
     // by an offset no name shows, so the ordinal is asserted here.
     for (limits.rows, 0..) |row, index| {
-        try std.testing.expectEqual(@as(usize, index), @as(usize, @intFromEnum(row.field)));
+        try std.testing.expectEqual(@as(usize, index), @as(usize, @backingInt(row.field)));
     }
 }
 
@@ -156,19 +155,19 @@ test "every field's reported default is its own row's two columns" {
 test "the table fills every field the two descriptors declare" {
     try std.testing.expectEqual(
         @as(usize, 32),
-        @typeInfo(api.Limits).@"struct".fields.len,
+        @typeInfo(api.Limits).@"struct".field_names.len,
     );
     try std.testing.expectEqual(
         @as(usize, 4),
-        @typeInfo(api.CompatibilityModeLimits).@"struct".fields.len,
+        @typeInfo(api.CompatibilityModeLimits).@"struct".field_names.len,
     );
 
     // A descriptor field with no row keeps the "not requested" sentinel in every
     // report, which is a limit no device can be asked about and one no
     // `checkLimit` call can explain.
     const defaults = limits.defaultLimits(.core);
-    inline for (std.meta.fields(api.Limits)) |field| {
-        try std.testing.expect(!limits.isLimitUndefined(@field(defaults.v1, field.name)));
+    inline for (@typeInfo(api.Limits).@"struct".field_names) |field_name| {
+        try std.testing.expect(!limits.isLimitUndefined(@field(defaults.v1, field_name)));
     }
     // `defaultLimits` fills the compat block on its first statement
     // (`src/engine/limits.zig:558`) and no row clears it, so a null chain here
@@ -176,8 +175,8 @@ test "the table fills every field the two descriptors declare" {
     // instead of being unwrapped.
     const default_chain = defaults.compatibility orelse
         return error.CompatibilityChainMissing;
-    inline for (std.meta.fields(api.CompatibilityModeLimits)) |field| {
-        try std.testing.expect(!limits.isLimitUndefined(@field(default_chain, field.name)));
+    inline for (@typeInfo(api.CompatibilityModeLimits).@"struct".field_names) |field_name| {
+        try std.testing.expect(!limits.isLimitUndefined(@field(default_chain, field_name)));
     }
 }
 

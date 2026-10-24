@@ -688,8 +688,8 @@ test "root descriptor copy preserves absent and present empty values and every L
     try t.expect(absent.required_limits == null);
     try t.expectEqual(@as(usize, 0), absent.required_features.len);
     var limits: api.Limits = .{};
-    inline for (@typeInfo(api.Limits).@"struct".fields, 0..) |field, index| {
-        @field(limits, field.name) = @intCast(index + 1);
+    inline for (@typeInfo(api.Limits).@"struct".field_names, 0..) |field_name, index| {
+        @field(limits, field_name) = @intCast(index + 1);
     }
     var input = descriptor();
     input.label = "";
@@ -702,8 +702,8 @@ test "root descriptor copy preserves absent and present empty values and every L
     try t.expectEqual(@as(usize, 0), owned.label.?.len);
     try t.expect(owned.default_queue_label != null);
     try t.expectEqual(@as(usize, 0), owned.default_queue_label.?.len);
-    inline for (@typeInfo(api.Limits).@"struct".fields) |field| {
-        try t.expectEqual(@field(limits, field.name), @field(owned.required_limits.?, field.name));
+    inline for (@typeInfo(api.Limits).@"struct".field_names) |field_name| {
+        try t.expectEqual(@field(limits, field_name), @field(owned.required_limits.?, field_name));
     }
     var label = [_]u8{ 'a', 0, 'b' };
     var queue_label = [_]u8{ 'c', 0, 'd' };
@@ -1059,8 +1059,8 @@ test "root required unsupported feature is an accepted failure without consuming
     const selection = try adapterSuccess(t.allocator, &instance, io);
     defer releaseSelection(t.allocator, io, selection);
     var unsupported: ?api.FeatureName = null;
-    inline for (@typeInfo(api.FeatureName).@"enum".fields) |field| {
-        const name: api.FeatureName = @enumFromInt(field.value);
+    inline for (@typeInfo(api.FeatureName).@"enum".field_values) |field_value| {
+        const name: api.FeatureName = @fromBackingInt(@intCast(field_value));
         if (unsupported == null and !selection.selected().physical_device.supportsAllRequiredFeatures(&.{name}).supported) {
             unsupported = name;
         }

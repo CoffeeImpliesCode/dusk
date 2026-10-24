@@ -38,8 +38,7 @@ pub const ValidationError = error{
     SliceLengthMismatch,
     LimitExceeded,
     // M11: `native/Texture.cpp`, `native/Sampler.cpp` and
-    // `native/TexelBufferView.cpp`. Each member names one `DAWN_INVALID_IF`
-    // site; the line it came from is in the M11 table of `docs/40-plan.md`.
+    // `native/TexelBufferView.cpp`. Each member names one `DAWN_INVALID_IF` site.
     TextureUsageMissing,
     TextureSizeEmpty,
     TextureUsageCompressedFormat,
@@ -802,7 +801,7 @@ pub const ErrorReservation = struct {
         comptime {
             switch (@typeInfo(@TypeOf(native_error))) {
                 .error_set => |set| {
-                    if (set == null) @compileError("sealNativeError requires a finite error set");
+                    if (set.error_names == null) @compileError("sealNativeError requires a finite error set");
                 },
                 else => @compileError("sealNativeError requires an error value"),
             }
@@ -1011,8 +1010,8 @@ test "every rule of every set has a message" {
     // budget every other comptime claim in this file shares. A plain `for`
     // compiles the loop once and still visits every one of the members the set
     // declares.
-    for (@typeInfo(Error).error_set.?) |member| {
-        try std.testing.expect(hasMessage(member.name));
+    for (@typeInfo(Error).error_set.error_names.?) |member_name| {
+        try std.testing.expect(hasMessage(member_name));
     }
 }
 

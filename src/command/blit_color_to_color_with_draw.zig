@@ -13,11 +13,11 @@
 //! port would carry it as dead weight.
 //!
 //! It does not claim a shader. `GenerateBlitToColorVS` (`:62`),
-//! `GenerateExpandFS` (`:99`) and `GenerateResolveFS` (`:131`) emit WGSL, and
-//! `AGENTS.md` §3.2 forbids a WGSL front end in the library. The two pipeline
+//! `GenerateExpandFS` (`:99`) and `GenerateResolveFS` (`:131`) emit WGSL.
+//! The library has no WGSL front end. The two pipeline
 //! factories at `:153` and `:254` and the four hash and equality functors at
 //! `:419`, `:436`, `:501` and `:511` go with them: a cache key whose cache is
-//! not ported has no reader, and `AGENTS.md` §2 says to delete dead weight.
+//! not ported has no reader.
 
 const std = @import("std");
 const descriptors = @import("../api/descriptors.zig");
@@ -52,7 +52,7 @@ pub const ResolveRect = struct {
 /// Vulkan requires a queue family that supports two or four samples to support
 /// eight, so eight is the largest count a resolve meets in practice on this
 /// back end. A longer list is refused rather than averaged, so an out-of-range
-/// count cannot pass silently (`AGENTS.md` §2, "bound every loop").
+/// count cannot pass silently.
 pub const max_resolve_sample_count: usize = 8;
 
 /// `PackOffsets`, `:309-317`.

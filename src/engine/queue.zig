@@ -3,9 +3,7 @@
 //!
 //! **What this file is.** The port of `src/dawn/native/vulkan/QueueVk.{h,cpp}`
 //! (102 + 540 lines) at Dawn revision
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §3.6 carries
-//! its rows.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **What this file does not claim.** It does not claim `native/Queue.{h,cpp}`
 //! (779 lines). Those are the back-end-neutral front end: `apiSubmit`,
@@ -19,13 +17,10 @@
 //! (`mFencesInFlight` is a deque at `QueueVk.h:84`, `mUnusedFences` a list at
 //! `:86`), and its fence wait is `while (1)` (`QueueVk.cpp:496`) that retries
 //! forever when the caller passed an infinite timeout (`:519`-`:531`). The port
-//! bounds both, because `AGENTS.md` §2 requires a named bound on every loop and
-//! an unbounded loop in a library is a hang, not a wait.
+//! bounds both so an unbounded driver retry cannot hang the library.
 //!
 //! **No allocator parameter on `init`.** It allocates nothing: the pools are
 //! fixed arrays, so there is nothing to fail and nothing to inject.
-//! `AGENTS.md` §3 makes the allocator a parameter of every *allocating* function,
-//! and this is not one.
 //!
 //! The caller uniquely owns the queue. Do not copy it.
 //! Construction may return and move the value before a native query set registers.
@@ -70,8 +65,7 @@ pub const max_command_context_count = 4;
 /// Everything a Vulkan call needs, as a value.
 ///
 /// A caller that holds a queue and not a device takes this struct by value, so
-/// nothing reaches back through a pointer to a device it does not own
-/// (`AGENTS.md` §3, "State is a parameter, not a capture").
+/// nothing reaches back through a pointer to a device it does not own.
 pub const Context = struct {
     /// Persistent owner of queue-retained resources; must outlive queue teardown.
     allocator: std.mem.Allocator,
@@ -91,8 +85,8 @@ pub const Context = struct {
 
 /// The dispatch tier, or one entry point in it, is missing.
 ///
-/// `AGENTS.md` §3.1 makes a null dispatch field a typed error and never a
-/// forced unwrap, so every entry point this file reaches is bound through an
+/// A null dispatch field is a typed error, never a forced unwrap, so every
+/// entry point this file reaches is bound through an
 /// `orelse` that reports rather than through `procs.foo.?`. Two members carry
 /// that: a `Context` with no device tier, which `init` refuses
 /// (`src/engine/queue.zig:231`) and which only a hand-built `Context` can reach,
@@ -101,7 +95,7 @@ pub const Context = struct {
 /// both name the hand-built case.
 ///
 /// The rest of the set is `dispatch.Error`, the `VkResult` mapping
-/// `AGENTS.md` §3.1 puts in `src/vk/dispatch.zig` and nowhere else.
+/// in `src/vk/dispatch.zig`.
 pub const ProcError = dispatch.Error || error{
     DeviceProcTierMissing,
     /// `dispatch.LoadError`'s member of the same name, restated rather than
@@ -178,7 +172,7 @@ pub const Queue = struct {
     pub const RecordingError = ProcError || error{
         /// Every context is still in flight. Dawn allocates another pool
         /// (`QueueVk.cpp:255`-`:281`) with no bound; the port names the bound
-        /// and reports exhaustion as its own error, per `AGENTS.md` §2.
+        /// and reports exhaustion as its own error.
         CommandContextPoolExhausted,
         /// `vkCreateCommandPool` succeeded and returned null.
         CommandPoolCreationReturnedNull,
@@ -501,7 +495,7 @@ pub const Queue = struct {
     /// first, then the fences, in flight before unused.
     ///
     /// It reports rather than returning `void`, because every proc it reaches
-    /// is a dispatch field and `AGENTS.md` §3.1 makes a null one a typed error.
+    /// is a dispatch field and a null one is a typed error.
     /// Each proc is bound before its loop runs, so a missing entry point costs
     /// the caller that one pool rather than the teardown up to that point.
     pub fn deinit(self: *Queue, io: std.Io, objects: *core.ObjectList) CleanupError!void {
@@ -767,7 +761,7 @@ pub const Queue = struct {
         }
         // Bound: the retry bound. Dawn's `while (1)` at `QueueVk.cpp:496`
         // retries forever on `VK_TIMEOUT` when the caller passed an infinite
-        // timeout, and `AGENTS.md` §2 requires a named bound.
+        // timeout; this loop has a named bound.
         var iteration: u32 = 0;
         while (iteration < max_fence_wait_iteration_count) : (iteration += 1) {
             const fence = findFenceFor(self, options.serial) orelse {
@@ -810,8 +804,7 @@ pub const Queue = struct {
     /// `VkResult` mapping is duplicated: nothing here branches on the code.
     ///
     /// It reports rather than returning the code bare, because the proc it
-    /// reaches is a dispatch field and `AGENTS.md` §3.1 makes a null one a
-    /// typed error.
+    /// reaches is a dispatch field and a null one is a typed error.
     pub fn fenceStatus(self: *const Queue, fence: vulkan.VkFence) ProcError!vulkan.VkResult {
         const get_fence_status = (try self.deviceProcs()).get_fence_status orelse
             return error.MissingDeviceProc;
@@ -883,7 +876,7 @@ pub const Queue = struct {
     /// leak the buffer's memory. Dawn's comment at `:65`-`:67` is the reason.
     ///
     /// It reports rather than returning `void`, because both procs it reaches
-    /// are dispatch fields and `AGENTS.md` §3.1 makes a null one a typed error.
+    /// are dispatch fields and a null one is a typed error.
     fn destroyContext(self: *Queue, slot: u32) ProcError!void {
         const entry = &self.contexts[slot];
         if (entry.pool == null) return;
@@ -1030,8 +1023,7 @@ pub const Queue = struct {
     /// The device tier, or the error that says the `Context` carries none.
     ///
     /// Every entry point in this file is reached through here rather than
-    /// through a forced unwrap of `context.dispatch.device`, because
-    /// `AGENTS.md` §3.1 makes a missing dispatch field a typed error.
+    /// through a forced unwrap of `context.dispatch.device`.
     fn deviceProcs(self: *const Queue) ProcError!*const dispatch.DeviceProcs {
         return self.context.dispatch.device orelse return error.DeviceProcTierMissing;
     }
@@ -1605,7 +1597,9 @@ test "a pending temporary buffer alone requires the recording buffer" {
         var guard = core.ObjectGuard.lockUncancelable(std.testing.io, &objects);
         defer guard.unlock(std.testing.io);
         queue.contexts[0].command_buffer = @ptrFromInt(8);
-        queue.temporary_buffers = .{ .items = &entries, .capacity = entries.len };
+        queue.temporary_buffers = .empty;
+        queue.temporary_buffers.items = &entries;
+        queue.temporary_buffers.capacity = entries.len;
     }
     try std.testing.expectError(
         error.PendingRecordingNotSubmitted,

@@ -134,16 +134,17 @@ fn package(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) E
     try run(allocator, io, &.{ zipalign, "-P", "16", "4", unsigned, aligned });
     if (!try exists(io, keystore)) {
         try run(allocator, io, &.{
-            keytool, "-genkeypair", "-noprompt", "-keystore", keystore,
-            "-storetype", "JKS", "-storepass", "android", "-keypass", "android",
-            "-alias", "androiddebugkey", "-dname", "CN=Dusk Native Proof,O=Dusk,C=US",
-            "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+            keytool,      "-genkeypair", "-noprompt",       "-keystore", keystore,
+            "-storetype", "JKS",         "-storepass",      "android",   "-keypass",
+            "android",    "-alias",      "androiddebugkey", "-dname",    "CN=Dusk Native Proof,O=Dusk,C=US",
+            "-keyalg",    "RSA",         "-keysize",        "2048",      "-validity",
+            "10000",
         });
     }
     try run(allocator, io, &.{
-        apksigner, "sign", "--ks", keystore, "--ks-key-alias", "androiddebugkey",
-        "--ks-pass", "pass:android", "--key-pass", "pass:android",
-        "--v4-signing-enabled", "false", "--out", signed, aligned,
+        apksigner,   "sign",         "--ks",       keystore,       "--ks-key-alias",       "androiddebugkey",
+        "--ks-pass", "pass:android", "--key-pass", "pass:android", "--v4-signing-enabled", "false",
+        "--out",     signed,         aligned,
     });
     try run(allocator, io, &.{ apksigner, "verify", "--verbose", signed });
     try run(allocator, io, &.{ zipalign, "-c", "-P", "16", "4", signed });

@@ -295,6 +295,7 @@ const SafetyProbe = struct {
         procs.destroy_framebuffer = destroyFramebuffer;
         procs.destroy_render_pass = destroyRenderPass;
         procs.cmd_copy_buffer = copy;
+        procs.destroy_buffer = destroyBuffer;
         self.instance_procs.destroy_device = destroyDevice;
         // Only the procedure tiers are borrowed; this fixture owns no loader.
         self.native_instance.procs = &self.instance_procs;
@@ -551,6 +552,11 @@ const SafetyProbe = struct {
     ) callconv(.c) void {
         from(command).copies += 1;
     }
+    fn destroyBuffer(
+        _: vk.VkDevice,
+        _: vk.VkBuffer,
+        _: [*c]const vk.VkAllocationCallbacks,
+    ) callconv(.c) void {}
 };
 
 fn submitEmpty(io: std.Io, device: *dusk.engine.Device) SafetyOperationError!dusk.platform.Serial {
@@ -709,7 +715,7 @@ fn stagedBuffer(io: std.Io, device: *dusk.engine.Device) !*dusk.engine.native_re
     errdefer std.testing.allocator.destroy(source);
     destination.* = .{
         .device = device.native.?.bufferDevice(),
-        .handle = null,
+        .handle = @ptrCast(destination),
         .allocation = .{ .memory = null, .offset = 0, .size = 4, .memory_type_index = 0 },
         .mapped = null,
         .size = 4,
@@ -733,10 +739,13 @@ fn stagedBuffer(io: std.Io, device: *dusk.engine.Device) !*dusk.engine.native_re
     };
     destination.device.allocator = std.testing.allocator;
     source.* = destination.*;
+    source.handle = @ptrCast(source);
     source.usage = .{ .copy_src = true };
     source.internal_usage = dusk.engine.buffer.computeInternalBufferUsages(source.usage);
     source.staging = null;
     source.state = .unmapped;
+    destination.device.handles.acquire(.buffer);
+    source.device.handles.acquire(.buffer);
     owner.native = destination;
     owner.allocator = allocator;
     owner.device = device.native.?.resourceDevice();

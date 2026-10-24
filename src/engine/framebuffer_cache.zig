@@ -1,7 +1,7 @@
 //! `FramebufferCache`: 32 `VkFramebuffer`s, keyed on the pass and the views.
 //!
 //! **What this file is.** `vulkan/FramebufferCache.{h,cpp}` upstream: 114 lines
-//! and 120 lines, 7 rows (`docs/40-plan.md` §M18). The key is the render pass's
+//! and 120 lines. The key is the render pass's
 //! `unique_id` — never the `VkRenderPass`, because a handle may be reused
 //! (`FramebufferCache.h:68-69`) — the pass size, and the ordered list of
 //! attachment view identities.
@@ -149,7 +149,7 @@ pub const Entry = struct {
 };
 
 // `LruCache` returns a type (`src/pipeline/cache.zig:227`), so the binding is
-// a type and takes `PascalCase` under `AGENTS.md` §2. The `: type` is what
+// a type and takes `PascalCase`. The `: type` is what
 // says so: without it `zwanzig` reads the call as a constant and asks for
 // `snake_case`, which would name a type with the spelling of a value.
 const Lru: type = pipeline_cache.LruCache(FramebufferCacheKey, *Entry, k_default_capacity);

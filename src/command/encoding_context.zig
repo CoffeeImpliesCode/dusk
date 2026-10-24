@@ -221,7 +221,7 @@ pub const Context = struct {
         tag: commands.Tag,
     ) errors.Error!*T {
         try self.validateCanEncodeOn(encoder, false);
-        return self.pending.allocateCommand(T, @intFromEnum(tag));
+        return self.pending.allocateCommand(T, @backingInt(tag));
     }
 
     /// The top-level form of `encode`. A top-level command is checked with the
@@ -236,7 +236,7 @@ pub const Context = struct {
         tag: commands.Tag,
     ) errors.Error!*T {
         try self.validateCanEncodeOn(encoder, true);
-        return self.pending.allocateCommand(T, @intFromEnum(tag));
+        return self.pending.allocateCommand(T, @backingInt(tag));
     }
 
     /// The counted run behind the payload just written. The check is skipped

@@ -18,11 +18,22 @@ pub const Error = core.ReferenceError || core.CreateError || core_device.HandleE
     device_mod.AdmissionError || sampler_mod.NativeCreateError || texture_mod.NativeCreateError ||
     queue_mod.Queue.SubmitError || native_resources.Error ||
     dispatch.Error || dispatch.LoadError || fence_mod.Error || error{
-    DeviceMismatch, TextureProvenanceMismatch, SharedMemoryAccessAlreadyActive,
-    SharedMemoryAccessNotBegun, ConcurrentReadUnsupported, InvalidFenceCount,
-    InvalidFenceValue, UnsupportedImageLayout, UnsupportedTextureExtent,
-    UnsupportedTextureUsage, EndAccessExportPending, DeviceLost, AcquireEpochExhausted,
-    NativeBackendRequired, SubmissionCapacityExhausted, SerialExhausted,
+    DeviceMismatch,
+    TextureProvenanceMismatch,
+    SharedMemoryAccessAlreadyActive,
+    SharedMemoryAccessNotBegun,
+    ConcurrentReadUnsupported,
+    InvalidFenceCount,
+    InvalidFenceValue,
+    UnsupportedImageLayout,
+    UnsupportedTextureExtent,
+    UnsupportedTextureUsage,
+    EndAccessExportPending,
+    DeviceLost,
+    AcquireEpochExhausted,
+    NativeBackendRequired,
+    SubmissionCapacityExhausted,
+    SerialExhausted,
 };
 pub const SharedMemoryError = Error;
 pub const ImportTextureError = Error || import_mod.ImportError;
@@ -54,14 +65,10 @@ pub const ImportedImage = struct {
 /// The submit callback must retain every root before VkQueueSubmit, rollback on rejection,
 /// and return only the serial actually accepted by that same native queue.
 pub const Bridge = struct {
-    validate_import: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard,
-        *device_mod.Device, *SharedTextureMemory) Error!void,
-    create_texture: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard,
-        *device_mod.Device, *SharedTextureMemory, ?*const api.descriptors.TextureDescriptorChain) Error!api.objects.Texture,
-    submit_release: *const fn (std.Io, *const core.ObjectGuard, *device_mod.Device,
-        *SharedTextureMemory, *core.Object, SubmitPlan) Error!u64,
-    create_fence: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard,
-        *device_mod.Device, Provenance) Error!*fence_mod.SharedFence,
+    validate_import: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard, *device_mod.Device, *SharedTextureMemory) Error!void,
+    create_texture: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard, *device_mod.Device, *SharedTextureMemory, ?*const api.descriptors.TextureDescriptorChain) Error!api.objects.Texture,
+    submit_release: *const fn (std.Io, *const core.ObjectGuard, *device_mod.Device, *SharedTextureMemory, *core.Object, SubmitPlan) Error!u64,
+    create_fence: *const fn (std.mem.Allocator, std.Io, *const core.ObjectGuard, *device_mod.Device, Provenance) Error!*fence_mod.SharedFence,
 };
 
 pub const Begun = struct {
@@ -116,11 +123,7 @@ pub fn validateAccess(access: *const Access, texture_header: *core.Object, epoch
 pub fn supportedLayout(layout: i32, allow_undefined: bool) bool {
     return switch (layout) {
         vk.VK_IMAGE_LAYOUT_UNDEFINED => allow_undefined,
-        vk.VK_IMAGE_LAYOUT_GENERAL, vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        vk.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        vk.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL => true,
+        vk.VK_IMAGE_LAYOUT_GENERAL, vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, vk.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL => true,
         else => false,
     };
 }
@@ -145,8 +148,7 @@ pub fn validateBeginDescriptor(descriptor: *const api.descriptors.SharedTextureM
         return error.UnsupportedImageLayout;
 }
 
-pub fn validateTextureDescriptor(imported: *const ImportedImage,
-    descriptor: *const api.descriptors.TextureDescriptorChain) Error!void {
+pub fn validateTextureDescriptor(imported: *const ImportedImage, descriptor: *const api.descriptors.TextureDescriptorChain) Error!void {
     const properties = &imported.properties;
     if (descriptor.dimension != ._2d or
         descriptor.size.width != properties.size.width or
@@ -169,10 +171,8 @@ pub fn subresourceCount(imported: *const ImportedImage) Error!usize {
     const aspect_count: usize = @popCount(imported.aspect_mask);
     if (aspect_count == 0 or imported.mip_levels == 0 or imported.array_layers == 0)
         return error.UnsupportedTextureExtent;
-    const layers_and_mips = std.math.mul(usize, imported.mip_levels, imported.array_layers)
-        catch return error.UnsupportedTextureExtent;
-    return std.math.mul(usize, layers_and_mips, aspect_count)
-        catch return error.UnsupportedTextureExtent;
+    const layers_and_mips = std.math.mul(usize, imported.mip_levels, imported.array_layers) catch return error.UnsupportedTextureExtent;
+    return std.math.mul(usize, layers_and_mips, aspect_count) catch return error.UnsupportedTextureExtent;
 }
 
 pub const SharedTextureMemory = struct {
@@ -182,9 +182,7 @@ pub const SharedTextureMemory = struct {
     bridge: Bridge,
     conversion_sampler: ?*sampler_mod.Sampler = null,
 
-    pub fn createImportedLocked(allocator: std.mem.Allocator, io: std.Io,
-        guard: *const core.ObjectGuard, device: *device_mod.Device, imported: ImportedImage,
-        bridge: Bridge, label: []const u8) Error!*SharedTextureMemory {
+    pub fn createImportedLocked(allocator: std.mem.Allocator, io: std.Io, guard: *const core.ObjectGuard, device: *device_mod.Device, imported: ImportedImage, bridge: Bridge, label: []const u8) Error!*SharedTextureMemory {
         guard.assertOwns(device.core.arena.objectList());
         if (imported.image == null or imported.memory == null or imported.mip_levels == 0 or imported.array_layers == 0)
             return error.TextureProvenanceMismatch;
@@ -192,8 +190,10 @@ pub const SharedTextureMemory = struct {
             return error.MissingDeviceProc;
         const count = try subresourceCount(&imported);
         const self = try device.core.create(allocator, guard, SharedTextureMemory, .{
-            .kind = .shared_texture_memory, .state = .initializing,
-            .label = label, .initial_reference = .user,
+            .kind = .shared_texture_memory,
+            .state = .initializing,
+            .label = label,
+            .initial_reference = .user,
         });
         errdefer self.header.discardUnpublishedLocked(guard) catch unreachable;
         self.device = device;
@@ -228,16 +228,13 @@ pub const SharedTextureMemory = struct {
         if (self.device != device) return error.DeviceMismatch;
         return self;
     }
-    fn resolveTextureLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard,
-        texture: api.objects.Texture) Error!*texture_mod.Texture {
-        const resolved = try self.device.core.resolve(guard, texture_mod.Texture,
-            .{ .ptr = @ptrCast(@alignCast(texture.handle)), .kind = .texture });
+    fn resolveTextureLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard, texture: api.objects.Texture) Error!*texture_mod.Texture {
+        const resolved = try self.device.core.resolve(guard, texture_mod.Texture, .{ .ptr = @ptrCast(@alignCast(texture.handle)), .kind = .texture });
         if (resolved.header.state != .alive) return error.ResourceDestroyed;
         if (resolved.sharedMemoryLocked(guard) != self) return error.TextureProvenanceMismatch;
         return resolved;
     }
-    pub fn getProperties(self: *SharedTextureMemory, io: std.Io,
-        out: *api.descriptors.SharedTextureMemoryProperties) Error!api.enums.Status {
+    pub fn getProperties(self: *SharedTextureMemory, io: std.Io, out: *api.descriptors.SharedTextureMemoryProperties) Error!api.enums.Status {
         try self.device.acquireOperation(io);
         defer self.device.releaseOperation(io);
         var guard = try core.ObjectGuard.lock(io, self.header.tracking);
@@ -246,8 +243,7 @@ pub const SharedTextureMemory = struct {
         out.* = self.backing.imported.properties;
         return .success;
     }
-    pub fn createTexture(self: *SharedTextureMemory, allocator: std.mem.Allocator, io: std.Io,
-        descriptor: ?*const api.descriptors.TextureDescriptorChain) Error!api.objects.Texture {
+    pub fn createTexture(self: *SharedTextureMemory, allocator: std.mem.Allocator, io: std.Io, descriptor: ?*const api.descriptors.TextureDescriptorChain) Error!api.objects.Texture {
         try self.device.acquireOperation(io);
         defer self.device.releaseOperation(io);
         var guard = try core.ObjectGuard.lock(io, self.header.tracking);
@@ -256,8 +252,7 @@ pub const SharedTextureMemory = struct {
         if (descriptor) |requested| try validateTextureDescriptor(&self.backing.imported, requested);
         return self.bridge.create_texture(allocator, io, &guard, self.device, self, descriptor);
     }
-    pub fn beginAccess(self: *SharedTextureMemory, io: std.Io, texture: api.objects.Texture,
-        descriptor: *const api.descriptors.SharedTextureMemoryBeginAccessDescriptorChain) Error!api.enums.Status {
+    pub fn beginAccess(self: *SharedTextureMemory, io: std.Io, texture: api.objects.Texture, descriptor: *const api.descriptors.SharedTextureMemoryBeginAccessDescriptorChain) Error!api.enums.Status {
         try validateBeginDescriptor(descriptor);
         try self.device.acquireOperation(io);
         defer self.device.releaseOperation(io);
@@ -277,13 +272,10 @@ pub const SharedTextureMemory = struct {
         const layout = descriptor.shared_texture_memory_vk_image_layout_begin_state.?;
         if (self.backing.acquire_epoch != 0 and layout.old_layout != self.backing.layout)
             return error.UnsupportedImageLayout;
-        var staged: Begun = .{ .texture_header = &resolved.header, .acquire_epoch = epoch,
-            .fence_count = descriptor.fence_count, .old_layout = layout.old_layout,
-            .new_layout = layout.new_layout, .initialized = descriptor.initialized };
+        var staged: Begun = .{ .texture_header = &resolved.header, .acquire_epoch = epoch, .fence_count = descriptor.fence_count, .old_layout = layout.old_layout, .new_layout = layout.new_layout, .initialized = descriptor.initialized };
         const fences = descriptor.fences orelse &.{};
         for (fences, 0..) |fence, index| {
-            const canonical = try self.device.core.resolve(&guard, fence_mod.SharedFence,
-                .{ .ptr = @ptrCast(@alignCast(fence.handle)), .kind = .shared_fence });
+            const canonical = try self.device.core.resolve(&guard, fence_mod.SharedFence, .{ .ptr = @ptrCast(@alignCast(fence.handle)), .kind = .shared_fence });
             staged.input_fences[index] = try fence_mod.SharedFence.fromHeader(&canonical.header, &guard, self.device);
             _ = try staged.input_fences[index].?.waitSemaphoreLocked(&guard, self.device, 1);
         }
@@ -303,27 +295,16 @@ pub const SharedTextureMemory = struct {
     }
 
     /// Recording validates the canonical header, not merely its shared VkImage.
-    pub fn validateRecordingLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard,
-        texture_header: *core.Object, epoch: u64) Error!void {
+    pub fn validateRecordingLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard, texture_header: *core.Object, epoch: u64) Error!void {
         _ = try fromHeader(&self.header, guard, self.device);
         try validateAccess(&self.backing.access, texture_header, epoch);
     }
-    fn barrier(self: *SharedTextureMemory, old: vk.VkImageLayout, new: vk.VkImageLayout,
-        acquire: bool) vk.VkImageMemoryBarrier {
+    fn barrier(self: *SharedTextureMemory, old: vk.VkImageLayout, new: vk.VkImageLayout, acquire: bool) vk.VkImageMemoryBarrier {
         const imported = &self.backing.imported;
         const family = self.device.native.?.native_device.queue_family_index;
-        return .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .srcAccessMask = if (acquire) 0 else vk.VK_ACCESS_MEMORY_READ_BIT | vk.VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = if (acquire) vk.VK_ACCESS_MEMORY_READ_BIT | vk.VK_ACCESS_MEMORY_WRITE_BIT else 0,
-            .oldLayout = old, .newLayout = new,
-            .srcQueueFamilyIndex = if (acquire) imported.external_queue_family else family,
-            .dstQueueFamilyIndex = if (acquire) family else imported.external_queue_family,
-            .image = imported.image,
-            .subresourceRange = .{ .aspectMask = imported.aspect_mask, .baseMipLevel = 0,
-                .levelCount = imported.mip_levels, .baseArrayLayer = 0, .layerCount = imported.array_layers } };
+        return .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = if (acquire) 0 else vk.VK_ACCESS_MEMORY_READ_BIT | vk.VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = if (acquire) vk.VK_ACCESS_MEMORY_READ_BIT | vk.VK_ACCESS_MEMORY_WRITE_BIT else 0, .oldLayout = old, .newLayout = new, .srcQueueFamilyIndex = if (acquire) imported.external_queue_family else family, .dstQueueFamilyIndex = if (acquire) family else imported.external_queue_family, .image = imported.image, .subresourceRange = .{ .aspectMask = imported.aspect_mask, .baseMipLevel = 0, .levelCount = imported.mip_levels, .baseArrayLayer = 0, .layerCount = imported.array_layers } };
     }
-    pub fn stageSubmitLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard,
-        texture_header: *core.Object, epoch: u64) Error!SubmitPlan {
+    pub fn stageSubmitLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard, texture_header: *core.Object, epoch: u64) Error!SubmitPlan {
         try self.validateRecordingLocked(guard, texture_header, epoch);
         const begun = &self.backing.access.begun;
         var plan: SubmitPlan = .{};
@@ -342,8 +323,7 @@ pub const SharedTextureMemory = struct {
         return plan;
     }
     /// Called only after native submit success and PendingUses root adoption.
-    pub fn commitAcceptedLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard,
-        io: std.Io, texture_header: *core.Object, epoch: u64, serial: u64) void {
+    pub fn commitAcceptedLocked(self: *SharedTextureMemory, guard: *const core.ObjectGuard, io: std.Io, texture_header: *core.Object, epoch: u64, serial: u64) void {
         self.validateRecordingLocked(guard, texture_header, epoch) catch unreachable;
         const begun = &self.backing.access.begun;
         if (begun.acquire_accepted_serial != null) return;
@@ -357,8 +337,7 @@ pub const SharedTextureMemory = struct {
         self.backing.layout = begun.new_layout;
     }
 
-    pub fn endAccess(self: *SharedTextureMemory, allocator: std.mem.Allocator, io: std.Io,
-        texture: api.objects.Texture, out: *api.descriptors.SharedTextureMemoryEndAccessState) Error!api.enums.Status {
+    pub fn endAccess(self: *SharedTextureMemory, allocator: std.mem.Allocator, io: std.Io, texture: api.objects.Texture, out: *api.descriptors.SharedTextureMemoryEndAccessState) Error!api.enums.Status {
         const layout = out.shared_texture_memory_vk_image_layout_end_state orelse return error.UnsupportedImageLayout;
         if (!supportedLayout(layout.new_layout, false)) return error.UnsupportedImageLayout;
         try self.device.acquireOperation(io);
@@ -401,27 +380,22 @@ pub const SharedTextureMemory = struct {
             for (self.backing.initialized) |bit| initialized = initialized and bit;
             self.backing.layout = layout.new_layout;
             @memset(self.backing.native_states, .{
-                .layout = layout.new_layout, .stages = vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                .layout = layout.new_layout,
+                .stages = vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             });
-            self.backing.access = .{ .end_accepted = .{ .texture_header = &resolved.header,
-                .acquire_epoch = begun.acquire_epoch, .fence = fence, .serial = serial,
-                .old_layout = old_layout, .end_layout = layout.new_layout, .initialized = initialized } };
+            self.backing.access = .{ .end_accepted = .{ .texture_header = &resolved.header, .acquire_epoch = begun.acquire_epoch, .fence = fence, .serial = serial, .old_layout = old_layout, .end_layout = layout.new_layout, .initialized = initialized } };
         }
         const accepted = self.backing.access.end_accepted;
         try accepted.fence.ensureExportedLocked(io, &guard);
         fences[0] = accepted.fence.toApi(&guard);
         values[0] = 1;
-        out.* = .{ .initialized = accepted.initialized, .fence_count = 1,
-            .fences = fences, .signaled_value_count = 1, .signaled_values = values,
-            .shared_texture_memory_vk_image_layout_end_state = .{
-                .old_layout = accepted.old_layout, .new_layout = accepted.end_layout } };
+        out.* = .{ .initialized = accepted.initialized, .fence_count = 1, .fences = fences, .signaled_value_count = 1, .signaled_values = values, .shared_texture_memory_vk_image_layout_end_state = .{ .old_layout = accepted.old_layout, .new_layout = accepted.end_layout } };
         self.backing.access = .idle;
         resolved.header.releaseLeaseLocked(&guard, io) catch unreachable;
         return .success;
     }
 
-    pub fn destroy(self: *SharedTextureMemory, guard: *const core.ObjectGuard, io: std.Io,
-        reason: core.DestroyReason) void {
+    pub fn destroy(self: *SharedTextureMemory, guard: *const core.ObjectGuard, io: std.Io, reason: core.DestroyReason) void {
         guard.assertOwns(self.header.tracking);
         _ = reason;
         switch (self.backing.access) {
@@ -454,9 +428,7 @@ pub const SharedTextureMemory = struct {
 
 /// The caller retains its native descriptor. Imported resources transfer to the
 /// real Device arena only when the header has been attached successfully.
-pub fn importSharedTextureMemory(allocator: std.mem.Allocator, io: std.Io,
-    device: *device_mod.Device,
-    descriptor: *const api.descriptors.SharedTextureMemoryDescriptorChain) ImportTextureError!api.objects.SharedTextureMemory {
+pub fn importSharedTextureMemory(allocator: std.mem.Allocator, io: std.Io, device: *device_mod.Device, descriptor: *const api.descriptors.SharedTextureMemoryDescriptorChain) ImportTextureError!api.objects.SharedTextureMemory {
     try device.acquireOperation(io);
     defer device.releaseOperation(io);
     var imported = try import_mod.importImage(allocator, io, device, descriptor);
@@ -465,8 +437,7 @@ pub fn importSharedTextureMemory(allocator: std.mem.Allocator, io: std.Io,
     var guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     defer guard.unlock(io);
     try device.bindObjectsLocked(&guard, allocator);
-    const self = try SharedTextureMemory.createImportedLocked(allocator, io, &guard,
-        device, imported, device.sharedMemoryBridge(), descriptor.label orelse "");
+    const self = try SharedTextureMemory.createImportedLocked(allocator, io, &guard, device, imported, device.sharedMemoryBridge(), descriptor.label orelse "");
     transferred = true;
     return self.toApi(&guard);
 }

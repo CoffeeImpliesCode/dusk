@@ -5,15 +5,12 @@
 //! `src/dawn/native/vulkan/external_semaphore/SemaphoreServiceImplementationFD.{h,cpp}`
 //! (10 rows), `SemaphoreService.{h,cpp}` (8) and
 //! `SemaphoreServiceImplementation.{h,cpp}` (1) at Dawn revision
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §2 gives the
-//! `platform` module this upstream directory, and `#### M21` carries the
-//! rows.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **One merge, and why.** Dawn holds a `unique_ptr<ServiceImplementation>`
 //! (`SemaphoreService.h:72`) and reaches it through six virtuals on an
 //! abstract base (`SemaphoreServiceImplementation.h:47`-`:62`). The Zircon
-//! implementation is skipped (`docs/40-plan.md`:739), so the base has one
+//! implementation is skipped, so the base has one
 //! subclass and the pointer array has one slot. The port has one struct and
 //! no vtable.
 //!
@@ -22,9 +19,8 @@
 //! specification defines: `-1` for
 //! `VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT_KHR` means "already
 //! signalled" (`UtilsVulkan.h:48`-`:51`). The port accepts that one value for
-//! the sync handle type and rejects every other negative value, which is what
-//! the acceptance in `docs/40-plan.md` M21 asks for and what the sentinel is
-//! for. `exportSemaphore` seeds its out-parameter with `-2` for the same
+//! the sync handle type and rejects every other negative value.
+//! `exportSemaphore` seeds its out-parameter with `-2` for the same
 //! reason (`SemaphoreServiceImplementationFD.cpp:167`): `-1` is a valid
 //! answer.
 //!
@@ -51,8 +47,7 @@ comptime {
 /// below.
 ///
 /// Dawn's `ExternalSemaphoreHandle` (`ExternalHandle.h:43`).
-// A type, so `AGENTS.md` §2 spells it `PascalCase`; `ziglint`'s Z006 resolves
-// no type through a qualified path, so `@TypeOf` names the same descriptor.
+// `@TypeOf` preserves the descriptor type for the file descriptor.
 pub const ExternalSemaphoreHandle = @TypeOf(@as(std.posix.fd_t, 0));
 
 /// The descriptor the Vulkan specification defines as "already signalled".
@@ -100,7 +95,7 @@ pub const default_handle_type: HandleType = .opaque_fd;
 ///
 /// `dispatch.LoadError` is joined in whole, as `src/engine/buffer.zig:194`
 /// joins it, because this file reads four device dispatch fields and
-/// `AGENTS.md` §3.1 makes each missing one a typed error. Its four members are
+/// a missing one is a typed error. Its four members are
 /// swept in `src/vk/dispatch.zig`, so the count below carries them.
 pub const Error = dispatch.Error || dispatch.LoadError || error{
     /// `dup(2)` refused. Dawn asserts instead
@@ -274,7 +269,7 @@ pub const Service = struct {
         };
         // Both procs are resolved before the semaphore is created, so a loader
         // that missed either one leaves no created semaphore behind. The
-        // refusal is typed per `AGENTS.md` §3.1.
+        // refusal is typed.
         const create_semaphore = self.procs.create_semaphore orelse
             return error.MissingDeviceProc;
         const destroy_semaphore = self.procs.destroy_semaphore orelse
@@ -345,9 +340,8 @@ pub fn fileFromDescriptor(handle: ExternalSemaphoreHandle) std.Io.File {
 
 /// `dup(2)` behind a declared error set.
 ///
-/// `std.posix` at 0.16.0 wraps no `dup`, and the decision order in
-/// `AGENTS.md` §6 stops at the standard library, so the port calls the
-/// syscall layer. That layer reports a refusal by returning an errno above
+/// The port calls the Linux syscall layer for `dup`. That layer reports a
+/// refusal by returning an errno above
 /// the result range (`lib/std/os/linux.zig:591`), which is what `errno`
 /// reads.
 fn dupDescriptor(
@@ -428,21 +422,18 @@ test "a duplicated descriptor is a second reference to the same open file" {
 }
 
 test "every member of the error set is named" {
-    // `AGENTS.md` §3 asks that every member be named, so a failure names the
-    // member and not the set. The `dispatch.Error` members are swept there,
+    // Every member is named. The `dispatch.Error` members are swept there,
     // by the table that classifies every `VkResult`
     // (`src/vk/dispatch.zig:1159`); those and the four `dispatch.LoadError`
     // members are swept there, and the two this file adds are added here. The
     // count is what makes a third one a compile-time disagreement.
-    // `@typeInfo` hands back a struct per member that carries the name and no
-    // error value (`lib/std/builtin.zig:719`), so the sweep reads `member.name`
-    // and there is no value to switch on.
-    inline for (@typeInfo(Error).error_set.?) |member| {
-        try std.testing.expect(member.name.len > 0);
+    // Reflection exposes each error name without an error value.
+    inline for (@typeInfo(Error).error_set.error_names.?) |member_name| {
+        try std.testing.expect(member_name.len > 0);
     }
     try std.testing.expect(
-        @typeInfo(Error).error_set.?.len ==
-            @typeInfo(dispatch.Error).error_set.?.len + 7,
+        @typeInfo(Error).error_set.error_names.?.len ==
+            @typeInfo(dispatch.Error).error_set.error_names.?.len + 7,
     );
 }
 

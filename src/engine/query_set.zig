@@ -1,12 +1,10 @@
 //! The query set: the object a resolve reads from, and when it may be read.
 //!
 //! **What this file is.** The port of `src/dawn/native/QuerySet.{h,cpp}` at
-//! Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. It holds the lifetime state, the
+//! Dawn revision `32f77c02294310054a660c393feded4bcb3f203c`. It holds the lifetime state, the
 //! per-query availability bitmap, the range walk the reset hoist and the
 //! resolve share, and the plan one resolve turns into. The Vulkan pool is
 //! `src/engine/vulkan_query_set.zig`; the rules are `src/command/query.zig`.
-//! `docs/40-plan.md` §3.3 carries its twenty rows.
 //!
 //! **What this file does not claim.** It does not claim the timestamp
 //! conversion of `native/QueryHelper.{h,cpp}`, whose only path is behind the
@@ -328,7 +326,7 @@ pub const ResolvePlan = struct {
     /// only reason to zero the destination first
     /// (`CommandBufferVk.cpp:1437-1450`). Upstream ORs this with the
     /// `ClearBufferBeforeResolveQueries` toggle, which is off by default and
-    /// has no port: `AGENTS.md` §2 deletes what nothing sets.
+    /// has no port.
     needs_zero_fill: bool,
     /// The bytes the fill covers, counted from `destination_offset`.
     zero_fill_size: u64,

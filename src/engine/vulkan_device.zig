@@ -5,18 +5,13 @@
 //! (128 + 646 lines), the admission half of
 //! `src/dawn/native/vulkan/PhysicalDeviceVk.{h,cpp}`, and the device-creation
 //! half of `src/dawn/native/vulkan/DeviceVk.{h,cpp}` at Dawn revision
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §3.6 carries
-//! its rows.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **What this file does not claim.** It does not claim device memory
 //! allocation: `ResourceMemoryAllocatorVk.cpp` is not a milestone-9 upstream
 //! file, so `vkAllocateMemory` reaches Vulkan only from a test. It does not
 //! claim the debug-utils messenger (`VulkanInstance::RegisterDebugUtils`,
-//! `BackendVk.cpp:537`): `docs/50-verification.md` §4.4 makes the child's
-//! stderr the primary mechanism for reading a layer's output, and the
-//! no-layer path this milestone tests under
-//! (`VK_LOADER_LAYERS_DISABLE=*`, §4.2) has no messenger to read.
+//! `BackendVk.cpp:537`).
 //!
 //! **One difference from upstream, named.** Dawn keeps three per-ICD side
 //! tables (`BackendVk.h:121`-`:123`) and a `Ref<VulkanInstance>` per entry, so
@@ -77,10 +72,8 @@ const swiftshader_device_id: u32 = 0xC0DE;
 /// The library an ICD is reached through.
 ///
 /// Ports `kSwiftshaderLibName` (`BackendVk.cpp:50`) and `kVulkanLibName`
-/// (`BackendVk.cpp:64`) for Linux, the platform both configurations run on
-/// (`docs/50-verification.md` §5.1 and §5.2). The name selection at
-/// `BackendVk.cpp:48`-`:74` has no row: a build flag chooses the name there
-/// and there is no flag here.
+/// (`BackendVk.cpp:64`) for Linux. The name selection at
+/// `BackendVk.cpp:48`-`:74` uses a build flag upstream.
 pub fn icdLibraryName(icd: Icd) [:0]const u8 {
     return switch (icd) {
         .swiftshader => "libvk_swiftshader.so",
@@ -91,7 +84,7 @@ pub fn icdLibraryName(icd: Icd) [:0]const u8 {
 /// The index an ICD owns in the per-ICD tables, which is Dawn's
 /// `mVulkanInstances[icd]` subscript (`BackendVk.cpp:607`).
 fn icdIndex(icd: Icd) usize {
-    return @intFromEnum(icd);
+    return @backingInt(icd);
 }
 
 /// A Vulkan object kind tracked through native resource teardown.
@@ -120,7 +113,7 @@ pub const HandleKind = enum(u8) {
 /// and `firstLeakedKind` all walk `std.enums.values(HandleKind)`, so a member
 /// standing for a total would read as a handle type: acquirable, releasable,
 /// and reportable as a leak.
-pub const handle_kind_count: usize = @typeInfo(HandleKind).@"enum".fields.len;
+pub const handle_kind_count: usize = @typeInfo(HandleKind).@"enum".field_names.len;
 
 /// One counter per live handle, so a teardown that misses a destroy is a
 /// number and not a silent leak.
@@ -133,11 +126,9 @@ pub const handle_kind_count: usize = @typeInfo(HandleKind).@"enum".fields.len;
 pub const HandleSet = struct {
     counts: [handle_kind_count]u32 = @splat(0),
 
-    /// Records one create. `AGENTS.md` §5 makes a no-leak claim meaningless
-    /// without a leak-detecting allocator, and the counter is what turns that
-    /// allocator's report into a named type.
+    /// Records one create so teardown can report the live handle kind.
     pub fn acquire(set: *HandleSet, kind: HandleKind) void {
-        set.counts[@intFromEnum(kind)] += 1;
+        set.counts[@backingInt(kind)] += 1;
     }
 
     /// Records one destroy. A destroy with no create is the defect this set
@@ -145,14 +136,14 @@ pub const HandleSet = struct {
     /// arithmetic is unsigned, and a wrapped counter would report a huge live
     /// count that names nothing.
     pub fn release(set: *HandleSet, kind: HandleKind) void {
-        const slot = &set.counts[@intFromEnum(kind)];
+        const slot = &set.counts[@backingInt(kind)];
         std.debug.assert(slot.* > 0);
         slot.* -= 1;
     }
 
     /// How many handles of one kind are live.
     pub fn countOf(set: *const HandleSet, kind: HandleKind) u32 {
-        return set.counts[@intFromEnum(kind)];
+        return set.counts[@backingInt(kind)];
     }
 
     /// How many handles are live over every kind.
@@ -202,14 +193,14 @@ fn errorIsAccountedFor(
     for (named) |err| {
         if (std.mem.eql(u8, @errorName(err), member_name)) return true;
     }
-    for (@typeInfo(platform.Loader.OpenError).error_set.?) |merged| {
-        if (std.mem.eql(u8, merged.name, member_name)) return true;
+    for (@typeInfo(platform.Loader.OpenError).error_set.error_names.?) |merged_name| {
+        if (std.mem.eql(u8, merged_name, member_name)) return true;
     }
-    for (@typeInfo(dispatch.Error).error_set.?) |merged| {
-        if (std.mem.eql(u8, merged.name, member_name)) return true;
+    for (@typeInfo(dispatch.Error).error_set.error_names.?) |merged_name| {
+        if (std.mem.eql(u8, merged_name, member_name)) return true;
     }
-    for (@typeInfo(dispatch.LoadError).error_set.?) |merged| {
-        if (std.mem.eql(u8, merged.name, member_name)) return true;
+    for (@typeInfo(dispatch.LoadError).error_set.error_names.?) |merged_name| {
+        if (std.mem.eql(u8, merged_name, member_name)) return true;
     }
     return false;
 }
@@ -218,8 +209,7 @@ fn errorIsAccountedFor(
 /// code means.
 ///
 /// `dispatch.LoadError` is `src/vk/dispatch.zig`'s own answer to "a proc is not
-/// there" (`:307`-`:324`), and `AGENTS.md` §3.1 makes that file the only place
-/// the question is answered. It is the half of the set a call site returns
+/// there" (`:307`-`:324`). It is the half of the set a call site returns
 /// after binding a dispatch field, so a null field and a loader that refused
 /// to fill one report the same member instead of the second being a forced
 /// unwrap. `dispatch.Error` is the `VkResult` mapping the same section names.
@@ -230,7 +220,7 @@ pub const ProcError = dispatch.LoadError || dispatch.Error;
 ///
 /// The merged members are enumerated from the merged sets rather than listed,
 /// so this stays correct when a dependency's set changes. `dispatch.Error` is
-/// exempt because `AGENTS.md` §3.1 makes `src/vk/dispatch.zig` the only place a
+/// exempt because `src/vk/dispatch.zig` is the only place a
 /// driver code becomes a Zig value, and that file's own comptime check
 /// (`src/vk/dispatch.zig:1322`-`:1366`) names every member. `dispatch.LoadError`
 /// is exempt for the same reason and one more: its doc comment
@@ -240,9 +230,9 @@ pub const ProcError = dispatch.LoadError || dispatch.Error;
 pub fn assertErrorSetNamed(comptime ErrorSet: type, comptime named: []const ErrorSet) void {
     @setEvalBranchQuota(error_set_walk_branch_budget);
     comptime {
-        for (@typeInfo(ErrorSet).error_set.?) |member| {
-            if (!errorIsAccountedFor(ErrorSet, member.name, named)) {
-                @compileError("error." ++ member.name ++ " is in no table row");
+        for (@typeInfo(ErrorSet).error_set.error_names.?) |member_name| {
+            if (!errorIsAccountedFor(ErrorSet, member_name, named)) {
+                @compileError("error." ++ member_name ++ " is in no table row");
             }
         }
     }
@@ -351,11 +341,7 @@ pub const VulkanInstance = struct {
         const create_info: vulkan.VkInstanceCreateInfo = .{
             .sType = @intCast(vulkan.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO),
             .pApplicationInfo = &app_info,
-            // No layer, and no instance extension, is requested here. The
-            // acceptance runs with `VK_LOADER_LAYERS_DISABLE=*`
-            // (`docs/50-verification.md` §4.2), and the extensions that gate a
-            // proc land with the milestone that uses them: `VK_KHR_surface` is
-            // M20, and `VK_EXT_debug_utils` is the row this file skips.
+            // No layer or instance extension is requested here.
             .enabledLayerCount = 0,
             .enabledExtensionCount = 0,
         };
@@ -364,7 +350,7 @@ pub const VulkanInstance = struct {
         // entry points `loadGlobalProcs` has already filled, so they are bound
         // here. `destroy_instance` is the third and is NOT: the loader fills it
         // from `loadInstanceProcs` (`src/vk/dispatch.zig:462`-`:465`), so it is
-        // read by the undo path after that call rather than bound now.
+        // read by the undo path, resolving it directly if the allocation failed.
         const create_instance = global.create_instance orelse
             return error.MissingGlobalProc;
         const get_instance_proc_addr = global.get_instance_proc_addr orelse
@@ -414,7 +400,7 @@ pub const VulkanInstance = struct {
     /// created one.
     ///
     /// It reports rather than returning `void`, because the proc it reaches is a
-    /// dispatch field and `AGENTS.md` §3.1 makes a null one a typed error. The
+    /// dispatch field and a null one is a typed error. The
     /// field is read through `destroyInstance`, which binds it and reports, so
     /// a missing entry point costs the caller the teardown rather than a
     /// half-finished one.
@@ -436,10 +422,8 @@ pub const VulkanInstance = struct {
 
     /// Ports `GatherPhysicalDevices` (`VulkanInfo.cpp:140`-`:162`).
     ///
-    /// The caller owns the slice and frees it with `gpa`. Zero devices is
-    /// `error.NoPhysicalDevice`, not an empty slice, because
-    /// `docs/50-verification.md` §5.3 makes a run that enumerated nothing a
-    /// failed run.
+    /// The caller owns the slice and frees it with `gpa`. Zero devices reports
+    /// `error.NoPhysicalDevice`, not an empty slice.
     pub fn enumeratePhysicalDevices(
         self: *const VulkanInstance,
         gpa: std.mem.Allocator,
@@ -473,9 +457,7 @@ pub const VulkanInstance = struct {
             );
             // `checkVkSuccess` turns `VK_INCOMPLETE` into
             // `error.UnexpectedOutcome`, which is the only outcome a retry can
-            // fix. Reading the raw code here would put a second `VkResult`
-            // mapping outside `src/vk/dispatch.zig`, which `AGENTS.md` §3.1
-            // forbids.
+            // fix. Raw driver codes are mapped only in `src/vk/dispatch.zig`.
             dispatch.checkVkSuccess(result) catch |err| switch (err) {
                 error.UnexpectedOutcome => continue,
                 else => |fatal| return fatal,
@@ -549,9 +531,8 @@ pub const PhysicalDevice = struct {
         handle: vulkan.VkPhysicalDevice,
         instance_api_version: u32,
     ) GatherError!PhysicalDevice {
-        // Every entry point below is bound before its first call, because
-        // `AGENTS.md` §3.1 makes a null dispatch field a typed error. The queue
-        // family one is bound once for the count query and the fetch.
+        // Every entry point is bound before its first call. The queue family
+        // one is bound once for the count query and the fetch.
         const get_properties = procs.get_physical_device_properties orelse
             return error.MissingInstanceProc;
         const get_features2 = procs.get_physical_device_features2 orelse
@@ -797,8 +778,7 @@ fn queryBufferBounds(
     handle: vulkan.VkPhysicalDevice,
     has_maintenance4: bool,
 ) ProcError!BufferBounds {
-    // Bound before the chain is built, because `AGENTS.md` §3.1 makes a null
-    // dispatch field a typed error and the chain is the out-parameter it fills.
+    // Bound before the chain is built; a missing proc is a typed error.
     const get_properties2 = procs.get_physical_device_properties2 orelse
         return error.MissingInstanceProc;
     // `VulkanInfo.cpp:259`-`:260` chains Maintenance3 with no `HasExt` test in
@@ -919,8 +899,7 @@ pub const Device = struct {
 
         // Every instance entry point below is bound before its first call, and
         // the two that outlive the call are bound together so the `errdefer`
-        // destroys through the same binding the create did. `AGENTS.md` §3.1
-        // makes a null dispatch field a typed error.
+        // destroys through the same binding the create did.
         const instance_procs = options.instance.procs;
         const create_device = instance_procs.create_device orelse
             return error.MissingInstanceProc;
@@ -1044,7 +1023,7 @@ pub const Device = struct {
     /// `HandleSet` is what proves it.
     ///
     /// It reports rather than returning `void`, because the proc it reaches is a
-    /// dispatch field and `AGENTS.md` §3.1 makes a null one a typed error. The
+    /// dispatch field and a null one is a typed error. The
     /// binding comes before the first release, so a missing entry point costs
     /// the caller the teardown rather than a half-finished one.
     pub fn deinit(self: *Device, gpa: std.mem.Allocator) ProcError!void {
@@ -1122,8 +1101,8 @@ pub const Device = struct {
     /// queue exists.
     ///
     /// It reports rather than returning the handle bare, because the proc it
-    /// reaches is a dispatch field and `AGENTS.md` §3.1 makes a null one a
-    /// typed error. A null handle is still what `Queue.init` refuses with
+    /// reaches is a dispatch field and a null one is a typed error.
+    /// A null handle is still what `Queue.init` refuses with
     /// `error.QueueHandleIsNull`: a driver that reports no queue for a family it
     /// just claimed is a different failure from a loader that has no entry
     /// point for the call.
@@ -1150,8 +1129,7 @@ pub const AdapterList = struct {
     items: []Adapter,
 
     pub const FirstError = error{
-        /// Zero adapters survived the filters. `docs/50-verification.md` §5.3:
-        /// a green run that enumerated nothing has proved nothing.
+        /// Zero adapters survived the filters.
         NoPhysicalDevice,
     };
 
@@ -1210,8 +1188,8 @@ pub const Backend = struct {
     /// The instances own the libraries, so they close last.
     ///
     /// It reports rather than returning `void`, because each instance teardown
-    /// reaches a global proc and `AGENTS.md` §3.1 makes a null one a typed
-    /// error. The loop does not stop at the first failure: an instance that
+    /// reaches a global proc and a null one is a typed error.
+    /// The loop does not stop at the first failure: an instance that
     /// cannot close must not strand the block behind it or the ICD after it,
     /// so each one is freed whatever it reported and the caller reads the first
     /// error the loop saw.
@@ -1486,7 +1464,7 @@ test "the ICD order is the fallback first and each name is a library" {
     // Every ICD owns exactly one slot, so the per-ICD tables cannot overlap.
     try std.testing.expectEqual(@as(usize, 0), icdIndex(.swiftshader));
     try std.testing.expectEqual(@as(usize, 1), icdIndex(.system));
-    try std.testing.expectEqual(icd_count, @typeInfo(Icd).@"enum".fields.len);
+    try std.testing.expectEqual(icd_count, @typeInfo(Icd).@"enum".field_names.len);
 }
 
 test "the floor is Vulkan 1.1" {

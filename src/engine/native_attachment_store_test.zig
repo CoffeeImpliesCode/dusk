@@ -9,7 +9,7 @@ const factory = @import("native_attachment_store.zig");
 fn colorValue() attachments.AttachmentState {
     var value: attachments.AttachmentState = .{};
     value.color_attachments_set = 1;
-    value.color_formats[0] = @intFromEnum(api.TextureFormat.rgba8_unorm);
+    value.color_formats[0] = @backingInt(api.TextureFormat.rgba8_unorm);
     return value;
 }
 
@@ -35,23 +35,23 @@ test "native attachment aliases compare complete metadata and prune before last 
     const expanded = try factory.create(gpa, io, &guard, &arena, &store, changed);
     try std.testing.expect(expanded != multisampled);
     changed = value;
-    changed.color_formats[0] = @intFromEnum(api.TextureFormat.bgra8_unorm);
+    changed.color_formats[0] = @backingInt(api.TextureFormat.bgra8_unorm);
     const other_color = try factory.create(gpa, io, &guard, &arena, &store, changed);
     try std.testing.expect(other_color != first);
     changed = value;
-    changed.depth_stencil_format = @intFromEnum(api.TextureFormat.depth32_float);
+    changed.depth_stencil_format = @backingInt(api.TextureFormat.depth32_float);
     const depth = try factory.create(gpa, io, &guard, &arena, &store, changed);
     try std.testing.expect(depth != first);
     changed = value;
     changed.color_attachments_set = 2;
     changed.color_formats = @splat(0);
-    changed.color_formats[1] = @intFromEnum(api.TextureFormat.rgba8_unorm);
+    changed.color_formats[1] = @backingInt(api.TextureFormat.rgba8_unorm);
     const hole = try factory.create(gpa, io, &guard, &arena, &store, changed);
     try std.testing.expect(hole != first);
     changed = value;
     changed.has_pls = true;
     changed.storage_attachment_slot_count = 1;
-    changed.storage_attachment_slots[0] = @intFromEnum(api.TextureFormat.r32_uint);
+    changed.storage_attachment_slots[0] = @backingInt(api.TextureFormat.r32_uint);
     const storage = try factory.create(gpa, io, &guard, &arena, &store, changed);
     try std.testing.expect(storage != first);
     first.header.retirePayloadLocked(&guard, io, .early_destroy);

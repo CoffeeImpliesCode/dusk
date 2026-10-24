@@ -5,7 +5,7 @@
 //! `encoding_context.Context` is the stream it records into,
 //! `render_encoder_base.RenderEncoderBase` is the render half of a pass, and
 //! this is the value a caller holds to open both. It records intent and holds
-//! no Vulkan (`AGENTS.md` §3).
+//! no Vulkan.
 //!
 //! **Why `init` is infallible.** `Context.init` is `AllocatorError!Context`
 //! (`encoding_context.zig:88`), and an encoder is a value the caller keeps on
@@ -47,10 +47,10 @@ pub const Error = allocator_mod.AllocatorError || attachment_state.AttachmentErr
 /// compressed families — BC, ETC2/EAC and ASTC — contiguously after every
 /// uncompressed one (`src/api/enums.zig:931-982`), so naming the run's two
 /// ends names every member of it.
-const first_compressed_format: u32 = @intFromEnum(api.TextureFormat.bc1_rgba_unorm);
+const first_compressed_format: u32 = @backingInt(api.TextureFormat.bc1_rgba_unorm);
 
 /// The wire value it ends at, and its length in wire values.
-const last_compressed_format: u32 = @intFromEnum(api.TextureFormat.astc_12x12_unorm_srgb);
+const last_compressed_format: u32 = @backingInt(api.TextureFormat.astc_12x12_unorm_srgb);
 const compressed_format_count: u32 = last_compressed_format - first_compressed_format + 1;
 
 comptime {
@@ -59,14 +59,14 @@ comptime {
     // the domain holds the member count `src/api/enums.zig:986` records, so a
     // format added anywhere upstream stops the build here instead of being read
     // as uncompressed.
-    if (first_compressed_format != @intFromEnum(api.TextureFormat.depth32_float_stencil8) + 1) {
+    if (first_compressed_format != @backingInt(api.TextureFormat.depth32_float_stencil8) + 1) {
         @compileError("a texture format appeared below the compressed run");
     }
     // 102, not upstream's 110: sixteen of Dawn's entries share a tag with an
     // earlier one and the generator drops the later of each pair, so the enum
     // has 110 - 8 = 102 fields over tags 0 to 101. Asserting the entry count
     // would fire on a correct regeneration.
-    if (@typeInfo(api.TextureFormat).@"enum".fields.len != 102) {
+    if (@typeInfo(api.TextureFormat).@"enum".field_names.len != 102) {
         @compileError("a texture format appeared; classify it before the build passes");
     }
 }
@@ -272,8 +272,7 @@ pub const CommandEncoder = struct {
         // `max_color_attachments` is the bound (`Constants.h:43`) and the
         // descriptor rule for naming more than it is the error, so the loop is
         // bounded rather than the caller.
-        var recorded =
-            [_]commands.RenderPassColorAttachmentInfo{.{}} ** constants.max_color_attachments;
+        var recorded: [constants.max_color_attachments]commands.RenderPassColorAttachmentInfo = @splat(.{});
         var count: usize = 0;
         for (options.color_attachments) |color_attachment| {
             if (count == recorded.len) return error.TooManyAttachments;

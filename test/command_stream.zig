@@ -1,7 +1,6 @@
 //! The M15 shard: the command stream, decoded.
 //!
-//! **What this shard asserts.** The acceptance sentence
-//! (`docs/40-plan.md:586-592`) has two halves. The first records a whole
+//! **What this shard asserts.** The first test records a whole
 //! render pass — begin, set pipeline, set bind group, set vertex buffer, a draw
 //! of three, end — and decodes the stream back, asserting it holds exactly
 //! those six commands in that order and nothing else. The second records a
@@ -14,9 +13,9 @@
 //! Recording and decoding need no adapter or driver.
 //!
 //! **What this shard does not claim.** It does not claim the replay is
-//! correct: nothing here turns a tag into a Vulkan call, because that is M18
-//! (`docs/40-plan.md:657-661`). It does not claim the payload layouts match
-//! Dawn's, which `commands.zig:10-14` rules out in so many words. It decodes
+//! correct: nothing here turns a tag into a Vulkan call. It does not claim
+//! the payload layouts match Dawn's, which `commands.zig:10-14` rules out.
+//! It decodes
 //! with `Iterator.nextCommand` per tag rather than through `commands.skip`
 //! because `skip` advances past a payload without interpreting it
 //! (`commands.zig:509-515`) and hands nothing back, while the acceptance
@@ -97,7 +96,7 @@ const Fixture = struct {
         self.device.bindTrackingOwner(&self.guard, self);
         var value: attachment_state.AttachmentState = .{};
         value.color_attachments_set = 1;
-        value.color_formats[0] = @intFromEnum(dusk.api.TextureFormat.rgba8_unorm);
+        value.color_formats[0] = @backingInt(dusk.api.TextureFormat.rgba8_unorm);
         try value.validateCanonical();
         self.attachment = try self.device.create(
             allocator,
@@ -132,9 +131,9 @@ const Fixture = struct {
 
 test "the tag enum preserves Dawn tags and appends browser utility intents" {
     try std.testing.expectEqual(@as(usize, 40), commands.tag_count);
-    try std.testing.expectEqual(@as(u32, 37), @intFromEnum(commands.Tag.write_timestamp));
-    try std.testing.expectEqual(@as(u32, 38), @intFromEnum(commands.Tag.copy_texture_for_browser));
-    try std.testing.expectEqual(@as(u32, 39), @intFromEnum(commands.Tag.copy_external_texture_for_browser));
+    try std.testing.expectEqual(@as(u32, 37), @backingInt(commands.Tag.write_timestamp));
+    try std.testing.expectEqual(@as(u32, 38), @backingInt(commands.Tag.copy_texture_for_browser));
+    try std.testing.expectEqual(@as(u32, 39), @backingInt(commands.Tag.copy_external_texture_for_browser));
 }
 
 test "empty public write and bundle runs preserve following commands" {
@@ -409,7 +408,7 @@ test "partial tag slot and payload are refused" {
     for ([_]usize{ 1, 3, 4, 7 }) |length| {
         var arena = try allocator_mod.Allocator.init(std.testing.allocator, block_size);
         defer arena.deinit();
-        _ = try arena.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+        _ = try arena.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
         var blocks = arena.acquireBlocks();
         blocks.items[0].len = length;
         var iterator = allocator_mod.Iterator.init(std.testing.allocator, blocks);
@@ -418,7 +417,7 @@ test "partial tag slot and payload are refused" {
     }
     var arena = try allocator_mod.Allocator.init(std.testing.allocator, block_size);
     defer arena.deinit();
-    _ = try arena.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    _ = try arena.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
     var blocks = arena.acquireBlocks();
     blocks.items[0].len = constants.max_alignment;
     var iterator = allocator_mod.Iterator.init(std.testing.allocator, blocks);
@@ -430,7 +429,7 @@ test "partial tag slot and payload are refused" {
 test "additional data refuses wrong sentinel truncated runs and overflowing counts" {
     var arena = try allocator_mod.Allocator.init(std.testing.allocator, block_size);
     defer arena.deinit();
-    _ = try arena.allocateCommand(commands.EndComputePassCmd, @intFromEnum(commands.Tag.end_compute_pass));
+    _ = try arena.allocateCommand(commands.EndComputePassCmd, @backingInt(commands.Tag.end_compute_pass));
     var iterator = allocator_mod.Iterator.init(std.testing.allocator, arena.acquireBlocks());
     defer iterator.deinit();
     try std.testing.expectError(error.CommandStreamTruncated, iterator.nextData(u32, 1));
@@ -460,7 +459,7 @@ test "all six trailing run shapes preserve subsequent alignment" {
         for ([_]u32{ 0, 1, 7, 8, 9 }) |count| {
             var arena = try allocator_mod.Allocator.init(std.testing.allocator, block_size);
             defer arena.deinit();
-            const payload = try arena.allocateCommand(commands.Payload(tag), @intFromEnum(tag));
+            const payload = try arena.allocateCommand(commands.Payload(tag), @backingInt(tag));
             payload.* = std.mem.zeroes(commands.Payload(tag));
             switch (tag) {
                 .insert_debug_marker, .push_debug_group => payload.length = count + 1,
@@ -477,7 +476,7 @@ test "all six trailing run shapes preserve subsequent alignment" {
                 const run = try arena.allocateData(commands.DataElement(tag), run_count);
                 @memset(run, std.mem.zeroes(commands.DataElement(tag)));
             }
-            _ = try arena.allocateCommand(commands.EndComputePassCmd, @intFromEnum(commands.Tag.end_compute_pass));
+            _ = try arena.allocateCommand(commands.EndComputePassCmd, @backingInt(commands.Tag.end_compute_pass));
             var iterator = allocator_mod.Iterator.init(std.testing.allocator, arena.acquireBlocks());
             defer iterator.deinit();
             try expectTag(&iterator, tag);
@@ -495,7 +494,7 @@ test "debug label skip rejects missing length and terminator" {
         defer arena.deinit();
         const marker = try arena.allocateCommand(
             commands.InsertDebugMarkerCmd,
-            @intFromEnum(commands.Tag.insert_debug_marker),
+            @backingInt(commands.Tag.insert_debug_marker),
         );
         marker.* = .{ .length = length };
         const bytes = try arena.allocateData(u8, length);
@@ -523,7 +522,7 @@ test "debug label skip preserves the following tag at alignment boundaries" {
         defer encoder.deinit(std.testing.allocator, std.testing.io, &fixture.guard);
         var pass = try encoder.beginComputePass(.{});
         defer pass.deinit();
-        const label = [_]u8{'x'} ** 16;
+        const label: [16]u8 = @splat('x');
         try pass.insertDebugMarker(label[0..length]);
         try pass.end();
         var finished = try encoder.finish();

@@ -481,12 +481,12 @@ pub const ObjectList = struct {
 fn assertHeader(comptime T: type) void {
     const info = @typeInfo(T);
     if (info != .@"struct") @compileError("an arena object must be a struct");
-    const fields = info.@"struct".fields;
-    if (fields.len == 0) @compileError("an arena object must have a header field");
-    if (!std.mem.eql(u8, fields[0].name, "header")) {
+    const fields = info.@"struct";
+    if (fields.field_names.len == 0) @compileError("an arena object must have a header field");
+    if (!std.mem.eql(u8, fields.field_names[0], "header")) {
         @compileError("the first field of an arena object must be header");
     }
-    if (fields[0].type != Object) {
+    if (fields.field_types[0] != Object) {
         @compileError("the header field of an arena object must be an Object");
     }
     if (!@hasDecl(T, "destroy")) {

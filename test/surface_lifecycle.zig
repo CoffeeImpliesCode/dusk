@@ -309,13 +309,17 @@ test "final Surface drain dispatch error restores alive and preserves exact publ
     defer surface.release(io, &instance, handle) catch @panic("drain surface cleanup");
     const payload = try resolveSurface(&instance, io, handle);
     var adapters = try instance.enumerateAdapters(t.allocator, io, .{
-        .backend_type = .vulkan, .feature_level = .core, .power_preference = .undefined_,
+        .backend_type = .vulkan,
+        .feature_level = .core,
+        .power_preference = .undefined_,
     });
     defer adapters.deinit(io) catch @panic("drain adapter cleanup");
     try t.expect(adapters.items.len != 0);
     var device_mutex: std.Io.Mutex = .init;
     var device = try adapters.items[0].createDevice(t.allocator, io, .{
-        .adapter = &adapters.items[0], .object_mutex = &device_mutex, .feature_level = .core,
+        .adapter = &adapters.items[0],
+        .object_mutex = &device_mutex,
+        .feature_level = .core,
     });
     defer device.deinit(t.allocator, io) catch @panic("drain device cleanup");
     {
@@ -332,7 +336,8 @@ test "final Surface drain dispatch error restores alive and preserves exact publ
     var destroyed: usize = 0;
     var instance_guard = try core.ObjectGuard.lock(io, payload.header.tracking);
     const native_lease = instance.surface_object_arena.?.create(t.allocator, &instance_guard, NativeLeaseProbe, .{
-        .kind = .native_surface, .initial_reference = .lease,
+        .kind = .native_surface,
+        .initial_reference = .lease,
     }) catch |err| {
         instance_guard.unlock(io);
         return err;
@@ -349,19 +354,26 @@ test "final Surface drain dispatch error restores alive and preserves exact publ
     };
     var device_guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     const chain = device.core.create(t.allocator, &device_guard, dusk.engine.swapchain.Swapchain, .{
-        .kind = .swapchain, .initial_reference = .lease,
+        .kind = .swapchain,
+        .initial_reference = .lease,
     }) catch |err| {
         device_guard.unlock(io);
         return err;
     };
     chain.native = .{
         .backend = .{
-            .device = native.native_device.vk_device, .queue = native.queue.context.vk_queue,
-            .procs = &procs, .swapchain_available = false,
+            .device = native.native_device.vk_device,
+            .queue = native.queue.context.vk_queue,
+            .procs = &procs,
+            .swapchain_available = false,
         },
-        .handle = null, .generation = 1, .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
-        .extent = .{ .width = 1, .height = 1 }, .present_mode = vk.VK_PRESENT_MODE_FIFO_KHR,
-        .queue_family_index = native.native_device.queue_family_index, .acquire_semaphore = null,
+        .handle = null,
+        .generation = 1,
+        .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = .{ .width = 1, .height = 1 },
+        .present_mode = vk.VK_PRESENT_MODE_FIFO_KHR,
+        .queue_family_index = native.native_device.queue_family_index,
+        .acquire_semaphore = null,
     };
     chain.native_surface_header = &native_lease.header;
     chain.release_context = &instance;

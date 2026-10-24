@@ -1,32 +1,25 @@
 //! Generator for `src/vk/dispatch.zig`.
 //!
-//! **Reads.** Nothing at run time. The tables below are the transcription of
-//! `src/dawn/native/vulkan/VulkanFunctions.h` at the Dawn revision
-//! `docs/40-plan.md` pins, and of the load sites in
-//! `src/dawn/native/vulkan/VulkanFunctions.cpp`. `docs/40-plan.md` §3.2 is the
-//! transcription of record: one row per field, with the header line and the
-//! load site. The Vulkan names come from the pinned Vulkan-Headers commit in
-//! `build.zig.zon`, which `build.zig` translates into `src/vulkan.zig`
-//! separately; this generator never reads a header.
+//! The tables transcribe `src/dawn/native/vulkan/VulkanFunctions.h` and its
+//! load sites in `src/dawn/native/vulkan/VulkanFunctions.cpp` at the pinned
+//! Dawn revision. Each row cites its header and load site.
+//! Vulkan names come from the Vulkan-Headers commit in `build.zig.zon`.
+//! The build translates those headers separately. This generator reads none.
 //!
-//! **Emits.** `src/vk/dispatch.zig`, the shape
-//! `docs/30-port-design.md` §6.2 owns: `Dispatch`, the three tiers, the three
-//! loaders, and the `VkResult` to Zig error mapping that `AGENTS.md` §3.1
-//! keeps in this file.
+//! It emits `Dispatch`, three proc tiers and loaders, and the `VkResult`
+//! error mapping described in `docs/30-port-design.md` section 6.2.
 //!
-//! **Skipped, with the reason.** `docs/40-plan.md` §3.2 ports six fields that
-//! cannot exist here. `vkCreateImagePipeSurfaceFUCHSIA` and
-//! `vkCreateMetalSurfaceEXT` (`VulkanFunctions.h:161`, `:166`) need no Fuchsia
-//! or Metal back end, and `AGENTS.md` §1 builds neither.
+//! `vkCreateImagePipeSurfaceFUCHSIA` and `vkCreateMetalSurfaceEXT`
+//! (`VulkanFunctions.h:161`, `:166`) require unsupported Fuchsia or Metal backends.
 //! `vkGetMemoryZirconHandleFUCHSIA`,
 //! `vkGetMemoryZirconHandlePropertiesFUCHSIA`,
 //! `vkImportSemaphoreZirconHandleFUCHSIA` and
 //! `vkGetSemaphoreZirconHandleFUCHSIA` (`VulkanFunctions.h:403`-`:409`) are the
 //! Fuchsia external memory and semaphore service.
 //!
-//! Eleven more rows in that table cannot exist either, which is why the counts
-//! differ from it. The pinned `vulkan_core.h` defines no `PFN_vk*` typedef for
-//! a platform surface creator. `PFN_vkCreateWaylandSurfaceKHR`,
+//! Eleven platform rows are separate from the core dispatch table.
+//! The pinned `vulkan_core.h` defines no `PFN_vk*` typedef for them.
+//! `PFN_vkCreateWaylandSurfaceKHR`,
 //! `PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR`,
 //! `PFN_vkCreateWin32SurfaceKHR`,
 //! `PFN_vkGetPhysicalDeviceWin32PresentationSupportKHR`,
@@ -38,12 +31,9 @@
 //! `PFN_vkGetPhysicalDeviceXcbPresentationSupportKHR` live in
 //! `vulkan_wayland.h`, `vulkan_win32.h`, `vulkan_android.h`, `vulkan_xlib.h`
 //! and `vulkan_xcb.h`, which `vulkan_core.h` reaches only behind
-//! `VK_USE_PLATFORM_*` and which then need a platform SDK this project does
-//! not vendor. `AGENTS.md` §6 takes a binding from `translate-c` or from a
-//! hand-written shim with the reason named, and a hand-written function pointer
-//! type is a second source of truth for a Vulkan ABI, so these rows wait for
-//! the milestone that adds surfaces. `AGENTS.md` §5 already says the host is
-//! headless and no test may require a surface.
+//! `VK_USE_PLATFORM_*` and require a platform SDK.
+//! Platform dispatch uses separate translated headers, not handwritten
+//! function-pointer types. See `tools/gen_platform_dispatch.zig`.
 
 const std = @import("std");
 
@@ -87,10 +77,9 @@ pub fn render(writer: *std.Io.Writer) std.Io.Writer.Error!void {
 // The transcription
 // ---------------------------------------------------------------------------
 
-/// One Vulkan entry point: the dispatch field the loader fills, and the symbol
-/// it looks up. The field name is the symbol without its `vk` prefix in
-/// snake_case, which is the spelling `docs/40-plan.md` §3.2 uses for every one
-/// of them and which the emitted file checks at comptime.
+/// One Vulkan entry point: the field the loader fills and the symbol it loads.
+/// The field name is the symbol without its `vk` prefix in snake_case.
+/// The emitted file checks that spelling at comptime.
 const ProcRow = struct {
     field: []const u8,
     symbol: [:0]const u8,
@@ -1126,8 +1115,8 @@ fn emitPreamble(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         \\//! **The set.** Dawn holds {d} entry points, and this file declares
         \\//! {d} of them: {d} global, {d} instance, {d} device.
         \\//!
-        \\//! `AGENTS.md` §3.1 makes this table the only door to Vulkan, so an
-        \\//! entry point that is not a field here cannot be called.
+        \\//! This table is the core Vulkan entry-point boundary.
+        \\//! An entry point outside the table cannot be called through it.
         \\//! `tools/gen_dispatch.zig` names every row it left out and why.
         \\//!
         \\//! **What it is not.** It calls nothing. A field holds a
@@ -1207,10 +1196,9 @@ fn emitProcRow(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         "One entry point: the dispatch field the loader fills, and the Vulkan",
         "symbol it looks up.",
         "",
-        "A row is the whole contract between the generator and the loader. The",
-        "field name is the symbol without its `vk` prefix in snake_case, which is",
-        "the spelling `docs/40-plan.md` §3.2 uses for every row, and the comptime",
-        "block at the end of this file checks it.",
+        "A row is the contract between the generator and the loader.",
+        "The field name is the symbol without its `vk` prefix in snake_case.",
+        "The comptime block at the end of this file checks that spelling.",
     });
     try writer.writeAll(
         \\pub const ProcRow = struct {
@@ -1261,11 +1249,11 @@ fn emitExtension(writer: *std.Io.Writer, extension: Extension) std.Io.Writer.Err
     try writer.writeAll("    bits: u64 = 0,\n\n");
     try writer.print(
         \\    pub fn has(self: {s}, ext: {s}) bool {{
-        \\        return self.bits & @intFromEnum(ext) != 0;
+        \\        return self.bits & @backingInt(ext) != 0;
         \\    }}
         \\
         \\    pub fn with(self: {s}, ext: {s}) {s} {{
-        \\        return .{{ .bits = self.bits | @intFromEnum(ext) }};
+        \\        return .{{ .bits = self.bits | @backingInt(ext) }};
         \\    }}
         \\}};
         \\
@@ -1696,7 +1684,7 @@ fn emitResult(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         "",
         "`zig translate-c` gives `VkResult` as `c_int`",
         "(`docs/30-port-design.md` §5.1), so this union and `Error` are the only",
-        "place a driver code becomes a Zig value (`AGENTS.md` §3.1). The tags",
+        "place a driver code becomes a Zig value. The tags",
         "other than `success` and `error` are outcomes the caller must branch",
         "on: `VK_INCOMPLETE` says call again, `VK_SUBOPTIMAL_KHR` says recreate",
         "the swapchain, and none of them is a failure.",
@@ -1881,8 +1869,7 @@ fn emitComptimeChecks(writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.writeAll("    });\n\n");
 
     try writeNote(writer, 4, &.{
-        "Every field name is the snake_case of its symbol, which is the spelling",
-        "`docs/40-plan.md` §3.2 uses for every row.",
+        "Every field name is the snake_case of its symbol.",
     });
     try writer.writeAll(
         \\    var buffer: [longest_symbol_len]u8 = undefined;
@@ -1914,17 +1901,17 @@ fn emitComptimeChecks(writer: *std.Io.Writer) std.Io.Writer.Error!void {
     }
     try writer.writeAll(
         \\    };
-        \\    for (@typeInfo(Error).error_set.?) |member| {
+        \\    for (@typeInfo(Error).error_set.error_names.?) |member_name| {
         \\        var reachable = false;
         \\        for (produced) |err| {
-        \\            reachable = reachable or std.mem.eql(u8, @errorName(err), member.name);
+        \\            reachable = reachable or std.mem.eql(u8, @errorName(err), member_name);
         \\        }
-        \\        const from_else = std.mem.eql(u8, member.name, "UnexpectedOutcome") or
-        \\            std.mem.eql(u8, member.name, "UnknownResult");
+        \\        const from_else = std.mem.eql(u8, member_name, "UnexpectedOutcome") or
+        \\            std.mem.eql(u8, member_name, "UnknownResult");
         \\        if (!reachable and !from_else) {
         \\            @compileError(std.fmt.comptimePrint(
         \\                "Error.{s} has no result code",
-        \\                .{member.name},
+        \\                .{member_name},
         \\            ));
         \\        }
         \\    }
@@ -1942,26 +1929,26 @@ fn emitComptimeChecks(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         \\    comptime rows: []const []const ProcRow,
         \\) void {
         \\    @setEvalBranchQuota(coverage_branch_quota);
-        \\    const fields = @typeInfo(Procs).@"struct".fields;
-        \\    for (fields) |field| {
+        \\    const field_names = @typeInfo(Procs).@"struct".field_names;
+        \\    for (field_names) |field_name| {
         \\        var found: usize = 0;
         \\        for (rows) |row_list| {
         \\            for (row_list) |row| {
-        \\                if (std.mem.eql(u8, row.field, field.name)) found += 1;
+        \\                if (std.mem.eql(u8, row.field, field_name)) found += 1;
         \\            }
         \\        }
         \\        if (found != 1) {
         \\            @compileError(std.fmt.comptimePrint(
         \\                "{s}.{s} is named by {d} rows",
-        \\                .{ @typeName(Procs), field.name, found },
+        \\                .{ @typeName(Procs), field_name, found },
         \\            ));
         \\        }
         \\    }
         \\    for (rows) |row_list| {
         \\        for (row_list) |row| {
         \\            var named = false;
-        \\            for (fields) |field| {
-        \\                named = named or std.mem.eql(u8, row.field, field.name);
+        \\            for (field_names) |field_name| {
+        \\                named = named or std.mem.eql(u8, row.field, field_name);
         \\            }
         \\            if (!named) {
         \\                @compileError(std.fmt.comptimePrint(

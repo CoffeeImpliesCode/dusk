@@ -672,12 +672,12 @@ fn fillStages(
     std.debug.assert(scratch.stage_count == 0);
     std.debug.assert(scratch.stage_names[0] == null);
     std.debug.assert(scratch.stage_names[1] == null);
-    const vertex_name = try allocator.dupeZ(u8, descriptor.vertex.entry_point);
+    const vertex_name = try allocator.dupeSentinel(u8, descriptor.vertex.entry_point, 0);
     scratch.stage_names[0] = vertex_name;
     scratch.stages[0] = makeStage(&descriptor.vertex, vertex_name);
     scratch.stage_count = 1;
     if (descriptor.fragment) |fragment| {
-        const fragment_name = try allocator.dupeZ(u8, fragment.entry_point);
+        const fragment_name = try allocator.dupeSentinel(u8, fragment.entry_point, 0);
         scratch.stage_names[1] = fragment_name;
         scratch.stages[1] = makeStage(&fragment, fragment_name);
         scratch.stage_count = 2;

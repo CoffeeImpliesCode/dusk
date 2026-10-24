@@ -1,8 +1,7 @@
 //! The physical device: what one adapter's hardware is, before a feature level
 //! is chosen.
 //!
-//! Ports `src/dawn/native/PhysicalDevice.{h,cpp}`. `docs/40-plan.md` §3.3
-//! `#### M8` holds the row table, one row per upstream definition.
+//! Ports `src/dawn/native/PhysicalDevice.{h,cpp}`.
 //!
 //! Native capability mapping lives in `native_capabilities.zig`; this record
 //! retains the backend identity needed to create the corresponding native device.

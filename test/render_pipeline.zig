@@ -1,21 +1,13 @@
 //! The M14 acceptance shard: one render pipeline, created twice, and one more
 //! after the layout changes.
 //!
-//! `docs/40-plan.md` §1 M14 fixes the acceptance in three sentences: create a
-//! render pipeline from the two checked-in shader modules and assert
+//! Create a render pipeline from the two checked-in shader modules and assert
 //! `vkCreateGraphicsPipelines` returned `VK_SUCCESS` with a non-null
 //! `VkPipeline`; create the identical pipeline a second time and assert the
 //! cache returned the same handle rather than a new one; run the same pipeline
 //! with a different `PipelineLayout` and assert a new handle. Those are the
 //! three tests below, in that order.
 //!
-//! **This shard runs on a real device.** The milestone's claim is about what
-//! `vkCreateGraphicsPipelines` and the driver's `VkPipeline` handle do, so a
-//! stub would prove nothing here. `AGENTS.md` §4.1 says a run that enumerated
-//! no device proves nothing, so `discoverPhysicalDevices` failing is the test
-//! failing: it refuses with `error.NoPhysicalDevice` when the loader reports
-//! nothing (`src/engine/vulkan_device.zig:1285`). `test/pipeline_cache.zig` is
-//! the half that needs no device.
 //!
 //! **The two layouts are real and they differ in shape, not in a label.** The
 //! fragment fixture declares one uniform buffer at set 0, binding 1
@@ -25,14 +17,6 @@
 //! that a superset would also accept is what makes the assertion honest: the
 //! only way the two descriptors differ is the layout.
 //!
-//! **What this file does not claim.** It does not claim the pipeline renders
-//! anything. No draw and no readback happen here; the compatibility pass is
-//! created through M18's native pass cache. The host is headless
-//! (`AGENTS.md` §5). It does not claim the pipeline handles are
-//! counted by `vulkan_device.HandleSet`: the pipeline seam takes no `HandleSet`
-//! (`src/pipeline/pipeline_backend.zig:44`-`:51`), so the driver handles the
-//! pipeline path creates are released by `destroy` and by the teardown below
-//! rather than by a counter.
 //!
 //! **The build wiring this shard needs.** The shard root is this file, the
 //! library is the `dusk` import, and the shard module must carry the `vulkan`
@@ -243,12 +227,6 @@ fn createModule(
 
 /// Every teardown refusal one test body has not returned yet.
 ///
-/// `defer` cannot fail in Zig 0.16, so a teardown that can refuse cannot
-/// return from the point where it refuses. It records the error here and the
-/// body returns it once its own frame has unwound, which keeps every teardown
-/// a `defer` and still hands the shard the loader's own words instead of a
-/// trap carrying ours. `AGENTS.md` §3.1 makes a missing proc a typed error and
-/// forbids the panic, so recording is the shape that leaves both standing.
 const TeardownError = vulkan_device.ProcError || shader_module_vk.CreateError ||
     core.LifetimeError || core.ReferenceError || core.HandleError ||
     error{ResourceInUse};
@@ -274,10 +252,6 @@ const TeardownErrors = struct {
 
 /// Releases a shader module, recording a refused release for `teardowns`.
 ///
-/// The destroy can only fail on a missing proc, which the create already
-/// required, so a refusal here is a loader defect. `AGENTS.md` §3.1 makes that
-/// a typed error and forbids the panic, so the error goes to `teardowns` and
-/// the test returns it.
 fn destroyModule(
     module: *shader_module.ShaderModule,
     device: *const shader_module_vk.Device,
@@ -342,8 +316,6 @@ fn pipelineAcceptance(io: std.Io, teardowns: *TeardownErrors) !void {
     var backend = vulkan_device.Backend.init(std.testing.allocator, .{ .handles = &handles });
     defer backend.deinit() catch |err| teardowns.record(err);
 
-    // `AGENTS.md` §4.1: this call reports nothing found as an error, so the test
-    // cannot pass by finding no device.
     var adapters = try backend.discoverPhysicalDevices(.{});
     defer adapters.deinit();
     const adapter = try adapters.first();

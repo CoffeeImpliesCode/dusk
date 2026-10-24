@@ -31,8 +31,6 @@ const render_pass_cache = dusk.engine.render_pass_cache;
 const vulkan_device = dusk.engine.vulkan_device;
 const engine_buffer = dusk.engine.buffer;
 const pipeline = dusk.pipeline.pipeline;
-const bind_group = dusk.engine.bind_group;
-const descriptor_sets = dusk.pipeline.bind_group_descriptor_set;
 const encoder = dusk.command.command_encoder;
 const commands = dusk.command.commands;
 
@@ -47,13 +45,23 @@ pub const ShaderFixtures = struct {
 
 /// Borrow native handles without transferring their destruction to the wrapper.
 pub fn borrowBuffer(
-    context: engine_buffer.Device,
+    io: std.Io,
+    guard: *const dusk.core.ObjectGuard,
+    device: *dusk.engine.Device,
     allocation: BufferAllocation,
     size: u64,
     buffer_usage: dusk.api.BufferUsage,
-) engine_buffer.Buffer {
-    return .{
-        .device = context,
+) !*dusk.engine.native_resources.Buffer {
+    const arena = &device.core.arena;
+    const owner = try arena.create(std.testing.allocator, guard, dusk.engine.native_resources.Buffer, .{
+        .kind = .native_buffer,
+        .initial_reference = .user,
+    });
+    errdefer owner.header.discardUnpublishedLocked(guard) catch unreachable;
+    const native_allocator = arena.allocator(guard);
+    const buffer = try native_allocator.create(engine_buffer.Buffer);
+    buffer.* = .{
+        .device = device.native.?.bufferDevice(),
         .handle = allocation.buffer,
         .allocation = .{
             .memory = allocation.memory,
@@ -81,6 +89,25 @@ pub fn borrowBuffer(
         .host_visible = true,
         .host_coherent = true,
     };
+    owner.* = .{
+        .header = owner.header,
+        .native = buffer,
+        .allocator = native_allocator,
+        .device = device.native.?.resourceDevice(),
+    };
+    owner.header.attach(guard, io);
+    return owner;
+}
+
+/// Return the borrowed allocation to its scene before retiring the registered owner.
+pub fn releaseBorrowedBuffer(
+    io: std.Io,
+    guard: *const dusk.core.ObjectGuard,
+    owner: *dusk.engine.native_resources.Buffer,
+) void {
+    owner.native.handle = null;
+    owner.native.allocation.memory = null;
+    owner.header.releaseUserLocked(guard, io) catch @panic("borrowed buffer release failed");
 }
 
 fn uncapturedError(
@@ -490,15 +517,6 @@ fn runTriangleCases(
                     @panic("triangle pipeline reference release failed");
             }
         };
-        const resource_device: engine_buffer.Device = .{
-            .allocator = std.testing.allocator,
-            .dispatch = device.dispatchTable(),
-            .vk_device = vk_device,
-            .memory_properties = device.memoryProperties(),
-            .non_coherent_atom_size = 1,
-            .max_buffer_size = std.math.maxInt(u64),
-            .handles = handles,
-        };
         const target = created: {
             guard.unlock(io);
             defer guard = dusk.core.ObjectGuard.lockUncancelable(io, core_device.borrow().objects);
@@ -560,14 +578,16 @@ fn runTriangleCases(
 
         // The wrappers borrow the scene's native allocations. Scene teardown owns
         // the handles, and all wrappers remain live until the queue wait completes.
-        var uniform = borrowBuffer(resource_device, scene.uniform, uniform_byte_count, .{
+        const uniform = try borrowBuffer(io, &guard, &high_device, scene.uniform, uniform_byte_count, .{
             .uniform = true,
         });
-        uniform.last_write_usage = (dusk.api.BufferUsage{ .map_write = true }).toFlags();
-        var readback = borrowBuffer(resource_device, scene.staging, readback_byte_count, .{
+        defer releaseBorrowedBuffer(io, &guard, uniform);
+        uniform.native.last_write_usage = (dusk.api.BufferUsage{ .map_write = true }).toFlags();
+        const readback = try borrowBuffer(io, &guard, &high_device, scene.staging, readback_byte_count, .{
             .copy_dst = true,
             .map_read = true,
         });
+        defer releaseBorrowedBuffer(io, &guard, readback);
         if (cases.len == 0 or cases.len > 5) return error.InvalidGraphicsCaseCount;
         var identities: [3]?*pipeline.Pipeline = @splat(null);
         for (cases, 0..) |case, case_index| {
@@ -601,44 +621,27 @@ fn runTriangleCases(
                 identities[case.identity_index] = render_pipeline.native;
             }
             try std.testing.expect(case.identity_index <= case_index);
-            var descriptor_allocator = try descriptor_sets.DescriptorSetAllocator.init(
-                std.testing.allocator,
-                procs,
-                vk_device,
-                render_pipeline.layout.groups[0].native.handle,
-                &.{.{
-                    .type = @intCast(vulkan.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-                    .descriptorCount = 1,
-                }},
+            const tint_group = try dusk.engine.native_resources.createBindGroup(
+                allocator,
+                io,
+                &guard,
+                &core_device.arena,
+                context.resourceDevice(),
+                .{
+                    .layout = render_pipeline.layout,
+                    .group_index = 0,
+                    .bindings = &.{.{ .buffer = .{
+                        .binding = tint_binding,
+                        .buffer = uniform,
+                        .offset = 0,
+                        .size = uniform_byte_count,
+                        .kind = .uniform,
+                        .stages = .{ .fragment = true },
+                    } }},
+                },
             );
-            defer descriptor_allocator.deinit() catch @panic("triangle descriptor allocator teardown failed");
-            const tint_group = try bind_group.BindGroup.create(std.testing.allocator, io, &guard, .{
-                .objects = core_device.borrow().objects,
-                .descriptor_allocator = &descriptor_allocator,
-                .pipeline_layout = render_pipeline.layout.native.handle,
-                .group_index = 0,
-                .group_layout = render_pipeline.native.group_layouts[0],
-                .buffer_limits = bind_group.BufferLimits.fromPhysicalDeviceLimits(&device.physicalProperties().limits),
-                .bindings = &.{.{ .buffer = .{
-                    .binding = tint_binding,
-                    .buffer = &uniform,
-                    .offset = 0,
-                    .size = uniform_byte_count,
-                    .kind = .uniform,
-                    .stages = .{ .fragment = true },
-                } }},
-            });
-            defer {
-                tint_group.destroy(
-                    std.testing.allocator,
-                    io,
-                    &guard,
-                    q.timeline.lastSubmittedSerial(),
-                ) catch @panic("triangle bind group teardown failed");
-                descriptor_allocator.finishDeallocation(
-                    q.timeline.lastSubmittedSerial(),
-                ) catch @panic("triangle descriptor retirement failed");
-            }
+            defer tint_group.header.releaseUserLocked(&guard, io) catch
+                @panic("triangle bind group teardown failed");
 
             var frontend = encoder.CommandEncoder.init(allocator, core_device.borrow(), .{});
             defer frontend.deinit(allocator, io, &guard);
@@ -660,11 +663,11 @@ fn runTriangleCases(
             try render.setPipeline(&guard, try render_pipeline.renderOptions(&guard));
             try render.setBindGroup(.{
                 .index = 0,
-                .group = @ptrCast(tint_group),
+                .group = try tint_group.ref(&guard),
                 .layout_id = @intFromPtr(&render_pipeline.layout.groups[0].header),
                 .min_binding_buffer_size = uniform_byte_count,
                 .buffers = &.{.{
-                    .buffer = @ptrCast(&uniform),
+                    .buffer = try uniform.ref(&guard),
                     .usage = (dusk.api.BufferUsage{ .uniform = true }).toFlags(),
                 }},
             });
@@ -679,7 +682,7 @@ fn runTriangleCases(
             try frontend.copyTextureToBuffer(.{
                 .source = .{
                     .texture = @ptrCast(target),
-                    .format = @intFromEnum(dusk.api.enums.TextureFormat.rgba8_unorm),
+                    .format = @backingInt(dusk.api.enums.TextureFormat.rgba8_unorm),
                     .dimension = ._2d,
                     .aspect = .all,
                     .extent = .{
@@ -689,7 +692,7 @@ fn runTriangleCases(
                     },
                 },
                 .destination = .{
-                    .buffer = @ptrCast(&readback),
+                    .buffer = try readback.ref(&guard),
                     .blocks_per_row = @divExact(bytes_per_row_alignment, bytes_per_pixel),
                     .rows_per_image = target_extent,
                 },

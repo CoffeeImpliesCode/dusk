@@ -9,11 +9,19 @@ const native_image_state = @import("native_image_state.zig");
 
 pub const max_images = 8;
 pub const Error = dispatch.Error || dispatch.LoadError || error{
-    SwapchainImageCapacityExceeded, SwapchainImagesUnstable, NoSwapchainImages,
+    SwapchainImageCapacityExceeded,
+    SwapchainImagesUnstable,
+    NoSwapchainImages,
     SwapchainUnavailable,
-    InvalidSwapchainGeneration, AcquireEpochExhausted, AcquireSemaphoreInUse,
-    StaleSurfaceTexture, SurfaceNotAcquired, SurfaceSubmissionStaged,
-    SubmissionCapacityExhausted, SerialExhausted, Canceled,
+    InvalidSwapchainGeneration,
+    AcquireEpochExhausted,
+    AcquireSemaphoreInUse,
+    StaleSurfaceTexture,
+    SurfaceNotAcquired,
+    SurfaceSubmissionStaged,
+    SubmissionCapacityExhausted,
+    SerialExhausted,
+    Canceled,
 };
 pub const Backend = struct {
     device: vulkan.VkDevice,
@@ -29,8 +37,12 @@ pub fn nextGeneration(generation: u64) error{SwapchainGenerationExhausted}!u64 {
 }
 pub const Presented = struct { acquire_epoch: u64, serial: u64, result: vulkan.VkResult };
 pub const ImageState = union(enum) {
-    available, acquired: u64, submit_accepted: Accepted,
-    present_pending: Accepted, present_accepted: Presented, stale,
+    available,
+    acquired: u64,
+    submit_accepted: Accepted,
+    present_pending: Accepted,
+    present_accepted: Presented,
+    stale,
 };
 pub const ImageSlot = struct {
     image: vulkan.VkImage = null,
@@ -48,10 +60,19 @@ pub const PresentResult = enum { success, suboptimal, outdated, lost };
 /// Central callback performs vkQueueSubmit with its own tracked fence, advances
 /// its existing timeline only on success, and returns that accepted serial.
 pub const BridgeSubmitError = dispatch.Error || dispatch.LoadError || core.ReferenceError || std.mem.Allocator.Error || error{
-    Canceled, DeviceProcTierMissing, RecordingPoisoned, PendingRecordingNotSubmitted,
-    FencePoolExhausted, FenceCreationReturnedNull, SubmissionCapacityExhausted,
-    SerialExhausted, CommandContextPoolExhausted, CommandPoolCreationReturnedNull,
-    CommandBufferAllocationReturnedNull, ResourceInUse, AllocatorMismatch,
+    Canceled,
+    DeviceProcTierMissing,
+    RecordingPoisoned,
+    PendingRecordingNotSubmitted,
+    FencePoolExhausted,
+    FenceCreationReturnedNull,
+    SubmissionCapacityExhausted,
+    SerialExhausted,
+    CommandContextPoolExhausted,
+    CommandPoolCreationReturnedNull,
+    CommandBufferAllocationReturnedNull,
+    ResourceInUse,
+    AllocatorMismatch,
 };
 pub const SerialOwner = struct {
     context: *anyopaque,
@@ -94,10 +115,14 @@ pub const Native = struct {
         _ = p.queue_present_khr orelse return error.MissingDeviceProc;
         _ = p.queue_wait_idle orelse return error.MissingDeviceProc;
         var self: Native = .{
-            .backend = backend, .handle = null, .generation = generation,
-            .format = info.imageFormat, .extent = info.imageExtent,
+            .backend = backend,
+            .handle = null,
+            .generation = generation,
+            .format = info.imageFormat,
+            .extent = info.imageExtent,
             .image_usage = info.imageUsage,
-            .present_mode = info.presentMode, .queue_family_index = queue_family_index,
+            .present_mode = info.presentMode,
+            .queue_family_index = queue_family_index,
             .acquire_semaphore = null,
         };
         try dispatch.checkVkSuccess(create_swapchain(backend.device, info, null, &self.handle));
@@ -150,13 +175,27 @@ pub const Native = struct {
         const result = acquire_next(self.backend.device, self.handle, timeout_ns, self.acquire_semaphore, null, &index);
         switch (result) {
             vulkan.VK_TIMEOUT, vulkan.VK_NOT_READY => return .timeout,
-            vulkan.VK_ERROR_OUT_OF_DATE_KHR => { self.stale = true; return .outdated; },
-            vulkan.VK_ERROR_SURFACE_LOST_KHR => { self.stale = true; return .lost; },
-            vulkan.VK_ERROR_DEVICE_LOST => { self.stale = true; self.device_lost = true; self.drained = true; return .lost; },
+            vulkan.VK_ERROR_OUT_OF_DATE_KHR => {
+                self.stale = true;
+                return .outdated;
+            },
+            vulkan.VK_ERROR_SURFACE_LOST_KHR => {
+                self.stale = true;
+                return .lost;
+            },
+            vulkan.VK_ERROR_DEVICE_LOST => {
+                self.stale = true;
+                self.device_lost = true;
+                self.drained = true;
+                return .lost;
+            },
             vulkan.VK_SUCCESS, vulkan.VK_SUBOPTIMAL_KHR => {},
             else => try dispatch.checkVkSuccess(result),
         }
-        if (index >= self.image_count) { self.stale = true; return error.StaleSurfaceTexture; }
+        if (index >= self.image_count) {
+            self.stale = true;
+            return error.StaleSurfaceTexture;
+        }
         self.acquire_epoch += 1;
         self.current_index = index;
         self.current_acquire_suboptimal = result == vulkan.VK_SUBOPTIMAL_KHR;
@@ -173,8 +212,14 @@ pub const Native = struct {
         const slot = &self.slots[token.index];
         if (slot.staged) return error.SurfaceSubmissionStaged;
         const wait = switch (slot.state) {
-            .acquired => |epoch| blk: { if (epoch != token.acquire_epoch) return error.StaleSurfaceTexture; break :blk self.acquire_semaphore; },
-            .submit_accepted => |accepted| blk: { if (accepted.acquire_epoch != token.acquire_epoch) return error.StaleSurfaceTexture; break :blk slot.present_semaphore; },
+            .acquired => |epoch| blk: {
+                if (epoch != token.acquire_epoch) return error.StaleSurfaceTexture;
+                break :blk self.acquire_semaphore;
+            },
+            .submit_accepted => |accepted| blk: {
+                if (accepted.acquire_epoch != token.acquire_epoch) return error.StaleSurfaceTexture;
+                break :blk slot.present_semaphore;
+            },
             else => return error.StaleSurfaceTexture,
         };
         slot.staged = true;
@@ -207,18 +252,27 @@ pub const Native = struct {
             const mask: vulkan.VkPipelineStageFlags = vulkan.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             const info: vulkan.VkSubmitInfo = .{
                 .sType = vulkan.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .waitSemaphoreCount = 1, .pWaitSemaphores = &wait, .pWaitDstStageMask = &mask,
-                .signalSemaphoreCount = 1, .pSignalSemaphores = &stage.signal,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &wait,
+                .pWaitDstStageMask = &mask,
+                .signalSemaphoreCount = 1,
+                .pSignalSemaphores = &stage.signal,
             };
             const serial = try serial_owner.submit_fn(serial_owner.context, io, &info);
             self.commitSubmit(stage, serial);
         }
-        const accepted = switch (slot.state) { .submit_accepted => |value| value, else => return error.StaleSurfaceTexture };
+        const accepted = switch (slot.state) {
+            .submit_accepted => |value| value,
+            else => return error.StaleSurfaceTexture,
+        };
         slot.state = .{ .present_pending = accepted };
         const info: vulkan.VkPresentInfoKHR = .{
             .sType = vulkan.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &slot.present_semaphore,
-            .swapchainCount = 1, .pSwapchains = &self.handle, .pImageIndices = &token.index,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &slot.present_semaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &self.handle,
+            .pImageIndices = &token.index,
         };
         const result = present_queue(self.backend.queue, &info);
         self.current_index = null;
@@ -228,10 +282,29 @@ pub const Native = struct {
                 if (result == vulkan.VK_SUBOPTIMAL_KHR) self.reconfigure_needed = true;
                 return if (result == vulkan.VK_SUCCESS) .success else .suboptimal;
             },
-            vulkan.VK_ERROR_OUT_OF_DATE_KHR => { self.stale = true; slot.state = .stale; return .outdated; },
-            vulkan.VK_ERROR_SURFACE_LOST_KHR => { self.stale = true; slot.state = .stale; return .lost; },
-            vulkan.VK_ERROR_DEVICE_LOST => { self.stale = true; self.device_lost = true; self.drained = true; slot.state = .stale; return error.DeviceLost; },
-            else => { self.stale = true; slot.state = .stale; try dispatch.checkVkSuccess(result); unreachable; },
+            vulkan.VK_ERROR_OUT_OF_DATE_KHR => {
+                self.stale = true;
+                slot.state = .stale;
+                return .outdated;
+            },
+            vulkan.VK_ERROR_SURFACE_LOST_KHR => {
+                self.stale = true;
+                slot.state = .stale;
+                return .lost;
+            },
+            vulkan.VK_ERROR_DEVICE_LOST => {
+                self.stale = true;
+                self.device_lost = true;
+                self.drained = true;
+                slot.state = .stale;
+                return error.DeviceLost;
+            },
+            else => {
+                self.stale = true;
+                slot.state = .stale;
+                try dispatch.checkVkSuccess(result);
+                unreachable;
+            },
         }
     }
 
@@ -240,7 +313,12 @@ pub const Native = struct {
     pub fn drain(self: *Native) (dispatch.Error || dispatch.LoadError)!void {
         const idle = self.backend.procs.queue_wait_idle orelse return error.MissingDeviceProc;
         const result = idle(self.backend.queue);
-        if (result == vulkan.VK_ERROR_DEVICE_LOST) { self.stale = true; self.device_lost = true; self.drained = true; return error.DeviceLost; }
+        if (result == vulkan.VK_ERROR_DEVICE_LOST) {
+            self.stale = true;
+            self.device_lost = true;
+            self.drained = true;
+            return error.DeviceLost;
+        }
         try dispatch.checkVkSuccess(result);
         self.drained = true;
     }
@@ -285,7 +363,10 @@ pub const Swapchain = struct {
     /// only after success. Core owns the sole Device .swapchain reference ledger.
     pub fn createLocked(allocator: std.mem.Allocator, io: std.Io, guard: *const core.ObjectGuard, device: *core.Device, options: Options) (Error || core.CreateError)!*Swapchain {
         const self = try device.create(allocator, guard, Swapchain, .{
-            .kind = .swapchain, .state = .initializing, .label = "", .initial_reference = .lease,
+            .kind = .swapchain,
+            .state = .initializing,
+            .label = "",
+            .initial_reference = .lease,
         });
         errdefer self.header.discardUnpublishedLocked(guard) catch @panic("swapchain lease escaped during construction");
         self.native = try Native.create(options.backend, options.create_info, options.generation, options.queue_family_index, options.native_accepted);

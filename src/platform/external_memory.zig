@@ -6,10 +6,7 @@
 //! `MemoryServiceImplementation.{h,cpp}` (2),
 //! `MemoryImportParams.h` (a type, no row) and
 //! `MemoryServiceImplementationOpaqueFD.{h,cpp}` (11) at Dawn revision
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §2 gives the
-//! `platform` module this upstream directory, and `#### M21` carries the
-//! rows.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **One merge, and why.** Dawn holds a `unique_ptr` per `ExternalImageType`
 //! in a `Service` array (`MemoryService.h:89`-`:92`) and reaches each through
@@ -50,8 +47,7 @@ comptime {
 /// A file descriptor standing for an exported memory object.
 ///
 /// Dawn's `ExternalMemoryHandle` (`ExternalHandle.h:53`).
-// A type, so `AGENTS.md` §2 spells it `PascalCase`; `ziglint`'s Z006 resolves
-// no type through a qualified path, so `@TypeOf` names the same descriptor.
+// `@TypeOf` preserves the descriptor type for the file descriptor.
 pub const ExternalMemoryHandle = @TypeOf(@as(std.posix.fd_t, 0));
 
 /// The queue family an exported image belongs to.
@@ -105,8 +101,7 @@ pub const Descriptor = struct {
 /// What `supportsImportMemory` asks the physical device about an image.
 ///
 /// Dawn passes the same five values as parameters
-/// (`MemoryServiceImplementationOpaqueFD.cpp:51`-`:55`); the house rule in
-/// `AGENTS.md` §2 moves them into a struct because they travel together.
+/// (`MemoryServiceImplementationOpaqueFD.cpp:51`-`:55`), grouped because they travel together.
 pub const FormatQuery = struct {
     format: vulkan.VkFormat,
     image_type: vulkan.VkImageType,
@@ -120,7 +115,7 @@ pub const FormatQuery = struct {
 /// Dawn reaches all of it through `Device*`
 /// (`MemoryServiceImplementationOpaqueFD.cpp:44`). The port passes one
 /// struct, so a `Service` can be built and queried with no device behind it,
-/// which is what makes the negative-space tests possible (`AGENTS.md` §3).
+/// which makes device-independent tests possible.
 pub const DeviceOptions = struct {
     physical_device: vulkan.VkPhysicalDevice,
     device: vulkan.VkDevice,
@@ -137,7 +132,7 @@ pub const DeviceOptions = struct {
 ///
 /// `dispatch.LoadError` is joined in whole, as `src/engine/buffer.zig:194`
 /// joins it, because this file reads three device dispatch fields and
-/// `AGENTS.md` §3.1 makes each missing one a typed error. Its four members are
+/// a missing one is a typed error. Its four members are
 /// swept in `src/vk/dispatch.zig`, so the count below carries them.
 pub const Error = dispatch.Error || dispatch.LoadError || error{
     /// `requirements.size` is above `params.allocation_size`. Dawn checks
@@ -363,8 +358,7 @@ pub const Service = struct {
 /// exhaustive Zig enum, so there is no case left for that arm to name.
 ///
 /// `.detect` reads the device and so needs a dispatch field. A loader that
-/// missed one is reported rather than answered, because `AGENTS.md` §3.1 makes
-/// a missing proc a typed error and not a panic. `.yes` and `.no` answer from
+/// missed one reports a typed error, not a panic. `.yes` and `.no` answer from
 /// the request and cannot fail.
 pub fn requiresDedicatedAllocation(
     device: vulkan.VkDevice,
@@ -418,17 +412,16 @@ const empty_procs_branch_budget: u32 = 100_000;
 
 /// Fails to compile when a field of `table` is non-null.
 ///
-/// `AGENTS.md` §3.1 makes a missing proc a typed error, so the property an
-/// empty table has to hold is that nothing in it is loaded. Nothing below
-/// would notice a default value added to a `dispatch.zig` field, and the
+/// An empty proc table must have nothing loaded.
+/// Nothing below would notice a default value added to a `dispatch.zig` field, and the
 /// field name is what says which one changed.
 fn assertAllProcsNull(comptime Procs: type, comptime table: *const Procs) void {
     @setEvalBranchQuota(empty_procs_branch_budget);
-    for (@typeInfo(Procs).@"struct".fields) |field| {
-        if (@field(table, field.name) != null) {
+    for (@typeInfo(Procs).@"struct".field_names) |field_name| {
+        if (@field(table, field_name) != null) {
             @compileError(std.fmt.comptimePrint(
                 "{s}.{s} is non-null in an empty proc table",
-                .{ @typeName(Procs), field.name },
+                .{ @typeName(Procs), field_name },
             ));
         }
     }
@@ -476,17 +469,15 @@ test "a service built without the extension answers no to every query" {
 }
 
 test "every member of the error set is named" {
-    // `AGENTS.md` §3 asks that every member be named, so a failure names the
-    // member and not the set. `@typeInfo` hands back a name per member rather
-    // than an error value, and that is what this sweep reads.
-    for (@typeInfo(Error).error_set.?) |member| {
-        try std.testing.expect(member.name.len > 0);
+    // Reflection exposes each error name without an error value.
+    for (@typeInfo(Error).error_set.error_names.?) |member_name| {
+        try std.testing.expect(member_name.len > 0);
     }
     // Dispatch sweeps driver and loader errors. The three service guards
     // (allocation size, handle, and memory type) are exercised below.
     try std.testing.expect(
-        @typeInfo(Error).error_set.?.len ==
-            @typeInfo(dispatch.Error).error_set.?.len + 7,
+        @typeInfo(Error).error_set.error_names.?.len ==
+            @typeInfo(dispatch.Error).error_set.error_names.?.len + 7,
     );
 }
 

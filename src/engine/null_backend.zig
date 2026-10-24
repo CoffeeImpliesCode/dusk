@@ -1,7 +1,6 @@
 //! The null back end: one device that is created without a GPU.
 //!
-//! Ports `src/dawn/native/null/{DeviceNull.h,DeviceNull.cpp}` — 84 of the 451
-//! rows in `docs/40-plan.md` §3.3 `#### M8`.
+//! Ports `src/dawn/native/null/{DeviceNull.h,DeviceNull.cpp}`.
 //!
 //! **What this file does not claim.** It does not claim a queue, a buffer, a
 //! texture, a bind group, a pipeline or a swap chain. Upstream's `null::Device`
@@ -69,8 +68,8 @@ pub fn createPhysicalDevice() PhysicalDevice {
 
     // `InitializeSupportedFeaturesImpl` (`DeviceNull.cpp:91-96`). The bound is
     // the domain itself: every member, once.
-    inline for (@typeInfo(features.Feature).@"enum".fields) |field| {
-        device.enableFeature(@field(features.Feature, field.name));
+    inline for (@typeInfo(features.Feature).@"enum".field_names) |field_name| {
+        device.enableFeature(@field(features.Feature, field_name));
     }
     return device;
 }

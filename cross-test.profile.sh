@@ -24,9 +24,6 @@ CROSS_BUILD_STEP=cross-test
 # They use injected Vulkan procedures, not a foreign loader or device.
 # Native GPU readback remains a separate acceptance check.
 #
-# The matrix grows as the port lands. `docs/40-plan.md` names the milestone
-# that adds rows and the reason for each: riscv64 and loongarch64 for wider
-# architecture coverage, and x86-linux for 32-bit pointer and alignment bugs.
 CROSS_MATRIX=(
    'x86_64-linux|auto'
    'aarch64-linux|auto'

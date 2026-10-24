@@ -1124,8 +1124,8 @@ pub fn record(entry: Entry) Record {
 }
 
 test "every API entry is ported" {
-    inline for (@typeInfo(Entry).@"enum".fields) |field| {
-        const entry: Entry = @enumFromInt(field.value);
+    inline for (@typeInfo(Entry).@"enum".field_values) |field_value| {
+        const entry: Entry = @fromBackingInt(@intCast(field_value));
         try std.testing.expectEqual(Coverage.ported, coverage(entry));
     }
 }
@@ -1147,16 +1147,16 @@ fn expectEntryChaining(entry: Entry) !void {
 }
 
 test "a chained struct belongs to a root and an extension to none" {
-    inline for (@typeInfo(Entry).@"enum".fields) |field| {
-        try expectEntryChaining(@enumFromInt(field.value));
+    inline for (@typeInfo(Entry).@"enum".field_values) |field_value| {
+        try expectEntryChaining(@fromBackingInt(@intCast(field_value)));
     }
 }
 
 test "the per-entry table sums to the totals" {
     var methods: usize = 0;
     var members: usize = 0;
-    inline for (@typeInfo(Entry).@"enum".fields) |field| {
-        const entry: Entry = @enumFromInt(field.value);
+    inline for (@typeInfo(Entry).@"enum".field_values) |field_value| {
+        const entry: Entry = @fromBackingInt(@intCast(field_value));
         methods += record(entry).methods;
         members += record(entry).members;
     }

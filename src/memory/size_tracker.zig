@@ -18,8 +18,7 @@
 //! `Decrement` only records the size against a serial
 //! (`PooledResourceMemoryAllocator.cpp:84-88`). The subtraction happens when the
 //! completed serial passes, so a freed allocation keeps counting until the GPU is
-//! past the work that read it. The end state is unchanged — which is what
-//! `docs/40-plan.md:297-299` asserts, cycle by cycle.
+//! past the work that read it. The end state is unchanged.
 //!
 //! **Two defects are not copied.** `GetSize` (`.h:78`) reads `mTotalSize` with
 //! no mutex while every writer takes `mMutex`, which is a data race; this port
@@ -37,9 +36,8 @@ const SerialQueue = serial.SerialQueue(u64);
 
 /// A byte count released by serial.
 pub const SizeTracker = struct {
-    /// `mMutex` (`PooledResourceMemoryAllocator.h:85`). `std.Io.Mutex` because
-    /// that is what `AGENTS.md` §3 and `src/platform/threads.zig:50` use; there
-    /// is no non-`Io` mutex in Zig 0.16.
+    /// `mMutex` (`PooledResourceMemoryAllocator.h:85`), using the same `Io` mutex
+    /// as `src/platform/threads.zig`.
     mutex: std.Io.Mutex = .init,
 
     /// `mTotalSize` (`PooledResourceMemoryAllocator.h:87`). Guarded by `mutex`
@@ -190,7 +188,7 @@ comptime {
     // `error.SerialOrderViolation` from
     // `SerialQueue.enqueueMonotonic` (`src/platform/serial.zig:110`).
     // `test/memory.zig` sweeps the set and names each one.
-    if (@typeInfo(SizeTracker.OperationError).error_set.?.len != 4) {
+    if (@typeInfo(SizeTracker.OperationError).error_set.error_names.?.len != 4) {
         @compileError("a SizeTracker error member is unnamed in src/memory/size_tracker.zig");
     }
 }

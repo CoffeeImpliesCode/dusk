@@ -29,7 +29,7 @@ const ArenaFixture = struct {
         self.device.bindTrackingOwner(&self.guard, self);
         errdefer self.deinit();
         const value = try attachment.AttachmentState.fromRenderPipeline(.{
-            .color_formats = &.{@intFromEnum(dusk.api.TextureFormat.rgba8_unorm)},
+            .color_formats = &.{@backingInt(dusk.api.TextureFormat.rgba8_unorm)},
             .depth_stencil_format = 0,
             .sample_count = 1,
             .expand_resolve = .{},

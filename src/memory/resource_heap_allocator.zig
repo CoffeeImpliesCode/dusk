@@ -11,9 +11,8 @@
 //! (`BuddyMemoryAllocatorTests.cpp:40-46`), `SingleTypeAllocator`
 //! (`ResourceMemoryAllocatorVk.cpp:61`, M11) and `d3d12::HeapAllocator`
 //! (`HeapAllocatorD3D12.h:45`, not ported). A comptime parameter would make every
-//! consumer monomorphic over all four. A two-entry table keeps the seam where
-//! `AGENTS.md` §3 puts it, at the boundary, with the concrete type behind an
-//! opaque context.
+//! consumer monomorphic over all four. A two-entry table keeps the seam at the
+//! boundary, with the concrete type behind an opaque context.
 //!
 //! **What this file does not claim.** It does not claim a Vulkan heap. The only
 //! implementor in this milestone is the pool and the test fake; M11 supplies the
@@ -34,7 +33,7 @@ const Heap = @import("resource_heap.zig").Heap;
 
 /// What a heap allocator can report.
 ///
-/// `AGENTS.md` §2: an API declares its own error set and never leaks `anyerror`.
+/// The API declares its error set rather than exposing `anyerror`.
 pub const Error = error{
     /// `vkAllocateMemory` returned `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
     OutOfDeviceMemory,
@@ -55,8 +54,8 @@ pub const AllocateError = std.mem.Allocator.Error || Error;
 /// The two methods `ResourceHeapAllocator.h:43-45` declares.
 ///
 /// `allocateResourceHeap` receives the allocator because the heap it returns may
-/// be heap-allocated; a vtable that closed over one would be a hidden allocator
-/// and `AGENTS.md` §3 forbids that. `deallocateResourceHeap` receives no
+/// be heap-allocated; a vtable that closed over one would hide an allocation.
+/// `deallocateResourceHeap` receives no
 /// allocator because it destroys what it was handed, exactly as upstream takes
 /// the `unique_ptr` by value and drops it.
 pub const VTable = struct {

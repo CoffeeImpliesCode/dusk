@@ -14,8 +14,12 @@ pub const usageMaskPrecedes = usage_helpers.usageMaskPrecedes;
 pub const textureUsageFlags = usage_helpers.textureUsageFlags;
 pub const NeedsDedicatedAllocation = legacy.NeedsDedicatedAllocation;
 pub const Error = legacy.Error || std.mem.Allocator.Error || error{
-    InvalidImageCreateInfo, InvalidImageCreateChain, InvalidExternalMemoryFormat,
-    DuplicateFailed, MemoryBindFailed, UnsupportedExternalMemory,
+    InvalidImageCreateInfo,
+    InvalidImageCreateChain,
+    InvalidExternalMemoryFormat,
+    DuplicateFailed,
+    MemoryBindFailed,
+    UnsupportedExternalMemory,
 };
 
 pub const OwnedImageCreateInfo = struct {
@@ -74,9 +78,18 @@ pub const OwnedImageCreateInfo = struct {
 
     pub fn borrowedInfo(self: *OwnedImageCreateInfo) vk.VkImageCreateInfo {
         var next: ?*const anyopaque = null;
-        if (self.stencil) |*stencil| { stencil.pNext = next; next = stencil; }
-        if (self.list) |*list| { list.pNext = next; next = list; }
-        if (self.external) |*external| { external.pNext = next; next = external; }
+        if (self.stencil) |*stencil| {
+            stencil.pNext = next;
+            next = stencil;
+        }
+        if (self.list) |*list| {
+            list.pNext = next;
+            next = list;
+        }
+        if (self.external) |*external| {
+            external.pNext = next;
+            next = external;
+        }
         var info = self.info;
         info.pNext = next;
         return info;
@@ -95,7 +108,7 @@ pub fn validateImageInfo(info: vk.VkImageCreateInfo) Error!void {
         info.samples != vk.VK_SAMPLE_COUNT_1_BIT or info.sharingMode != vk.VK_SHARING_MODE_EXCLUSIVE or
         info.queueFamilyIndexCount != 0 or info.pQueueFamilyIndices != null or info.usage == 0 or
         info.format == vk.VK_FORMAT_UNDEFINED or info.flags &
-            (vk.VK_IMAGE_CREATE_DISJOINT_BIT | vk.VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+        (vk.VK_IMAGE_CREATE_DISJOINT_BIT | vk.VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
             vk.VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | vk.VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
             vk.VK_IMAGE_CREATE_PROTECTED_BIT) != 0 or
         (info.tiling != vk.VK_IMAGE_TILING_OPTIMAL and info.tiling != vk.VK_IMAGE_TILING_LINEAR) or
@@ -144,62 +157,70 @@ pub fn importOpaqueFd(
     options: DeviceOptions,
     descriptor: OpaqueFdDescriptor,
 ) Error!ImportedTexture {
-        if (!options.capabilities.external_memory_opaque_fd) return error.UnsupportedExternalMemory;
-        if (descriptor.fd < 0) return error.InvalidMemoryHandle;
-        var owned = try OwnedImageCreateInfo.init(allocator, descriptor.image_info);
-        defer owned.deinit(allocator);
-        var info = owned.borrowedInfo();
-        const query = options.instance_procs.get_physical_device_image_format_properties2 orelse return error.MissingInstanceProc;
-        var external_query: vk.VkPhysicalDeviceExternalImageFormatInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, .handleType = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
-        // Query the same known view-format and stencil usage constraints as creation.
-        var query_list = owned.list;
-        var query_stencil = owned.stencil;
-        if (query_stencil) |*stencil| { stencil.pNext = null; external_query.pNext = stencil; }
-        if (query_list) |*list| { list.pNext = external_query.pNext; external_query.pNext = list; }
-        var format_query: vk.VkPhysicalDeviceImageFormatInfo2 = .{ .sType = vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, .pNext = &external_query, .format = info.format, .type = info.imageType, .tiling = info.tiling, .usage = info.usage, .flags = info.flags };
-        var external_properties: vk.VkExternalImageFormatProperties = .{ .sType = vk.VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
-        var properties: vk.VkImageFormatProperties2 = .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, .pNext = &external_properties };
-        const query_result = query(options.physical_device, &format_query, &properties);
-        if (query_result == vk.VK_ERROR_FORMAT_NOT_SUPPORTED) return error.InvalidExternalMemoryFormat;
-        try dispatch.checkVkSuccess(query_result);
-        const external = external_properties.externalMemoryProperties;
-        if (external.externalMemoryFeatures & vk.VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT == 0 or
-            external.compatibleHandleTypes & vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT == 0 or
-            info.extent.width > properties.imageFormatProperties.maxExtent.width or info.extent.height > properties.imageFormatProperties.maxExtent.height or
-            info.mipLevels > properties.imageFormatProperties.maxMipLevels or info.arrayLayers > properties.imageFormatProperties.maxArrayLayers or
-            properties.imageFormatProperties.sampleCounts & info.samples == 0) return error.InvalidExternalMemoryFormat;
-        const create = options.device_procs.create_image orelse return error.MissingDeviceProc;
-        const destroy = options.device_procs.destroy_image orelse return error.MissingDeviceProc;
-        const allocate = options.device_procs.allocate_memory orelse return error.MissingDeviceProc;
-        const free = options.device_procs.free_memory orelse return error.MissingDeviceProc;
-        const bind = options.device_procs.bind_image_memory orelse return error.MissingDeviceProc;
-        const requirements_proc = options.device_procs.get_image_memory_requirements2 orelse return error.MissingDeviceProc;
-        var external_create: vk.VkExternalMemoryImageCreateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, .handleTypes = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
-        if (owned.external == null) { external_create.pNext = info.pNext; info.pNext = &external_create; }
-        var image: vk.VkImage = null;
-        try dispatch.checkVkSuccess(create(options.device, &info, null, &image));
-        errdefer destroy(options.device, image, null);
-        var dedicated: vk.VkMemoryDedicatedRequirements = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
-        var requirements: vk.VkMemoryRequirements2 = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, .pNext = &dedicated };
-        const requirements_info: vk.VkImageMemoryRequirementsInfo2 = .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = image };
-        requirements_proc(options.device, &requirements_info, &requirements);
-        if (descriptor.allocation_size < requirements.memoryRequirements.size) return error.AllocationTooSmall;
-        if (descriptor.memory_type_index >= 32 or requirements.memoryRequirements.memoryTypeBits & (@as(u32, 1) << @intCast(descriptor.memory_type_index)) == 0) return error.InvalidMemoryType;
-        const dedicated_required = dedicated.requiresDedicatedAllocation != 0 or external.externalMemoryFeatures & vk.VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT != 0;
-        if (descriptor.dedicated_allocation == .no and dedicated_required) return error.InvalidImageCreateInfo;
-        const use_dedicated = descriptor.dedicated_allocation == .yes or dedicated_required or
-            (descriptor.dedicated_allocation == .detect and dedicated.prefersDedicatedAllocation != 0);
-        const fd = try duplicateMemoryFd(io, descriptor.fd);
-        var consumed = false;
-        defer if (!consumed) closeMemoryFd(io, fd);
-        var dedicated_info: vk.VkMemoryDedicatedAllocateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .image = image };
-        var import_info: vk.VkImportMemoryFdInfoKHR = .{ .sType = vk.VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, .pNext = if (use_dedicated) &dedicated_info else null, .handleType = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, .fd = fd };
-        const allocate_info: vk.VkMemoryAllocateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &import_info, .allocationSize = descriptor.allocation_size, .memoryTypeIndex = descriptor.memory_type_index };
-        var memory: vk.VkDeviceMemory = null;
-        try dispatch.checkVkSuccess(allocate(options.device, &allocate_info, null, &memory));
-        consumed = true;
-        errdefer free(options.device, memory, null);
-        try dispatch.checkVkSuccess(bind(options.device, image, memory, 0));
-        return .{ .image = image, .memory = memory, .format = info.format, .size = info.extent, .usage = info.usage,
-            .mip_levels = info.mipLevels, .array_layers = info.arrayLayers, .sample_count = info.samples, .initial_layout = info.initialLayout };
+    if (!options.capabilities.external_memory_opaque_fd) return error.UnsupportedExternalMemory;
+    if (descriptor.fd < 0) return error.InvalidMemoryHandle;
+    var owned = try OwnedImageCreateInfo.init(allocator, descriptor.image_info);
+    defer owned.deinit(allocator);
+    var info = owned.borrowedInfo();
+    const query = options.instance_procs.get_physical_device_image_format_properties2 orelse return error.MissingInstanceProc;
+    var external_query: vk.VkPhysicalDeviceExternalImageFormatInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, .handleType = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    // Query the same known view-format and stencil usage constraints as creation.
+    var query_list = owned.list;
+    var query_stencil = owned.stencil;
+    if (query_stencil) |*stencil| {
+        stencil.pNext = null;
+        external_query.pNext = stencil;
     }
+    if (query_list) |*list| {
+        list.pNext = external_query.pNext;
+        external_query.pNext = list;
+    }
+    var format_query: vk.VkPhysicalDeviceImageFormatInfo2 = .{ .sType = vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, .pNext = &external_query, .format = info.format, .type = info.imageType, .tiling = info.tiling, .usage = info.usage, .flags = info.flags };
+    var external_properties: vk.VkExternalImageFormatProperties = .{ .sType = vk.VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+    var properties: vk.VkImageFormatProperties2 = .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, .pNext = &external_properties };
+    const query_result = query(options.physical_device, &format_query, &properties);
+    if (query_result == vk.VK_ERROR_FORMAT_NOT_SUPPORTED) return error.InvalidExternalMemoryFormat;
+    try dispatch.checkVkSuccess(query_result);
+    const external = external_properties.externalMemoryProperties;
+    if (external.externalMemoryFeatures & vk.VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT == 0 or
+        external.compatibleHandleTypes & vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT == 0 or
+        info.extent.width > properties.imageFormatProperties.maxExtent.width or info.extent.height > properties.imageFormatProperties.maxExtent.height or
+        info.mipLevels > properties.imageFormatProperties.maxMipLevels or info.arrayLayers > properties.imageFormatProperties.maxArrayLayers or
+        properties.imageFormatProperties.sampleCounts & info.samples == 0) return error.InvalidExternalMemoryFormat;
+    const create = options.device_procs.create_image orelse return error.MissingDeviceProc;
+    const destroy = options.device_procs.destroy_image orelse return error.MissingDeviceProc;
+    const allocate = options.device_procs.allocate_memory orelse return error.MissingDeviceProc;
+    const free = options.device_procs.free_memory orelse return error.MissingDeviceProc;
+    const bind = options.device_procs.bind_image_memory orelse return error.MissingDeviceProc;
+    const requirements_proc = options.device_procs.get_image_memory_requirements2 orelse return error.MissingDeviceProc;
+    var external_create: vk.VkExternalMemoryImageCreateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, .handleTypes = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    if (owned.external == null) {
+        external_create.pNext = info.pNext;
+        info.pNext = &external_create;
+    }
+    var image: vk.VkImage = null;
+    try dispatch.checkVkSuccess(create(options.device, &info, null, &image));
+    errdefer destroy(options.device, image, null);
+    var dedicated: vk.VkMemoryDedicatedRequirements = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+    var requirements: vk.VkMemoryRequirements2 = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, .pNext = &dedicated };
+    const requirements_info: vk.VkImageMemoryRequirementsInfo2 = .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = image };
+    requirements_proc(options.device, &requirements_info, &requirements);
+    if (descriptor.allocation_size < requirements.memoryRequirements.size) return error.AllocationTooSmall;
+    if (descriptor.memory_type_index >= 32 or requirements.memoryRequirements.memoryTypeBits & (@as(u32, 1) << @intCast(descriptor.memory_type_index)) == 0) return error.InvalidMemoryType;
+    const dedicated_required = dedicated.requiresDedicatedAllocation != 0 or external.externalMemoryFeatures & vk.VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT != 0;
+    if (descriptor.dedicated_allocation == .no and dedicated_required) return error.InvalidImageCreateInfo;
+    const use_dedicated = descriptor.dedicated_allocation == .yes or dedicated_required or
+        (descriptor.dedicated_allocation == .detect and dedicated.prefersDedicatedAllocation != 0);
+    const fd = try duplicateMemoryFd(io, descriptor.fd);
+    var consumed = false;
+    defer if (!consumed) closeMemoryFd(io, fd);
+    var dedicated_info: vk.VkMemoryDedicatedAllocateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .image = image };
+    var import_info: vk.VkImportMemoryFdInfoKHR = .{ .sType = vk.VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, .pNext = if (use_dedicated) &dedicated_info else null, .handleType = vk.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, .fd = fd };
+    const allocate_info: vk.VkMemoryAllocateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &import_info, .allocationSize = descriptor.allocation_size, .memoryTypeIndex = descriptor.memory_type_index };
+    var memory: vk.VkDeviceMemory = null;
+    try dispatch.checkVkSuccess(allocate(options.device, &allocate_info, null, &memory));
+    consumed = true;
+    errdefer free(options.device, memory, null);
+    try dispatch.checkVkSuccess(bind(options.device, image, memory, 0));
+    return .{ .image = image, .memory = memory, .format = info.format, .size = info.extent, .usage = info.usage, .mip_levels = info.mipLevels, .array_layers = info.arrayLayers, .sample_count = info.samples, .initial_layout = info.initialLayout };
+}

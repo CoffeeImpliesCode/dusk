@@ -1,13 +1,13 @@
 //! The M2 shard: the generated `src/api` still agrees with `dawn.json`.
 //!
-//! `tools/gen_api.zig` reads `dawn.json` and writes `src/api`. This file is
-//! the other half of that claim: it names the three counts `docs/40-plan.md`
-//! section M2 fixes and sweeps every enumerable domain the generator emits.
+//! `tools/gen_api.zig` reads `dawn.json` and writes `src/api`. This file checks
+//! the pinned object, method and member counts and sweeps every enumerable
+//! domain the generator emits.
 //! A new upstream entry, method or member moves a count and fails here.
 //!
 //! **What this file does not claim.** It does not claim a `dawn.json` was
 //! read. The generator read it; this file checks what the generator wrote
-//! against the numbers the plan recorded when it read the same revision.
+//! against the pinned counts below.
 //!
 //! **The import is `@import("dusk")`.** The published module exposes `api`
 //! through `src/root.zig`, and this shard reaches the library through it like
@@ -21,7 +21,7 @@ const enums = api.enums;
 const handled = api.handled;
 
 /// The census `docs/30-port-design.md` section 8.1 records for the pinned
-/// Dawn revision, and the row budget `docs/40-plan.md` section M2 fixes.
+/// Dawn revision.
 const object_count = 347;
 const method_count = 205;
 const member_count = 571;
@@ -38,8 +38,8 @@ test "the census is 347 objects, 205 methods and 571 members" {
     try std.testing.expectEqual(object_count, handled.entry_count);
     try std.testing.expectEqual(method_count, handled.method_count);
     try std.testing.expectEqual(member_count, handled.member_count);
-    try std.testing.expectEqual(object_count, @typeInfo(handled.Entry).@"enum".fields.len);
-    try std.testing.expectEqual(method_count, @typeInfo(api.proc.ProcTable).@"struct".fields.len);
+    try std.testing.expectEqual(object_count, @typeInfo(handled.Entry).@"enum".field_names.len);
+    try std.testing.expectEqual(method_count, @typeInfo(api.proc.ProcTable).@"struct".field_names.len);
 }
 
 test "the generated domains are the ones the plan records" {
@@ -49,8 +49,8 @@ test "the generated domains are the ones the plan records" {
 }
 
 test "every API entry is ported" {
-    inline for (@typeInfo(handled.Entry).@"enum".fields) |field| {
-        const entry: handled.Entry = @enumFromInt(field.value);
+    inline for (@typeInfo(handled.Entry).@"enum".field_values) |field_value| {
+        const entry: handled.Entry = @fromBackingInt(@intCast(field_value));
         try std.testing.expectEqual(handled.Coverage.ported, handled.coverage(entry));
     }
 }
@@ -58,8 +58,8 @@ test "every API entry is ported" {
 test "the per-entry table sums to the totals" {
     var methods: usize = 0;
     var members: usize = 0;
-    inline for (@typeInfo(handled.Entry).@"enum".fields) |field| {
-        const entry: handled.Entry = @enumFromInt(field.value);
+    inline for (@typeInfo(handled.Entry).@"enum".field_values) |field_value| {
+        const entry: handled.Entry = @fromBackingInt(@intCast(field_value));
         const counts = handled.record(entry);
         methods += counts.methods;
         members += counts.members;
@@ -69,21 +69,21 @@ test "the per-entry table sums to the totals" {
 }
 
 test "a chained struct belongs to a root and an extension to none" {
-    inline for (@typeInfo(handled.Entry).@"enum".fields) |field| {
-        const entry: handled.Entry = @enumFromInt(field.value);
+    inline for (@typeInfo(handled.Entry).@"enum".field_values) |field_value| {
+        const entry: handled.Entry = @fromBackingInt(@intCast(field_value));
         const counts = handled.record(entry);
         try std.testing.expectEqual(counts.chain_members, counts.extension_slots);
     }
 }
 
-test "every enum tag round-trips through @intFromEnum" {
+test "every enum tag round-trips through @backingInt" {
     // One function instantiation per enum kind, each analysed on its own: the
     // tag type is a `type`, which exists only at comptime, so the sweep needs a
     // comptime-known `kind`. Unrolling all 65 kinds into a single block also
     // multiplies every tag into one body and exceeds the branch quota, while
     // 65 single-kind instantiations stay under it.
-    inline for (@typeInfo(enums.Enum).@"enum".fields) |kind| {
-        try roundTripEnum(@enumFromInt(kind.value));
+    inline for (@typeInfo(enums.Enum).@"enum".field_values) |kind_value| {
+        try roundTripEnum(@fromBackingInt(@intCast(kind_value)));
     }
 }
 
@@ -91,10 +91,11 @@ test "every enum tag round-trips through @intFromEnum" {
 /// kind, so each instantiation names one tag type and unrolls one tag list.
 fn roundTripEnum(comptime kind: enums.Enum) !void {
     const tag_type = comptime enums.tagType(kind);
-    inline for (@typeInfo(tag_type).@"enum".fields) |tag| {
-        const value: tag_type = @enumFromInt(tag.value);
-        try std.testing.expectEqual(tag.value, @intFromEnum(value));
-        try std.testing.expectEqualStrings(tag.name, @tagName(value));
+    const info = @typeInfo(tag_type).@"enum";
+    inline for (info.field_names, info.field_values) |tag_name, tag_value| {
+        const value: tag_type = @fromBackingInt(@intCast(tag_value));
+        try std.testing.expectEqual(tag_value, @backingInt(value));
+        try std.testing.expectEqualStrings(tag_name, @tagName(value));
     }
 }
 

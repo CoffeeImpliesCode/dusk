@@ -77,7 +77,9 @@ fn createImage(_: vk.VkDevice, info: [*c]const vk.VkImageCreateInfo, _: [*c]cons
     out.* = @ptrFromInt(0x1000);
     return vk.VK_SUCCESS;
 }
-fn destroyImage(_: vk.VkDevice, _: vk.VkImage, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void { destroyed += 1; }
+fn destroyImage(_: vk.VkDevice, _: vk.VkImage, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    destroyed += 1;
+}
 fn imageRequirements(_: vk.VkDevice, _: [*c]const vk.VkImageMemoryRequirementsInfo2, out: [*c]vk.VkMemoryRequirements2) callconv(.c) void {
     out.*.memoryRequirements = .{ .size = 64, .alignment = 16, .memoryTypeBits = 1 };
     const dedicated: *vk.VkMemoryDedicatedRequirements = @ptrCast(@alignCast(out.*.pNext.?));
@@ -94,7 +96,9 @@ fn allocateMemory(_: vk.VkDevice, info: [*c]const vk.VkMemoryAllocateInfo, _: [*
     out.* = @ptrFromInt(0x2000);
     return vk.VK_SUCCESS;
 }
-fn freeMemory(_: vk.VkDevice, _: vk.VkDeviceMemory, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void { freed += 1; }
+fn freeMemory(_: vk.VkDevice, _: vk.VkDeviceMemory, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
+    freed += 1;
+}
 fn bindMemory(_: vk.VkDevice, _: vk.VkImage, _: vk.VkDeviceMemory, _: vk.VkDeviceSize) callconv(.c) vk.VkResult {
     return if (native_failure == .bind) vk.VK_ERROR_DEVICE_LOST else vk.VK_SUCCESS;
 }
@@ -119,7 +123,9 @@ test "OpaqueFD allocate transfer and bind rollback preserve caller FD" {
     const options: external.DeviceOptions = .{ .physical_device = null, .device = null, .instance_procs = &ip, .device_procs = &dp, .enabled_extensions = .{}, .capabilities = &caps, .platform_device_procs = &platform_procs };
     const info: vk.VkImageCreateInfo = .{ .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = vk.VK_IMAGE_TYPE_2D, .format = vk.VK_FORMAT_R8G8B8A8_UNORM, .extent = .{ .width = 4, .height = 4, .depth = 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = vk.VK_SAMPLE_COUNT_1_BIT, .tiling = vk.VK_IMAGE_TILING_OPTIMAL, .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT, .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE, .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED };
     const descriptor: external.OpaqueFdDescriptor = .{ .image_info = &info, .fd = file.handle, .allocation_size = 64, .memory_type_index = 0 };
-    created = 0; destroyed = 0; freed = 0;
+    created = 0;
+    destroyed = 0;
+    freed = 0;
     native_failure = .allocate;
     try std.testing.expectError(error.OutOfDeviceMemory, external.importOpaqueFd(std.testing.allocator, io, options, descriptor));
     try std.testing.expect(seen_fd != file.handle);

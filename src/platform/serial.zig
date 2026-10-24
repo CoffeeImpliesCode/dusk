@@ -4,9 +4,7 @@
 //! (`src/dawn/native/ExecutionQueue.h:73`, `src/dawn/native/ExecutionQueue.cpp`)
 //! and of the containers it drains into (`src/dawn/common/SerialStorage.h`,
 //! `src/dawn/common/SerialQueue.h`, `src/dawn/common/SerialMap.h`). Dawn
-//! revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. `docs/40-plan.md` §3.3 carries
-//! the rows.
+//! revision `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **What this file does not claim.** It does not claim the queue back end. Every
 //! `SubmitPendingCommandsImpl` (`ExecutionQueue.h:182`),
@@ -15,8 +13,8 @@
 //! answers (`QueueVk.cpp:298`, `:132`, `:163`), and `QueueVk` lands in M9.
 //!
 //! **`io` is a parameter, not a field.** `docs/30-port-design.md` §7.2 shows the
-//! timeline holding its `Io`. The port does not, because `AGENTS.md` §3 makes
-//! `io` a parameter of every call that can block, and because a test that builds
+//! timeline holding its `Io`. The port takes `io` as a parameter of every call
+//! that can block, because a test that builds
 //! its own `Io` is the only way to drive a wait deterministically.
 
 const std = @import("std");

@@ -71,7 +71,7 @@ pub fn formatCode(format: api.TextureFormat) error{InvalidKernelKey}!u32 {
 }
 
 fn code(kind: FormatKind, channels: u4) u32 {
-    return @as(u32, @intFromEnum(kind)) | (@as(u32, channels) << 8);
+    return @as(u32, @backingInt(kind)) | (@as(u32, channels) << 8);
 }
 
 pub fn texelByteSize(format: api.TextureFormat) error{InvalidKernelKey}!u32 {

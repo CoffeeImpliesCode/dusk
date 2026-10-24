@@ -733,7 +733,7 @@ test "public auto layout derives only public storage permissions" {
         });
         try std.testing.expectEqual(
             if (read_only) layout.BufferBindingType.read_only_storage else .storage,
-            derived.buffer.binding_type,
+            derived.buffer.?.binding_type,
         );
     }
 }
@@ -749,9 +749,9 @@ test "public auto layout keeps declared float and depth sampled types distinct" 
         .image_sampled = 1,
     };
     const ordinary = try deriveBinding(binding);
-    try std.testing.expectEqual(layout.TextureSampleType.float_filterable, ordinary.sampled_texture.sample_type);
+    try std.testing.expectEqual(layout.TextureSampleType.float_filterable, ordinary.sampled_texture.?.sample_type);
     binding.image_depth = true;
     binding.image_depth_mode = 1;
     const depth = try deriveBinding(binding);
-    try std.testing.expectEqual(layout.TextureSampleType.depth, depth.sampled_texture.sample_type);
+    try std.testing.expectEqual(layout.TextureSampleType.depth, depth.sampled_texture.?.sample_type);
 }

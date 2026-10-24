@@ -8,7 +8,7 @@
 //! **Every message the port produces is unanchored.** Dawn anchors a message
 //! to a WGSL file: `AddMessage` (`CompilationMessages.cpp:116-181`) recomputes
 //! all six positions and both UTF-16 counters from the file content. The port
-//! parses no WGSL (`AGENTS.md` §3.2) and its one failure names the rule
+//! parses no WGSL and its one failure names the rule
 //! `spirv.validate` broke, not a line of a source file, so every position is
 //! zero. That is what `AddUnanchoredMessage` writes
 //! (`CompilationMessages.cpp:88-97`), which is why the UTF-16 counting

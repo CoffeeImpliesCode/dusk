@@ -8,8 +8,8 @@
 //!
 //! **What this file does not claim.** It does not claim a compute pipeline.
 //! `GetOrCreateTextureToBufferPipeline` (`:961`) assembles WGSL text for the
-//! forty formats its switch at `:1057-1426` names, and `AGENTS.md` §3.2 forbids a
-//! WGSL front end in the library. It does not claim the thirty-eight formats in
+//! forty formats its switch at `:1057-1426` names; the library has no WGSL
+//! front end. It does not claim the thirty-eight formats in
 //! its own allowlist that its pack does not lay out:
 //! `isFormatSupportedByTextureToBufferBlit` answers the family contract, and
 //! `blitTextureToBuffer` answers for the texels it can pack, which are the two
@@ -292,8 +292,7 @@ pub fn destinationByteOffset(
 /// where one block is one texel.
 ///
 /// The last row contributes its true length and not its padded one. For a 4x4
-/// `rgba8unorm` at a 256-byte pitch that is `256 * 3 + 16`, which
-/// `docs/50-verification.md:281-282` states for the staging size.
+/// `rgba8unorm` at a 256-byte pitch that is `256 * 3 + 16`.
 pub fn computeRequiredBytesInCopy(
     bytes_per_block: u32,
     copy_extent: Extent3D,
@@ -720,9 +719,8 @@ fn readChannels(request: Request, texel: [3]u32) Error!Texel {
 /// Copy `request.source_bytes` into `destination_bytes` at the request's row
 /// pitch, the way Dawn's compute dispatch does.
 ///
-/// The destination is the caller's buffer and not an allocation: `AGENTS.md` §2
-/// forbids a hidden allocation, and the acceptance needs the row padding left
-/// untouched, which a freshly allocated buffer would hide.
+/// The destination is the caller's buffer, not an allocation, so row padding
+/// remains untouched.
 ///
 /// The loop walks the copy rectangle, so every texel is bounded by
 /// `copy_extent`. The destination address is `destinationByteOffset`, the

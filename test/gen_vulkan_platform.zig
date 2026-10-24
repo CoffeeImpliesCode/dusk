@@ -41,8 +41,7 @@ test "header pin accepts only the official version macro" {
 test "linux emission contains only official includes and platform macros" {
     const bytes = try render(.linux_vulkan, false);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualStrings(
-        "#define VK_USE_PLATFORM_XLIB_KHR 1\n#include <X11/Xlib.h>\n#include <vulkan/vulkan_core.h>\n#include <vulkan/vulkan_xlib.h>\n", bytes);
+    try std.testing.expectEqualStrings("#define VK_USE_PLATFORM_XLIB_KHR 1\n#include <X11/Xlib.h>\n#include <vulkan/vulkan_core.h>\n#include <vulkan/vulkan_xlib.h>\n", bytes);
     const wayland = try render(.linux_vulkan, true);
     defer std.testing.allocator.free(wayland);
     try std.testing.expect(std.mem.indexOf(u8, wayland, "#define VK_USE_PLATFORM_WAYLAND_KHR 1\n") != null);

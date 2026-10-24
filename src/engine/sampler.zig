@@ -29,7 +29,7 @@ pub const NativePayload = native_backend.Payload;
 pub const NativeError = native_backend.Error;
 
 /// Every way `createSampler` can fail. The set is named rather than inferred so
-/// a reader enumerates the obligations from the signature (`AGENTS.md` §2).
+/// a reader enumerates the obligations from the signature.
 pub const CreateError = core_errors.ValidationError || object.CreateError;
 pub const NativeCreateError = CreateError || NativeError;
 
@@ -37,8 +37,8 @@ pub const NativeCreateError = CreateError || NativeError;
 /// Conversion presence and every supplied conversion field remain part of identity.
 pub fn semanticKey(descriptor: descriptors.SamplerDescriptorChain) CreateError!SemanticKey {
     var ordinary: descriptors.SamplerDescriptor = undefined;
-    inline for (@typeInfo(descriptors.SamplerDescriptor).@"struct".fields) |field| {
-        @field(ordinary, field.name) = @field(descriptor, field.name);
+    inline for (@typeInfo(descriptors.SamplerDescriptor).@"struct".field_names) |field_name| {
+        @field(ordinary, field_name) = @field(descriptor, field_name);
     }
     try validateSamplerDescriptor(ordinary);
     return .{
@@ -93,8 +93,8 @@ pub const Sampler = struct {
     ) CreateError!objects.Sampler {
         try dev.arena.checkAllocator(guard, gpa);
         var chain: descriptors.SamplerDescriptorChain = .{ .compare = descriptor.compare };
-        inline for (@typeInfo(descriptors.SamplerDescriptor).@"struct".fields) |field| {
-            @field(chain, field.name) = @field(descriptor, field.name);
+        inline for (@typeInfo(descriptors.SamplerDescriptor).@"struct".field_names) |field_name| {
+            @field(chain, field_name) = @field(descriptor, field_name);
         }
         const key = try semanticKey(chain);
         const sampler = try dev.create(gpa, guard, Sampler, .{

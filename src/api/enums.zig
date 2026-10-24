@@ -1256,15 +1256,16 @@ pub fn tagType(kind: Enum) type {
 /// fresh block, and the loop body below is the one call.
 fn expectTagsRoundTrip(comptime kind: Enum) !void {
     const T = tagType(kind);
-    inline for (@typeInfo(T).@"enum".fields) |tag| {
-        const value: T = @enumFromInt(tag.value);
-        try std.testing.expectEqual(tag.value, @intFromEnum(value));
-        try std.testing.expectEqualStrings(tag.name, @tagName(value));
+    const info = @typeInfo(T).@"enum";
+    inline for (info.field_names, info.field_values) |tag_name, tag_value| {
+        const value: T = @fromBackingInt(@intCast(tag_value));
+        try std.testing.expectEqual(tag_value, @backingInt(value));
+        try std.testing.expectEqualStrings(tag_name, @tagName(value));
     }
 }
 
-test "every enum tag round-trips through @intFromEnum" {
-    inline for (@typeInfo(Enum).@"enum".fields) |field| {
-        try expectTagsRoundTrip(@enumFromInt(field.value));
+test "every enum tag round-trips through @backingInt" {
+    inline for (@typeInfo(Enum).@"enum".field_values) |field_value| {
+        try expectTagsRoundTrip(@fromBackingInt(@intCast(field_value)));
     }
 }

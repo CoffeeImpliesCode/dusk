@@ -69,7 +69,7 @@ test "the API descriptor and the engine table name the same four formats" {
         }
         try std.testing.expectEqual(
             row.api_tag,
-            @as(u32, @intFromEnum(row.format)),
+            @as(u32, @backingInt(row.format)),
         );
     }
 }
@@ -105,14 +105,15 @@ test "r11b10ufloat has one engine arm and its own renderable feature" {
     // holds one arm for the packed format and has not grown a second one
     // keyed on a capability, because a capability is not a Vulkan name.
     var packed_formats: usize = 0;
-    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
+    const info = @typeInfo(TextureFormat).@"enum";
+    inline for (info.field_names, info.field_values) |field_name, field_value| {
         // A nested `if`, not a `continue`: `inline for` unfolds to
         // straight-line code, so a `continue` here would cross the runtime
         // condition this skip is.
-        if (std.mem.indexOf(u8, field.name, "rg11_b10") != null) {
+        if (std.mem.indexOf(u8, field_name, "rg11_b10") != null) {
             packed_formats += 1;
-            try std.testing.expectEqualStrings("rg11_b10_ufloat", field.name);
-            const format: TextureFormat = @enumFromInt(field.value);
+            try std.testing.expectEqualStrings("rg11_b10_ufloat", field_name);
+            const format: TextureFormat = @fromBackingInt(@intCast(field_value));
             try std.testing.expectEqual(@as(u32, 122), vkValue(format));
         }
     }
@@ -121,7 +122,7 @@ test "r11b10ufloat has one engine arm and its own renderable feature" {
     // The feature is a device feature with its own tag, not a format.
     try std.testing.expectEqual(
         @as(u32, 12),
-        @as(u32, @intFromEnum(api.enums.FeatureName.rg11b10_ufloat_renderable)),
+        @as(u32, @backingInt(api.enums.FeatureName.rg11b10_ufloat_renderable)),
     );
 }
 
@@ -133,17 +134,17 @@ test "every API format the descriptor declares has an engine table arm" {
     // `inline for` because `EnumField.value` is a `comptime_int`: a runtime
     // index cannot read one, and the unfolded copy is what makes a member the
     // engine table lost a compile error here rather than a runtime trap.
-    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
+    inline for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
         // Nested rather than a `continue`, because `inline for` unfolds to
         // straight-line code.
-        if (field.value != @intFromEnum(TextureFormat.undefined_)) {
-            const format: TextureFormat = @enumFromInt(field.value);
+        if (field_value != @backingInt(TextureFormat.undefined_)) {
+            const format: TextureFormat = @fromBackingInt(@intCast(field_value));
             try std.testing.expect(vkValue(format) != 0);
             covered += 1;
         }
     }
     try std.testing.expectEqual(
-        @as(usize, @typeInfo(TextureFormat).@"enum".fields.len - 1),
+        @as(usize, @typeInfo(TextureFormat).@"enum".field_names.len - 1),
         covered,
     );
 }
@@ -154,15 +155,15 @@ test "exactly one API pair shares a Vulkan name" {
     // WebGPU's depth24plus is not a bit layout. Every other API format has a
     // Vulkan name of its own, so a second shared name is a second mapping rule
     // the reader would not know to look for.
-    const declared: usize = @typeInfo(TextureFormat).@"enum".fields.len - 1;
+    const declared: usize = @typeInfo(TextureFormat).@"enum".field_names.len - 1;
     var distinct: usize = 0;
     var seen: [declared]u32 = undefined;
-    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
+    inline for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
         // `inline for` for the reason at `:159`: the field's value is a
         // `comptime_int`, and the skip is nested because the loop is
         // straight-line code.
-        if (field.value != @intFromEnum(TextureFormat.undefined_)) {
-            const format: TextureFormat = @enumFromInt(field.value);
+        if (field_value != @backingInt(TextureFormat.undefined_)) {
+            const format: TextureFormat = @fromBackingInt(@intCast(field_value));
             const value = vkValue(format);
             var already: usize = 0;
             for (seen[0..distinct]) |previous| {
@@ -180,9 +181,9 @@ test "exactly one API pair shares a Vulkan name" {
 test "canonical format rows supply public texture block metadata" {
     var table: format_info.FormatTable = undefined;
     format_info.buildFormatTable(.{}, &table);
-    inline for (@typeInfo(TextureFormat).@"enum".fields) |field| {
-        if (field.value != 0) {
-            const name: TextureFormat = @enumFromInt(field.value);
+    inline for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
+        if (field_value != 0) {
+            const name: TextureFormat = @fromBackingInt(@intCast(field_value));
             const row = &table[format_info.computeFormatIndex(name).?];
             try std.testing.expectEqual(name, try format_info.toApiFormat(row.format));
             try std.testing.expectEqual(row.index, format_info.computeFormatIndex(name).?);

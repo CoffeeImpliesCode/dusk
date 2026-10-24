@@ -12,7 +12,6 @@ const dusk = @import("dusk");
 
 const platform = dusk.platform;
 
-/// The task count `docs/40-plan.md` §1 M4 names.
 const task_count = 1_000;
 
 /// How long a wait may block before the test calls it a failure.

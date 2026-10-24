@@ -132,9 +132,11 @@ test "authorized service reports exact imported export property separately" {
     instance.get_physical_device_external_semaphore_properties = query;
     const device = deviceProcs();
     const options: external.InitOptions = .{
-        .device = null, .device_procs = &device,
+        .device = null,
+        .device_procs = &device,
         .support = .{
-            .physical_device = null, .instance_procs = &instance,
+            .physical_device = null,
+            .instance_procs = &instance,
             .enabled_extensions = (dispatch.EnabledDeviceExts{}).with(.external_semaphore_fd),
             .handle_type = .opaque_fd,
         },
@@ -155,9 +157,11 @@ test "central authorization with missing native proc is a typed load error" {
     var device = deviceProcs();
     device.get_semaphore_fd_khr = null;
     try std.testing.expectError(error.MissingDeviceProc, external.Service.initAuthorized(.{
-        .device = null, .device_procs = &device,
+        .device = null,
+        .device_procs = &device,
         .support = .{
-            .physical_device = null, .instance_procs = &instance,
+            .physical_device = null,
+            .instance_procs = &instance,
             .enabled_extensions = (dispatch.EnabledDeviceExts{}).with(.external_semaphore_fd),
         },
     }, true));

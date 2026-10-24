@@ -1075,7 +1075,7 @@ pub const CompletionRegistry = struct {
     }
 };
 fn validMode(mode: api.CallbackMode) bool {
-    return switch (@intFromEnum(mode)) {
+    return switch (@backingInt(mode)) {
         1, 2, 3 => true,
         else => false,
     };

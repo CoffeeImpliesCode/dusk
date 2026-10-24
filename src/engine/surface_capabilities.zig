@@ -11,9 +11,17 @@ pub const QueryBackend = struct {
     instance_procs: *const dispatch.InstanceProcs,
 };
 pub const QueryError = std.mem.Allocator.Error || dispatch.Error || dispatch.LoadError || error{
-    SurfaceCapabilitiesUnstable, NoRepresentableSurfaceFormats, NoRepresentablePresentModes,
-    NoRepresentableCompositeAlpha, InvalidOutput, InvalidSurfaceExtent, UnsupportedSurfaceUsage,
-    UnsupportedSurfaceFormat, UnsupportedPresentMode, UnsupportedCompositeAlpha, UnsupportedViewFormat,
+    SurfaceCapabilitiesUnstable,
+    NoRepresentableSurfaceFormats,
+    NoRepresentablePresentModes,
+    NoRepresentableCompositeAlpha,
+    InvalidOutput,
+    InvalidSurfaceExtent,
+    UnsupportedSurfaceUsage,
+    UnsupportedSurfaceFormat,
+    UnsupportedPresentMode,
+    UnsupportedCompositeAlpha,
+    UnsupportedViewFormat,
     InvalidSurfaceImageCount,
 };
 pub const OwnedCapabilities = struct {
@@ -152,9 +160,12 @@ pub fn query(allocator: std.mem.Allocator, backend: QueryBackend) QueryError!Own
     const owned_alpha = try allocator.dupe(api.CompositeAlphaMode, alpha_buffer[0..alpha_count]);
     return .{ .native = native, .native_formats = native_formats, .capabilities = .{
         .usages = apiUsage(native.supportedUsageFlags),
-        .format_count = format_count, .formats = owned_formats,
-        .present_mode_count = mode_count, .present_modes = owned_modes,
-        .alpha_mode_count = alpha_count, .alpha_modes = owned_alpha,
+        .format_count = format_count,
+        .formats = owned_formats,
+        .present_mode_count = mode_count,
+        .present_modes = owned_modes,
+        .alpha_mode_count = alpha_count,
+        .alpha_modes = owned_alpha,
     } };
 }
 

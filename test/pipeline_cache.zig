@@ -1,12 +1,5 @@
 //! The M14 cache shard: the key, and the store's "same pipeline or a new one".
 //!
-//! `docs/40-plan.md` §1 M14 puts the milestone's acceptance in
-//! `test/render_pipeline.zig`, which runs it against a real Vulkan device and a
-//! real driver. This file is the half that must not need one: the bytes the
-//! cache decides on, and the bookkeeping that turns a hit into the same object
-//! and a miss into a new one. `AGENTS.md` §3 makes that split the point of the
-//! `command`/`pipeline` versus `engine` boundary, so a key defect is caught on
-//! a host with no GPU and not only where one exists.
 //!
 //! **What the Vulkan seam is here.** Two counters and two handles. The seam is
 //! six injected function pointers (`src/pipeline/pipeline_backend.zig:46-51`), so a
@@ -15,11 +8,6 @@
 //! driver, a compiled pipeline or a shader; `test/render_pipeline.zig` runs the
 //! same three calls against a real device and reads a real `VkPipeline`.
 //!
-//! **The seam's counters live behind the device handle.** `Backend` has no
-//! user-data field and `AGENTS.md` §2 forbids a file-scope counter, so the
-//! `Seam` value is the `VkDevice` the two entry points are handed. One line of
-//! pointer recovery buys an observable call count, which is the assertion that
-//! proves a cache hit never reached the driver.
 //!
 //! **What this file does not claim.** It does not claim that the key equals a
 //! Dawn digest. `src/pipeline/cache_key.zig:9-16` records that neither side
@@ -402,11 +390,11 @@ test "a render key and a compute key never compare equal" {
     // reason two keys over one layout are still two pipelines.
     try std.testing.expect(!pipeline.CacheKey.eql(&render, &compute));
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(cache_key.Kind.render_pipeline)),
+        @as(u8, @backingInt(cache_key.Kind.render_pipeline)),
         render.bytes.items[0],
     );
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(cache_key.Kind.compute_pipeline)),
+        @as(u8, @backingInt(cache_key.Kind.compute_pipeline)),
         compute.bytes.items[0],
     );
 }
@@ -1647,8 +1635,20 @@ test "compute workgroup defaults overrides shared IDs numeric names and feature 
 }
 
 test "compute workgroup default and specialized keys clean every allocation failure" {
+    // SafeAllocator remaps depend on its current bucket fill. Force the
+    // allocate-copy-free path so every fail-N pass has the same allocation count.
+    const backing = std.testing.allocator;
+    const allocator: std.mem.Allocator = .{
+        .ptr = backing.ptr,
+        .vtable = &.{
+            .alloc = backing.vtable.alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = backing.vtable.free,
+        },
+    };
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        allocator,
         workgroupKeyAllocation,
         .{},
     );

@@ -383,9 +383,21 @@ pub const NativeDeviceContext = struct {
     ) Error!platform.Serial {
         try self.queue_operation_mutex.lock(io);
         defer self.queue_operation_mutex.unlock(io);
-        errdefer |err| {
+        return self.submitLocked(allocator, io, device, finished, max_immediate_size, timestamp_quantization) catch |err| {
             if (err == error.DeviceLost) self.markTerminalLossLocked(io);
-        }
+            return err;
+        };
+    }
+
+    fn submitLocked(
+        self: *NativeDeviceContext,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        device: *core.Device,
+        finished: *encoding.Finished,
+        max_immediate_size: u32,
+        timestamp_quantization: bool,
+    ) Error!platform.Serial {
         if (!self.accepting_operations) return error.NativeDeviceStopped;
         try self.preflightAllocatorLocked(allocator, io, device);
         try self.waitLocked(io);
@@ -447,9 +459,20 @@ pub const NativeDeviceContext = struct {
         options: queues.Queue.SubmitOptions,
         roots: []const *core.Object,
     ) Error!queues.Queue.SubmitResult {
-        errdefer |err| {
+        return self.submitDeclaredLockedInner(allocator, io, device, options, roots) catch |err| {
             if (err == error.DeviceLost) self.markTerminalLossLocked(io);
-        }
+            return err;
+        };
+    }
+
+    fn submitDeclaredLockedInner(
+        self: *NativeDeviceContext,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        device: *core.Device,
+        options: queues.Queue.SubmitOptions,
+        roots: []const *core.Object,
+    ) Error!queues.Queue.SubmitResult {
         if (!self.accepting_operations) return error.NativeDeviceStopped;
         try self.preflightAllocatorLocked(allocator, io, device);
         if (self.recording_uses != null) {

@@ -1,14 +1,12 @@
 //! The colour-space constants and the two matrix shapes they are applied with.
 //!
 //! **What this file is.** The port of `src/dawn/common/ColorSpace.h` at Dawn
-//! revision `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. That header declares 27
+//! revision `32f77c02294310054a660c393feded4bcb3f203c`. That header declares 27
 //! constants and no function, so the whole ported artefact is this table and
 //! the two shapes needed to read it.
 //!
 //! **What this file does not claim.** It does not claim the algebra.
-//! `src/dawn/common/Algebra.h` is 419 lines and 22 upstream rows that
-//! `docs/40-plan.md` §A2 gives to M7 in the `engine` module. The three
+//! `src/dawn/common/Algebra.h` is not ported. The three
 //! operations `ColorSpace.h` needs are `FromRows`, `Inverse` and
 //! `Mul(Matrix, Vector)`; they are here as private helpers and are not a port
 //! of `Algebra.h`.
@@ -182,8 +180,7 @@ pub const TransferFunction = struct {
     /// The offset of the high branch, applied after the power.
     e: f32 = 0,
     /// The offset of the low branch. Every one of the seven constants sets it
-    /// to `0.0f` and no branch reads a non-zero value, and it is kept because
-    /// `AGENTS.md` §2 forbids deleting an upstream field.
+    /// to `0.0f`; no branch reads a non-zero value.
     f: f32 = 0,
 
     /// Ports the piecewise formula at `ColorSpace.h:220-223`.

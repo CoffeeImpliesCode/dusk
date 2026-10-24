@@ -1,7 +1,7 @@
 //! What a module says about itself: its entry points and its descriptor
 //! bindings.
 //!
-//! `AGENTS.md` §3.2 makes this ours rather than Tint's: Dawn reads reflection
+//! Dawn reads reflection
 //! out of a `tint::Program` and the port reads it out of the binary. A
 //! reflection result that disagrees with what the shader declares is a defect,
 //! so this file re-derives every binding from `OpDecorate` and `OpTypeImage`
@@ -124,7 +124,7 @@ pub const Module = struct {
     ) WorkgroupError![3]u32 {
         for (self.entry_points) |entry| {
             if (entry.id != entry_id) continue;
-            if (@intFromEnum(entry.execution_model) != 5)
+            if (@backingInt(entry.execution_model) != 5)
                 return error.SpirvWorkgroupEntryPoint;
             return workgroup.resolve(
                 self.words,
@@ -145,7 +145,7 @@ pub const Module = struct {
     ) WorkgroupError![3]u32 {
         for (self.entry_points) |entry| {
             if (entry.id != entry_id) continue;
-            if (@intFromEnum(entry.execution_model) != 5)
+            if (@backingInt(entry.execution_model) != 5)
                 return error.SpirvWorkgroupEntryPoint;
             return workgroup.resolve(
                 self.words,
@@ -213,7 +213,7 @@ fn readEntryPoints(
         const workgroup_size = try workgroup.read(
             words,
             fields.id,
-            @intFromEnum(fields.execution_model) == 5,
+            @backingInt(fields.execution_model) == 5,
         );
         const resources = try readResources(
             allocator,
@@ -706,7 +706,7 @@ const Tables = struct {
                 },
                 .member_decorate, .member_decorate_string => {
                     if (operands.len < 3) return error.SpirvMalformed;
-                    if (operands[2] == @intFromEnum(grammar.Decoration.spec_id))
+                    if (operands[2] == @backingInt(grammar.Decoration.spec_id))
                         return error.SpirvMalformed;
                     try self.checkId(operands[0]);
                     const record = try readDecorationRecord(operands[2..]) orelse continue;

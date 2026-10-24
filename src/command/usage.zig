@@ -13,9 +13,7 @@
 //! (`src/dawn/native/PassResourceUsage.h:94-95`, `:124-125`; and again at
 //! `src/dawn/native/CommandEncoder.h:141-143`). The port uses ordered arrays
 //! and a linear scan: a pass holds single-digit numbers of resources and of
-//! bind groups, a linear scan is allocation-free and has no hash seed, and
-//! "determinism is a feature" (`AGENTS.md` §3) is the reason the hash is not
-//! there.
+//! bind groups, a linear scan is allocation-free and has no hash seed.
 //!
 //! It does not claim the WebGPU hazard-tracking rules are complete. Render
 //! scopes reject writable indirect buffers before replay's sanitization prepass.

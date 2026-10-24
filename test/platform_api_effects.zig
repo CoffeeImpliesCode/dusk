@@ -35,7 +35,7 @@ test "nonallocating platform object and procedure signatures take self then Io o
         try std.testing.expect(contract[0] == contract[2]);
         try std.testing.expect(@FieldType(api.proc.ProcTable, contract[1]) == *const contract[2]);
     }
-    try std.testing.expect(@typeInfo(api.errors.NativeIoError).error_set != null);
+    try std.testing.expect(@typeInfo(api.errors.NativeIoError).error_set.error_names != null);
 }
 
 test "shared buffer contracts remain outside the native texture and fence effect" {

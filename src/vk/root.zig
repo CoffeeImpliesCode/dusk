@@ -2,7 +2,7 @@
 //!
 //! **What this module is.** `docs/10-architecture.md` "Module boundaries" gives
 //! `vk` three jobs: loading `libvulkan`, the three-tier dispatch table, and the
-//! `VkResult` to Zig error mapping. `AGENTS.md` §3.1 makes the table the only
+//! `VkResult` to Zig error mapping. The table is the only
 //! door to a Vulkan entry point and the mapping the only place a `VkResult`
 //! becomes a Zig error. `docs/30-port-design.md` §6.2 owns the shape, and
 //! `tools/gen_dispatch.zig` emits the file below.
@@ -18,8 +18,7 @@
 //! `@import("dusk")` reaches the handle types through
 //! `platform.vulkan_bindings` and not through here. Nor does it claim wire
 //! compatibility with Dawn's `VulkanFunctions.h`: the tier member counts are
-//! recorded in `docs/30-port-design.md` §6.1, and a change upstream is a
-//! mapping row in `docs/40-plan.md` rather than a promise.
+//! recorded in `docs/30-port-design.md` §6.1.
 
 /// `dispatch.zig`, the whole file as one namespace: the three tiers, the three
 /// load functions, the extension sets and the `VkResult` mapping.
@@ -51,7 +50,7 @@ pub const DeviceExt = dispatch.DeviceExt;
 pub const EnabledDeviceExts = dispatch.EnabledDeviceExts;
 pub const DeviceProcGroup = dispatch.DeviceProcGroup;
 
-// The `VkResult` mapping. `AGENTS.md` §3.1 puts this here and nowhere else.
+// The `VkResult` mapping.
 pub const Outcome = dispatch.Outcome;
 pub const Error = dispatch.Error;
 pub const classify = dispatch.classify;

@@ -82,9 +82,7 @@ test "swapchain requires enabled instance surface" {
 }
 
 var enumeration_calls: usize = 0;
-fn unstable(_: [*c]const u8, count: [*c]u32, properties: [*c]vulkan.VkExtensionProperties)
-    callconv(.c) vulkan.VkResult
-{
+fn unstable(_: [*c]const u8, count: [*c]u32, properties: [*c]vulkan.VkExtensionProperties) callconv(.c) vulkan.VkResult {
     enumeration_calls += 1;
     count.* = 1;
     if (properties == null) return vulkan.VK_SUCCESS;
@@ -93,14 +91,11 @@ fn unstable(_: [*c]const u8, count: [*c]u32, properties: [*c]vulkan.VkExtensionP
 
 test "unstable enumeration performs at most three complete attempts" {
     enumeration_calls = 0;
-    try std.testing.expectError(error.ExtensionEnumerationUnstable,
-        request.enumerateInstance(std.testing.allocator, unstable));
+    try std.testing.expectError(error.ExtensionEnumerationUnstable, request.enumerateInstance(std.testing.allocator, unstable));
     try std.testing.expectEqual(@as(usize, 6), enumeration_calls);
 }
 
-fn succeedsThird(_: [*c]const u8, count: [*c]u32,
-    properties: [*c]vulkan.VkExtensionProperties) callconv(.c) vulkan.VkResult
-{
+fn succeedsThird(_: [*c]const u8, count: [*c]u32, properties: [*c]vulkan.VkExtensionProperties) callconv(.c) vulkan.VkResult {
     enumeration_calls += 1;
     count.* = 1;
     if (properties == null) return vulkan.VK_SUCCESS;
@@ -154,29 +149,25 @@ test "optional dependency removal cascades and required dependents still fail" {
         .{ .extension = .external_memory_dma_buf, .requirement = .required },
     };
     try std.testing.expectError(error.ExtensionDependencyUnavailable, request.selectDevice(
-        &rows, &available,
+        &rows,
+        &available,
         .{ .api_version = vulkan.VK_API_VERSION_1_0, .enabled_instance = .{} },
     ));
 }
 
 test "missing enumeration proc is a typed load failure" {
-    try std.testing.expectError(error.MissingGlobalProc,
-        request.enumerateInstance(std.testing.allocator, null));
-    try std.testing.expectError(error.MissingInstanceProc,
-        request.enumerateDevice(std.testing.allocator, null, null));
+    try std.testing.expectError(error.MissingGlobalProc, request.enumerateInstance(std.testing.allocator, null));
+    try std.testing.expectError(error.MissingInstanceProc, request.enumerateDevice(std.testing.allocator, null, null));
 }
 
-fn unstableCount(_: [*c]const u8, _: [*c]u32,
-    _: [*c]vulkan.VkExtensionProperties) callconv(.c) vulkan.VkResult
-{
+fn unstableCount(_: [*c]const u8, _: [*c]u32, _: [*c]vulkan.VkExtensionProperties) callconv(.c) vulkan.VkResult {
     enumeration_calls += 1;
     return vulkan.VK_INCOMPLETE;
 }
 
 test "count enumeration incomplete exhausts after exactly three calls" {
     enumeration_calls = 0;
-    try std.testing.expectError(error.ExtensionEnumerationUnstable,
-        request.enumerateInstance(std.testing.allocator, unstableCount));
+    try std.testing.expectError(error.ExtensionEnumerationUnstable, request.enumerateInstance(std.testing.allocator, unstableCount));
     try std.testing.expectEqual(@as(usize, 3), enumeration_calls);
 }
 
@@ -191,11 +182,13 @@ test "core promotion never substitutes the exact FD import extension" {
 test "instance WSI dependency absence remains optional or fails when required" {
     const available = [_]vulkan.VkExtensionProperties{property("VK_KHR_xlib_surface")};
     const selected = try request.selectInstance(
-        &.{.{ .extension = .xlib_surface, .requirement = .optional }}, &available,
+        &.{.{ .extension = .xlib_surface, .requirement = .optional }},
+        &available,
     );
     try std.testing.expectEqual(@as(usize, 0), selected.count);
     try std.testing.expectError(error.ExtensionDependencyUnavailable, request.selectInstance(
-        &.{.{ .extension = .xlib_surface, .requirement = .required }}, &available,
+        &.{.{ .extension = .xlib_surface, .requirement = .required }},
+        &available,
     ));
 }
 
@@ -214,16 +207,19 @@ test "Android defaults request maintenance6 optionally" {
 test "maintenance6 requires actual Vulkan1.1 and cannot use extension bases on1.0" {
     const available = [_]vulkan.VkExtensionProperties{property("VK_KHR_maintenance6")};
     const selected = try request.selectDevice(
-        &.{.{ .extension = .maintenance6, .requirement = .optional }}, &available,
+        &.{.{ .extension = .maintenance6, .requirement = .optional }},
+        &available,
         .{ .api_version = vulkan.VK_API_VERSION_1_0, .enabled_instance = .{} },
     );
     try std.testing.expectEqual(@as(usize, 0), selected.count);
     try std.testing.expectError(error.ExtensionDependencyUnavailable, request.selectDevice(
-        &.{.{ .extension = .maintenance6, .requirement = .required }}, &available,
+        &.{.{ .extension = .maintenance6, .requirement = .required }},
+        &available,
         .{ .api_version = vulkan.VK_API_VERSION_1_0, .enabled_instance = .{} },
     ));
     const supported = try request.selectDevice(
-        &.{.{ .extension = .maintenance6, .requirement = .required }}, &available,
+        &.{.{ .extension = .maintenance6, .requirement = .required }},
+        &available,
         .{ .api_version = vulkan.VK_API_VERSION_1_1, .enabled_instance = .{} },
     );
     try std.testing.expect(supported.enabled.has(.maintenance6));
@@ -231,7 +227,8 @@ test "maintenance6 requires actual Vulkan1.1 and cannot use extension bases on1.
 
 test "maintenance6 is core Vulkan1.4 without extension advertisement" {
     const selected = try request.selectDevice(
-        &.{.{ .extension = .maintenance6, .requirement = .required }}, &.{},
+        &.{.{ .extension = .maintenance6, .requirement = .required }},
+        &.{},
         .{ .api_version = vulkan.VK_API_VERSION_1_4, .enabled_instance = .{} },
     );
     try std.testing.expectEqual(@as(usize, 0), selected.count);

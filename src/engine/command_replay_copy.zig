@@ -643,7 +643,7 @@ fn transitionBuffer(context: Context, target: *buffer.Buffer, usage: api.BufferU
 fn aspects(guard: *const core.ObjectGuard, target: *texture.Texture, copy: commands.TextureCopy) Error!texture.AspectMask {
     const selected = texture.selectFormatAspects(
         target.getFormatInfo(guard),
-        @enumFromInt(@intFromEnum(copy.aspect)),
+        @fromBackingInt(@intCast(@backingInt(copy.aspect))),
     );
     if (selected.toFlags() == 0) return error.InvalidCopy;
     return selected;
@@ -677,8 +677,8 @@ fn validateTextureCopy(
 ) Error!void {
     const format_info = target.getFormatInfo(guard);
     if (copy.mip_level >= target.getNumMipLevels(guard) or target.getSampleCount(guard) != 1 or
-        @intFromEnum(copy.dimension) != @intFromEnum(target.getDimension(guard)) or
-        copy.format != @intFromEnum(target.getFormat(guard)) or
+        @backingInt(copy.dimension) != @backingInt(target.getDimension(guard)) or
+        copy.format != @backingInt(target.getFormat(guard)) or
         copy.block_width != format_info.aspect_info[0].block.width or
         copy.block_height != format_info.aspect_info[0].block.height)
     {
@@ -734,7 +734,7 @@ fn transitionTexture(
 }
 
 fn blockBytes(guard: *const core.ObjectGuard, target: *texture.Texture, copy: commands.TextureCopy) Error!u32 {
-    const info = target.getFormatInfo(guard).getAspectInfo(@enumFromInt(@intFromEnum(copy.aspect))) catch
+    const info = target.getFormatInfo(guard).getAspectInfo(@fromBackingInt(@intCast(@backingInt(copy.aspect)))) catch
         return error.InvalidCopy;
     if (info.block.byte_size == 0) return error.InvalidCopy;
     return info.block.byte_size;
@@ -837,7 +837,7 @@ fn copyTarget(
 ) Error!native_blit.Target {
     const utility = try utilityContext(context);
     const shape: attachments.ViewShape = .{
-        .format = @intFromEnum(view.format),
+        .format = @backingInt(view.format),
         .sample_count = view.texture.sample_count,
         .aspects = view.aspects.toFlags(),
     };
@@ -907,7 +907,7 @@ fn blitBufferToTexture(
     if (bytes_per_row > std.math.maxInt(u32)) return error.CopySizeOverflow;
     const image_stride = try mul(bytes_per_row, command.source.rows_per_image);
     const aspect_info = destination.getFormatInfo(context.guard).getAspectInfo(
-        @enumFromInt(@intFromEnum(command.destination.aspect)),
+        @fromBackingInt(@intCast(@backingInt(command.destination.aspect))),
     ) catch return error.InvalidCopy;
     const input_format = format_mod.toApiFormat(aspect_info.format) catch return error.InvalidCopy;
     if (command.copy_size.depth_or_array_layers > (1 << 24))
@@ -968,7 +968,7 @@ fn blitTextureToBuffer(
         source,
         command.source,
         command.copy_size.depth_or_array_layers,
-        @enumFromInt(@intFromEnum(command.source.aspect)),
+        @fromBackingInt(@intCast(@backingInt(command.source.aspect))),
     );
     defer view.header.releaseUserLocked(context.guard, utility.io) catch unreachable;
     errdefer context.queue.poisonRecording();

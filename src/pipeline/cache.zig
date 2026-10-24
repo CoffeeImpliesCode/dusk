@@ -453,8 +453,8 @@ pub const PipelineCache = struct {
 
     /// What `destroy` reports. `dispatch.LoadError` is joined in whole, as
     /// `src/engine/buffer.zig:194` joins it, because `destroy` reads one
-    /// device dispatch field and `AGENTS.md` §3.1 makes a missing one a typed
-    /// error. Its four members are declared at `src/vk/dispatch.zig:319-324`,
+    /// device dispatch field and a missing one is a typed error.
+    /// Its four members are declared at `src/vk/dispatch.zig:319-324`,
     /// so the count this set carries is the count that file declares.
     pub const DestroyError = vk.LoadError;
 
@@ -476,7 +476,7 @@ pub const PipelineCache = struct {
 /// `std.heap.DebugAllocator.deinit` prints every leaked block with the stack
 /// trace that allocated it and only then answers `.leak`, so asserting that
 /// answer is what turns the report into a failed test. A `defer` has no way
-/// to `try` the result and `AGENTS.md` §2 forbids dropping the value.
+/// to `try` the result.
 fn assertNoLeak(state: *std.heap.DebugAllocator(.{})) void {
     std.debug.assert(state.deinit() == .ok);
 }

@@ -13,12 +13,9 @@
 //! `BuddyMemoryAllocator` owns the device heaps and this tree only carves them;
 //! `BuddyAllocator.h:43-45` says the same.
 //!
-//! **Why the tree stays.** `docs/40-plan.md` §M6 records the decision in full.
-//! VMA's own sub-allocation is behind `#ifdef VMA_IMPLEMENTATION`
-//! (`vk_mem_alloc.h:3039`) in a header-only nixpkgs package, `AGENTS.md` §1
-//! forbids the C++ compilation that would produce an object, and the
-//! milestone's acceptance asserts on offsets. An offset source that is a test
-//! fake makes that assertion circular.
+//! **Why the tree stays.** VMA's sub-allocation is behind `#ifdef VMA_IMPLEMENTATION`
+//! (`vk_mem_alloc.h:3039`) in a header-only package. This library compiles no
+//! C++, so the offset tree stays in Zig.
 //!
 //! **Why the node links are not a union.** `BuddyAllocator.h:101-110` unions
 //! `SplitLink` (`pLeft`, `pParent`, `pBuddy`) with `FreeLinks` (`pPrev`,
@@ -87,8 +84,8 @@ const Node = struct {
 ///
 /// A caller owns the `std.mem.Allocator` for every call. Upstream calls `new`
 /// and `delete` inside `Allocate` (`.cpp:187-188`) and `DeleteBlock` (`.cpp:279`)
-/// with no allocator at all, which `AGENTS.md` §3 forbids; the allocator is a
-/// parameter here and the only two allocations are the split's two children.
+/// with no allocator at all; here the allocator is a parameter and the only
+/// two allocations are the split's two children.
 pub const BuddyAllocator = struct {
     /// `mMaxBlockSize` (`BuddyAllocator.h:126`).
     max_size_byte_count: u64,
@@ -113,9 +110,9 @@ pub const BuddyAllocator = struct {
     /// valid when the list array itself grows.
     live_node_count: usize = 0,
 
-    /// `kInvalidOffset` (`BuddyAllocator.h:64`) becomes this set, per
-    /// `AGENTS.md` §3 "errors are values". Upstream fuses three different
-    /// failures into the one sentinel at `.cpp:168-170`; the port separates them
+    /// `kInvalidOffset` (`BuddyAllocator.h:64`) becomes this set.
+    /// Upstream fuses three different failures into the one sentinel at
+    /// `.cpp:168-170`; the port separates them
     /// so a zero request is not reported as a full allocator.
     pub const Error = error{
         /// `DAWN_CHECK(IsPowerOfTwo(maxSize))` at `.cpp:37`.
@@ -157,7 +154,7 @@ pub const BuddyAllocator = struct {
     pub const LevelError = alignment.LogError || error{OutOfRange};
 
     /// The bound every descent and merge loop carries: the tree is `log2(max)`
-    /// deep. `AGENTS.md` §2, "bound every loop".
+    /// deep.
     ///
     /// It reads `log2_max_size`, which `init` fills from
     /// `alignment.log2PowerOfTwo` (`.cpp:39`). That is the same cached log
@@ -234,7 +231,7 @@ pub const BuddyAllocator = struct {
 
     /// Ports `ComputeTotalNumOfFreeBlocksForTesting` (`.cpp:54`). Upstream labels
     /// it test-only; `test/memory.zig` asserts against it on every cycle, so it
-    /// is production code here. The `ForTesting` suffix goes with `AGENTS.md` §2.
+    /// is production code here.
     pub fn totalFreeBlockCount(self: *const BuddyAllocator) usize {
         const root = self.root orelse return 0;
         return self.countFreeBlocks(root);
@@ -375,8 +372,7 @@ pub const BuddyAllocator = struct {
         // The walk above returns a level only where it read a non-null head
         // (`findFreeBlockLevel`'s `orelse continue`), and nothing between that
         // walk and this read touches `free_lists`, so the slot cannot be empty.
-        // The claim is stated and not taken silently, as `AGENTS.md` §3 asks of
-        // an `unreachable` and as `removeFreeBlock` states its own at `:342`.
+        // The invariant is checked here, as in `removeFreeBlock` at `:342`.
         var node = self.free_lists.items[start_level] orelse
             @panic("a level the free-block walk accepted holds no head");
         var level = start_level;

@@ -1,7 +1,7 @@
 //! `RenderPassCache`: one `VkRenderPass` per attachment shape.
 //!
 //! **What this file is.** `vulkan/RenderPassCache.{h,cpp}` upstream: 132 lines
-//! and 561 lines, 12 rows (`docs/40-plan.md` §M18). The key is sparse: only
+//! and 561 lines. The key is sparse: only
 //! the attachments a pass declares carry data, and everything else is
 //! `undefined_`. The value is a `VkRenderPass`, the index of the subpass that
 //! writes, and a monotonic `unique_id` that stands in for the handle as a key
@@ -50,9 +50,7 @@ pub const attachment_unused: u32 = 0xFFFFFFFF;
 /// The colour attachment a setter or a reader names.
 pub const ColorAttachmentIndex = u8;
 
-/// What one `setColor` call declares. Seven fields upstream become one struct
-/// because `AGENTS.md` §2 makes two parameters of the same type one struct,
-/// and five of them share two types.
+/// What one `setColor` call declares. Seven fields upstream become one struct.
 pub const ColorAttachment = struct {
     index: ColorAttachmentIndex,
     format: vk_format.TextureFormat,
@@ -497,7 +495,7 @@ pub const Device = struct {
 ///
 /// The lock is `std.Io.Mutex`, which is where Zig 0.16 moved the mutex out of
 /// `std.Thread`. It takes an `Io` to block on, so every locked method takes
-/// `io` as a parameter rather than reaching for a global (`AGENTS.md` §3), and
+/// `io` as a parameter rather than reaching for a global, and
 /// the cancellation `Io.Mutex.lock` can report becomes `error.Canceled`, the
 /// same member `src/platform/threads.zig:52` and `src/memory/size_tracker.zig:62`
 /// raise for it.

@@ -5,7 +5,7 @@
 //
 // A native has no declaration of its own. `tools/gen_api.zig` emits the
 // spelling below wherever dawn.json names the native, so an alias here
-// would forward to itself (`AGENTS.md` section 2).
+// would forward to itself.
 //
 // | dawn.json | Zig |
 // | --- | --- |

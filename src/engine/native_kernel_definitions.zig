@@ -47,11 +47,11 @@ pub const Stage = struct { words: []const u32, entry_point: [:0]const u8 };
 pub const ScalarKind = enum { float, sint, uint };
 
 test "color scalar types exclude depth and compressed attachment formats" {
-    try std.testing.expectEqual(ScalarKind.float, try colorScalarKind(@intFromEnum(api.TextureFormat.rgba8_unorm)));
-    try std.testing.expectEqual(ScalarKind.sint, try colorScalarKind(@intFromEnum(api.TextureFormat.rgba32_sint)));
-    try std.testing.expectEqual(ScalarKind.uint, try colorScalarKind(@intFromEnum(api.TextureFormat.rgb10_a2_uint)));
-    try std.testing.expectError(error.InvalidKernelKey, colorScalarKind(@intFromEnum(api.TextureFormat.depth32_float)));
-    try std.testing.expectError(error.InvalidKernelKey, colorScalarKind(@intFromEnum(api.TextureFormat.bc1_rgba_unorm)));
+    try std.testing.expectEqual(ScalarKind.float, try colorScalarKind(@backingInt(api.TextureFormat.rgba8_unorm)));
+    try std.testing.expectEqual(ScalarKind.sint, try colorScalarKind(@backingInt(api.TextureFormat.rgba32_sint)));
+    try std.testing.expectEqual(ScalarKind.uint, try colorScalarKind(@backingInt(api.TextureFormat.rgb10_a2_uint)));
+    try std.testing.expectError(error.InvalidKernelKey, colorScalarKind(@backingInt(api.TextureFormat.depth32_float)));
+    try std.testing.expectError(error.InvalidKernelKey, colorScalarKind(@backingInt(api.TextureFormat.bc1_rgba_unorm)));
 }
 
 pub fn colorScalarKind(format_value: u32) error{InvalidKernelKey}!ScalarKind {
@@ -191,17 +191,17 @@ pub fn validateKey(key: KernelKey) error{InvalidKernelKey}!void {
 }
 
 fn hasDepth(format: u32) bool {
-    return format == @intFromEnum(api.TextureFormat.depth16_unorm) or
-        format == @intFromEnum(api.TextureFormat.depth24_plus) or
-        format == @intFromEnum(api.TextureFormat.depth32_float) or
-        format == @intFromEnum(api.TextureFormat.depth24_plus_stencil8) or
-        format == @intFromEnum(api.TextureFormat.depth32_float_stencil8);
+    return format == @backingInt(api.TextureFormat.depth16_unorm) or
+        format == @backingInt(api.TextureFormat.depth24_plus) or
+        format == @backingInt(api.TextureFormat.depth32_float) or
+        format == @backingInt(api.TextureFormat.depth24_plus_stencil8) or
+        format == @backingInt(api.TextureFormat.depth32_float_stencil8);
 }
 
 fn hasStencil(format: u32) bool {
-    return format == @intFromEnum(api.TextureFormat.stencil8) or
-        format == @intFromEnum(api.TextureFormat.depth24_plus_stencil8) or
-        format == @intFromEnum(api.TextureFormat.depth32_float_stencil8);
+    return format == @backingInt(api.TextureFormat.stencil8) or
+        format == @backingInt(api.TextureFormat.depth24_plus_stencil8) or
+        format == @backingInt(api.TextureFormat.depth32_float_stencil8);
 }
 
 pub fn definition(key: KernelKey) error{InvalidKernelKey}!*const Definition {

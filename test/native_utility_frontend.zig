@@ -175,7 +175,7 @@ const Fixture = struct {
         );
         var value: command.attachment_state.AttachmentState = .{};
         value.color_attachments_set = 1;
-        value.color_formats[0] = @intFromEnum(dusk.api.TextureFormat.rgba8_unorm);
+        value.color_formats[0] = @backingInt(dusk.api.TextureFormat.rgba8_unorm);
         self.attachment.value = value;
         self.attachment.cache_hash = 0;
         self.attachment.cache_next = null;

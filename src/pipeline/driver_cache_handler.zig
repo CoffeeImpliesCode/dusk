@@ -43,7 +43,11 @@ pub const DriverCacheHandler = struct {
         try validateOptions(options);
         const key = codec.storageKey(options.identity, options.isolation_key_hash);
         const loaded = try options.provider.load_fn(
-            allocator, io, options.provider.context, key, options.maximum_payload_byte_count,
+            allocator,
+            io,
+            options.provider.context,
+            key,
+            options.maximum_payload_byte_count,
         );
         defer switch (loaded) {
             .hit => |bytes| allocator.free(bytes),
@@ -96,7 +100,9 @@ pub const DriverCacheHandler = struct {
             errdefer allocator.free(artifact);
             var written_byte_count = payload_byte_count;
             const data_result = get_data(
-                self.device, self.native_cache, &written_byte_count,
+                self.device,
+                self.native_cache,
+                &written_byte_count,
                 if (payload_byte_count == 0) null else artifact[codec.header_byte_count..].ptr,
             );
             if (written_byte_count > payload_byte_count) {
@@ -127,7 +133,10 @@ pub const DriverCacheHandler = struct {
     /// Callback return means invocation, not filesystem durability. Artifact remains caller-owned.
     pub fn persist(io: std.Io, self: *const DriverCacheHandler, artifact: []const u8) providers.ProviderError!void {
         return self.provider.store_fn(
-            io, self.provider.context, codec.storageKey(self.identity, self.isolation_key_hash), artifact,
+            io,
+            self.provider.context,
+            codec.storageKey(self.identity, self.isolation_key_hash),
+            artifact,
         );
     }
 

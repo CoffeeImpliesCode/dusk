@@ -260,8 +260,8 @@ fn validateCompatibilityFloors(
     limits: BindingLimits,
     counts: BindingCounts,
 ) PipelineError!void {
-    const vertex = counts.per_stage[@intFromEnum(Stage.vertex)];
-    const fragment = counts.per_stage[@intFromEnum(Stage.fragment)];
+    const vertex = counts.per_stage[@backingInt(Stage.vertex)];
+    const fragment = counts.per_stage[@backingInt(Stage.fragment)];
     if (vertex.storage_buffer_count > limits.max_storage_buffers_in_vertex_stage) {
         return error.StorageBuffersInVertexStageAboveLimit;
     }

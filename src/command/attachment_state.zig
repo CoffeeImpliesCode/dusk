@@ -464,7 +464,7 @@ test "color slot bounds reject a ninth slot instead of converting it to storage"
         .resolve_target = null,
         .expands_resolve = false,
     };
-    const nine = [_]ColorShape{absent} ** 9;
+    const nine: [9]ColorShape = @splat(absent);
     try std.testing.expectError(error.TooManyAttachments, AttachmentState.fromRenderPass(.{
         .colors = &nine,
         .depth_stencil = null,
@@ -935,13 +935,13 @@ test "API depth formats remain distinct even if a backend maps them to one nativ
     const api = @import("../api/enums.zig");
     var layout = testLayout();
     layout.color_formats = &.{};
-    layout.depth_stencil_format = @intFromEnum(api.TextureFormat.depth24_plus);
+    layout.depth_stencil_format = @backingInt(api.TextureFormat.depth24_plus);
     const depth24 = try AttachmentState.fromRenderPipeline(layout, test_limits);
-    layout.depth_stencil_format = @intFromEnum(api.TextureFormat.depth32_float);
+    layout.depth_stencil_format = @backingInt(api.TextureFormat.depth32_float);
     const depth32 = try AttachmentState.fromRenderPipeline(layout, test_limits);
     try std.testing.expect(!AttachmentState.eql(&depth24, &depth32));
-    try std.testing.expectEqual(@intFromEnum(api.TextureFormat.depth24_plus), depth24.depth_stencil_format);
-    try std.testing.expectEqual(@intFromEnum(api.TextureFormat.depth32_float), depth32.depth_stencil_format);
+    try std.testing.expectEqual(@backingInt(api.TextureFormat.depth24_plus), depth24.depth_stencil_format);
+    try std.testing.expectEqual(@backingInt(api.TextureFormat.depth32_float), depth32.depth_stencil_format);
 }
 
 test "pass storage shares checked offset size and declaration bounds with layouts" {

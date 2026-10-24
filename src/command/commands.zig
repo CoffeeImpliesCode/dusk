@@ -4,7 +4,7 @@
 //! **What this file is.** The port of `src/dawn/native/Commands.h` and the two
 //! exhaustive switches of `src/dawn/native/Commands.cpp`. Dawn's stream is a
 //! flat `(u32 tag, POD struct)` byte arena with eight-byte alignment and no
-//! per-type size table (`docs/02-dawn-design.md` §4.3); the framing lives in
+//! per-type size table; the framing lives in
 //! `allocator.zig` and this file holds what goes into it.
 //!
 //! **What this file does not claim.** It does not claim wire compatibility with
@@ -134,7 +134,7 @@ pub const Tag = enum(u32) {
 
 /// Dawn's 38 tags plus two fixed browser-copy commands.
 /// The count is checked here and in `test/command_stream.zig`.
-pub const tag_count: usize = @typeInfo(Tag).@"enum".fields.len;
+pub const tag_count: usize = @typeInfo(Tag).@"enum".field_names.len;
 
 comptime {
     if (tag_count != 40) @compileError("the command tag count moved from 40");
@@ -262,8 +262,7 @@ pub const BeginRenderPassCmd = struct {
     // struct that does not coerce to the attachment. Naming the element type
     // keeps `{}` the struct's own default value, so the field defaults above are
     // written once (`RenderPassColorAttachmentInfo`).
-    color_attachments: [constants.max_color_attachments]RenderPassColorAttachmentInfo =
-        [_]RenderPassColorAttachmentInfo{.{}} ** constants.max_color_attachments,
+    color_attachments: [constants.max_color_attachments]RenderPassColorAttachmentInfo = @splat(.{}),
     depth_stencil_attachment: RenderPassDepthStencilAttachmentInfo = .{},
     width: u32 = 0,
     height: u32 = 0,
@@ -603,9 +602,7 @@ pub fn addNullTerminatedString(
 /// Dawn's `NextNullTerminatedString` (`Commands.cpp:450-454`): read back the
 /// bytes a push or a marker wrote, without the terminator.
 ///
-/// Public because `docs/40-plan.md` carries this as a port row: the replay
-/// that reads a pushed label back is M18's, and the row records the shape
-/// rather than a reachable path today.
+/// Reads a pushed label from a recorded command stream.
 pub fn nextNullTerminatedString(
     iterator: *allocator_mod.Iterator,
     length: u32,

@@ -98,13 +98,6 @@ const TestError = vulkan_device.Backend.DiscoverError ||
 
 /// Every teardown refusal one test body has not returned yet.
 ///
-/// `defer` cannot fail in Zig 0.16, so a teardown that can refuse cannot
-/// return from the point where it refuses. It records the error here and the
-/// test returns it once the helpers below have unwound, which keeps every
-/// teardown a `defer` and still hands the shard the loader's own words instead
-/// of a trap carrying ours. `AGENTS.md` §3.1 makes a missing proc a typed
-/// error and forbids the panic, so recording is the shape that leaves both
-/// standing. `test/render_pipeline.zig:242`-`:269` is the same shape.
 const TeardownError = layout_vk.Error || bind_group_descriptor_set.Error;
 
 const TeardownErrors = struct {
@@ -152,8 +145,8 @@ test "native layout preserves sparse public bindings across descriptor permutati
             validate_options,
         );
         defer layout.deinit(std.testing.allocator);
-        const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal);
-        defer std.testing.allocator.free(bindings);
+        const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal, &.{});
+        defer layout_vk.freeDescriptorBindings(std.testing.allocator, bindings);
         try std.testing.expectEqual(@as(usize, 2), bindings.len);
         for (bindings) |binding| switch (binding.binding) {
             1 => try std.testing.expectEqual(storage_buffer_descriptor_type, binding.descriptorType),
@@ -166,7 +159,7 @@ test "native layout preserves sparse public bindings across descriptor permutati
         layout.internal.entries[1].binding_number = layout.internal.entries[0].binding_number;
         try std.testing.expectError(
             error.DuplicateBindingNumber,
-            layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+            layout_vk.descriptorBindings(std.testing.allocator, &layout.internal, &.{}),
         );
     }
 }
@@ -191,8 +184,8 @@ test "native sampled texture arrays use one public binding and all descriptors" 
         validate_options,
     );
     defer layout.deinit(std.testing.allocator);
-    const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal);
-    defer std.testing.allocator.free(bindings);
+    const bindings = try layout_vk.descriptorBindings(std.testing.allocator, &layout.internal, &.{});
+    defer layout_vk.freeDescriptorBindings(std.testing.allocator, bindings);
     try std.testing.expectEqual(@as(usize, 1), bindings.len);
     try std.testing.expectEqual(@as(u32, 7), bindings[0].binding);
     try std.testing.expectEqual(@as(u32, 3), bindings[0].descriptorCount);
@@ -205,13 +198,13 @@ test "native sampled texture arrays use one public binding and all descriptors" 
     layout.internal.entries[0].array_size = 4;
     try std.testing.expectError(
         error.InvalidBindingArrayLayout,
-        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal, &.{}),
     );
     layout.internal.entries[0].array_size = 3;
     layout.internal.entries[1].index_in_array = 0;
     try std.testing.expectError(
         error.InvalidBindingArrayLayout,
-        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal),
+        layout_vk.descriptorBindings(std.testing.allocator, &layout.internal, &.{}),
     );
     try std.testing.expectError(
         error.InvalidBindingArrayLayout,
@@ -414,10 +407,6 @@ test "test-bind-group" {
     // them. The three calls in this order are what
     // `test/vulkan_device.zig:196`-`:198` makes.
     //
-    // `Device.deinit` and `Backend.deinit` resolve a dispatch proc they can be
-    // missing and report `error.MissingDeviceProc` rather than unwrapping it
-    // (`AGENTS.md` §3.1). These are plain statements in a teardown sequence and
-    // not a `defer`, so `try` is the whole fix.
     try device.deinit(std.testing.allocator);
     adapters.deinit();
     try backend.deinit();
@@ -486,6 +475,7 @@ fn testLayoutAndSet(
         device.procs,
         device.vk_device,
         &layout.internal,
+        &.{},
     );
     if (set_layout == null) return error.DescriptorSetLayoutReturnedNull;
     defer destroySetLayout(device, set_layout, teardowns);
@@ -618,6 +608,7 @@ fn testPipelineCompatibility(
         device.procs,
         device.vk_device,
         &written.internal,
+        &.{},
     );
     if (set_layout == null) return error.DescriptorSetLayoutReturnedNull;
     defer destroySetLayout(device, set_layout, teardowns);
@@ -665,10 +656,6 @@ fn testPipelineCompatibility(
 /// Releases a descriptor set layout, recording a refused release for
 /// `teardowns`.
 ///
-/// The destroy can only fail on a missing proc, which the create beside it
-/// already required, so a refusal here is a loader defect. `AGENTS.md` §3.1
-/// makes that a typed error and forbids the panic, so the error goes to
-/// `teardowns` and the test returns it.
 fn destroySetLayout(
     device: *const vulkan_device.Device,
     set_layout: vulkan.VkDescriptorSetLayout,
@@ -787,12 +774,6 @@ fn expectOneDescriptorOfEachType(
 
 /// Asserts the gate line's no-layer environment when the variable is present.
 ///
-/// `docs/50-verification.md` §4.2 records that `VK_LOADER_LAYERS_DISABLE=*`
-/// makes the loader force every layer off, and §4.3 says the setting is
-/// per-process. A run without the variable still exercises the same code path,
-/// because the instance asks for no layer, so the absence is not a failure; a
-/// run with the variable set to anything else is a different configuration, and
-/// this says which one it was.
 fn expectNoLayersForced(gpa: std.mem.Allocator) !void {
     // 0.16 removed `std.process.getEnvVarOwned`: the process environment now
     // reaches a test through `std.testing.environ`, which the test runner

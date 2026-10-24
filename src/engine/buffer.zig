@@ -1,12 +1,12 @@
 //! Buffers: creation, CPU mapping, usage barriers, and the upload path.
 //!
-//! **What this file is.** Milestone M10 of `docs/40-plan.md`. It is the port of
+//! **What this file is.** The port of
 //! `src/dawn/native/Buffer.{h,cpp}` and `src/dawn/native/vulkan/BufferVk.{h,cpp}`
 //! at Dawn `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **Why one file and not two.** Dawn splits the front-end state machine from
 //! the Vulkan object so a second back end can answer six pure virtuals
-//! (`Buffer.h:244-261`). `dusk` has one back end (`AGENTS.md` §1), so there is
+//! (`Buffer.h:244-261`). `dusk` has one back end, so there is
 //! no seam to keep: this file is the front-end rules and the concrete Vulkan
 //! buffer, in that order.
 //!
@@ -15,15 +15,12 @@
 //! `Recording` is the one piece that changes per submission: the queue hands
 //! out a fresh command buffer each time it recycles a context
 //! (`QueueVk.cpp:398`), so a buffer holds no pointer to one and every recording
-//! call takes the current one. No global, no clock, no hidden state
-//! (`AGENTS.md` §3).
+//! call takes the current one. No global, no clock, no hidden state.
 //!
 //! **What this file does not claim.** It does not claim shared buffer memory
 //! import, which needs the external-memory path and lands with M21. It does not
 //! claim a texel buffer view. It does not claim the oversized-row split of a
-//! texture copy, which is a front-end rewrite that needs M7's block info. The
-//! `#### M10` table in `docs/40-plan.md` names every upstream function with no
-//! row here and the milestone that owns it.
+//! texture copy, which is a front-end rewrite that needs block info.
 
 const std = @import("std");
 const api = @import("../api/api.zig");
@@ -200,9 +197,8 @@ pub const Rule = error{
 
 /// The whole error surface of one buffer operation. `vk.Error` is the
 /// `VkResult` mapping `src/vk/dispatch.zig:1133` owns, so this file never names
-/// a Vulkan result code. `vk.LoadError` is the missing-proc set `AGENTS.md`
-/// §3.1 requires: a dispatch field the loader left null reaches a caller as a
-/// typed error and never as a panic.
+/// a Vulkan result code. `vk.LoadError` reports a dispatch field the loader
+/// left null as a typed error, never as a panic.
 pub const Error = Rule || core.ValidationError || vk.Error || vk.LoadError ||
     std.mem.Allocator.Error || RingAllocator.AllocateError ||
     error{ MapGenerationExhausted, BufferMapAborted };
@@ -236,7 +232,7 @@ pub const CancelReservationError = error{UploadRingReservationNotLast};
 
 /// `ruleName` names every `Rule` member. The switch has no `else`, so a member
 /// added without a name here is a compile error, and `test/buffer.zig` calls it
-/// for each member of the set (`AGENTS.md` §3).
+/// for each member of the set.
 pub fn ruleName(rule: Rule) []const u8 {
     return switch (rule) {
         error.BufferUsageMissingCopyDst => "buffer usage is missing copy dst",
@@ -277,14 +273,14 @@ pub fn ruleName(rule: Rule) []const u8 {
 
 /// The Vulkan state that does not change for the life of a `VkDevice`, taken by
 /// value. Nothing in this file reaches for a global, and nothing here is a
-/// pointer to the engine's device object (`AGENTS.md` §3).
+/// pointer to the engine's device object.
 ///
 /// Field names match `queue.Context` (`src/engine/queue.zig:62`) so a caller
 /// that already holds a queue builds this without restating five values.
 pub const Device = struct {
     /// Where a buffer and its staging allocation come from.
     allocator: std.mem.Allocator,
-    /// The three-tier table. `AGENTS.md` §3.1 makes it the only door to Vulkan.
+    /// The three-tier Vulkan dispatch table.
     dispatch: vk.Dispatch,
     vk_device: vulkan.VkDevice,
     /// Borrowed physical-device identity for native format capability queries.
@@ -321,8 +317,7 @@ pub const Recording = struct {
 /// The device tier of the dispatch table. A device with no loaded table cannot
 /// exist: `loadDeviceProcs` returns `error.MissingDeviceProc` before the caller
 /// gets here, so a null here is a caller that built a `Device` by hand
-/// (`docs/30-port-design.md` §6.3). That is a typed error rather than a panic,
-/// per `AGENTS.md` §3.1.
+/// (`docs/30-port-design.md` §6.3). That is a typed error rather than a panic.
 fn procs(device: Device) Error!*const vk.DeviceProcs {
     return device.dispatch.device orelse return error.MissingDeviceProc;
 }
@@ -698,8 +693,8 @@ pub const Buffer = struct {
         self.device.handles.acquire(.buffer);
 
         // Everything past the create has something to undo, and the undo reaches
-        // three dispatch fields of its own, so it can fail where `AGENTS.md`
-        // §3.1 wants a typed error (`destroyVulkan`'s own doc comment says so).
+        // three dispatch fields of its own, so it can fail with a typed error
+        // (`destroyVulkan`'s own doc comment says so).
         // An `errdefer` cannot carry a second failure, so the tail is one call
         // and the undo is an ordinary statement in its handler: the undo's
         // error replaces the one that entered the handler, because a caller
@@ -714,7 +709,7 @@ pub const Buffer = struct {
     /// requirements the driver reports, then the allocation and the bind.
     ///
     /// Split out so `initialize` can undo it on the failure path: an `errdefer`
-    /// would have to drop the undo's own error, which `AGENTS.md` §2 forbids.
+    /// would have to drop the undo's own error.
     fn requireAndAllocate(self: *Buffer, device_procs: *const vk.DeviceProcs) Error!void {
         // SAFETY: `get_requirements` writes the whole struct before it returns,
         // and `allocateMemory` reading it below is the first read.
@@ -833,7 +828,7 @@ pub const Buffer = struct {
     }
 
     /// `SetLabelImpl` (`BufferVk.cpp:858`). A null proc is `VK_EXT_debug_utils`
-    /// not being enabled, which is not a failure (`AGENTS.md` §3.1).
+    /// not being enabled, which is not a failure.
     pub fn setLabel(self: *Buffer, label: []const u8) void {
         const instance = self.device.dispatch.instance orelse return;
         const set_object_name = instance.set_debug_utils_object_name_ext orelse return;
@@ -880,8 +875,8 @@ pub const Buffer = struct {
     /// exist yet.
     ///
     /// It reports rather than returning `void`, because each of the three
-    /// procs it reaches is a dispatch field and `AGENTS.md` §3.1 makes a null
-    /// one a typed error. The table is a parameter so `initialize` can hand
+    /// procs it reaches is a dispatch field and a null one is a typed error.
+    /// The table is a parameter so `initialize` can hand
     /// over the one it already resolved.
     fn destroyVulkan(self: *Buffer, device_procs: *const vk.DeviceProcs) Error!void {
         if (self.mapped) |_| {
@@ -1014,7 +1009,7 @@ pub const Buffer = struct {
     /// submitted by `recording_context.emitBufferBarrierIfNecessary`: both are
     /// the one `vkCmdPipelineBarrier` this row reaches
     /// (`CommandRecordingContextVk.cpp:42`), so `recording_context.zig` owns
-    /// them and this file carries no second copy (`AGENTS.md` §6).
+    /// them and this file carries no second copy.
     pub fn trackUsageAndGetResourceBarrier(
         self: *Buffer,
         recording: Recording,
@@ -1147,7 +1142,7 @@ pub const Buffer = struct {
             // `BufferBarrier::Merge` (`BufferVk.cpp:891`) unions the four masks
             // and does nothing else, so the union is written here: the type is
             // `recording_context.BufferBarrier` beside the row that submits it,
-            // and a method on it belongs to that file (`AGENTS.md` §6).
+            // and a method on it belongs to that file.
             barrier.src_stage_mask |= one.src_stage_mask;
             barrier.dst_stage_mask |= one.dst_stage_mask;
             barrier.src_access_mask |= one.src_access_mask;
@@ -1260,7 +1255,7 @@ pub const Buffer = struct {
     /// `MapMemoryAndPerformOperation` (`BufferVk.cpp:689`) over the mapping this
     /// buffer keeps for its whole life, which is what `crbug.com/dawn/774` asks
     /// for. The operation is a context and a function rather than a closure, so
-    /// nothing is captured and the caller names its own state (`AGENTS.md` §3).
+    /// nothing is captured and the caller names its own state.
     fn mapMemoryAndPerformOperation(
         self: *const Buffer,
         requested_offset: u64,
@@ -1714,7 +1709,7 @@ pub const Buffer = struct {
     }
 
     /// The operation `uploadDirect` runs over the mapped range. Its state is a
-    /// parameter rather than a capture (`AGENTS.md` §3).
+    /// parameter rather than a capture.
     const DirectUpload = struct {
         buffer: *Buffer,
         data: []const u8,
@@ -1947,31 +1942,27 @@ comptime {
     // switch in `ruleName` has no `else`, so a member added without a name
     // there is already a compile error; the loop below is the sweep that
     // asserts it from the module, so the two cannot drift apart.
-    // The set is walked as the expression itself and not through a binding:
-    // `zwanzig` reads a `const` bound to `@typeInfo(...).error_set.?` as a
-    // type, and a type is `PascalCase`, which would name a slice of
-    // `std.builtin.Type.Field` as a type. `texture.zig:1834` does the same.
     var named: usize = 0;
-    for (@typeInfo(Rule).error_set.?) |member| {
+    for (@typeInfo(Rule).error_set.error_names.?) |member_name| {
         named += 1;
         // Reflection hands back a member's name, not a `Rule` value, so
         // `@field` is what turns a swept member into the one `ruleName` takes
         // (`test/buffer.zig:652`-`:655` sweeps the same set the same way).
-        if (ruleName(@field(Rule, member.name)).len == 0) {
-            @compileError("a buffer rule has no name: " ++ member.name);
+        if (ruleName(@field(Rule, member_name)).len == 0) {
+            @compileError("a buffer rule has no name: " ++ member_name);
         }
     }
-    if (named != @typeInfo(Rule).error_set.?.len) {
+    if (named != @typeInfo(Rule).error_set.error_names.?.len) {
         @compileError("the buffer rule sweep missed a member");
     }
     // `State` is the other closed domain a caller matches on, so it is swept
     // the same way.
-    const states = @typeInfo(State).@"enum".fields;
+    const states = @typeInfo(State).@"enum".field_names;
     var named_states: usize = 0;
-    for (states) |field| {
+    for (states) |field_name| {
         named_states += 1;
-        if (stateName(@enumFromInt(field.value)).len == 0) {
-            @compileError("a buffer state has no name: " ++ field.name);
+        if (stateName(@field(State, field_name)).len == 0) {
+            @compileError("a buffer state has no name: " ++ field_name);
         }
     }
     if (named_states != states.len) @compileError("the buffer state sweep missed a member");

@@ -13,7 +13,9 @@ fn create(_: vulkan.VkDevice, _: [*c]const vulkan.VkSemaphoreCreateInfo, _: [*c]
     out.* = @ptrFromInt(0x1000);
     return vulkan.VK_SUCCESS;
 }
-fn destroy(_: vulkan.VkDevice, _: vulkan.VkSemaphore, _: [*c]const vulkan.VkAllocationCallbacks) callconv(.c) void { destroyed += 1; }
+fn destroy(_: vulkan.VkDevice, _: vulkan.VkSemaphore, _: [*c]const vulkan.VkAllocationCallbacks) callconv(.c) void {
+    destroyed += 1;
+}
 fn importFd(_: vulkan.VkDevice, info: [*c]const vulkan.VkImportSemaphoreFdInfoKHR) callconv(.c) vulkan.VkResult {
     std.debug.assert(info.*.fd == -1);
     return vulkan.VK_SUCCESS;

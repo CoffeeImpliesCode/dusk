@@ -1,7 +1,6 @@
 //! The Vulkan seam the pipeline path reaches.
 //!
-//! **What this file is.** The entry points `AGENTS.md` §3.1 makes the only
-//! door to Vulkan, narrowed to the six the pipeline path calls. The shape is
+//! **What this file is.** The six Vulkan entry points the pipeline path calls. The shape is
 //! M13's `shader_module_vk.Device`: injected function pointers and a device
 //! handle, so a test supplies its own and a caller never reaches past it.
 //!
@@ -17,8 +16,7 @@ const vulkan = @import("vulkan");
 const vk = @import("../vk/dispatch.zig");
 
 /// One entry point the loader did not fill, named rather than left as a bare
-/// `.?`. `AGENTS.md` §3.1 calls a null field "not loaded" and nothing else, so
-/// the call site has to say which one it hit.
+/// `.?`. The call site reports which entry point was not loaded.
 pub const MissingEntryPoint = error{
     CreateGraphicsPipelinesNotLoaded,
     CreateComputePipelinesNotLoaded,
@@ -30,8 +28,7 @@ pub const MissingEntryPoint = error{
 
 /// A call the seam could not make: an entry point the loader did not fill, or a
 /// `VkResult` the port's one result table classifies
-/// (`src/vk/dispatch.zig:1159`). `AGENTS.md` §3.1 keeps that mapping in
-/// `dispatch.zig` and nowhere else, so this union declares no Vulkan code.
+/// (`src/vk/dispatch.zig:1159`), so this union declares no Vulkan code.
 pub const BackendError = MissingEntryPoint || vk.Error;
 
 /// The Vulkan device a pipeline is created against, and the six calls M14 makes.

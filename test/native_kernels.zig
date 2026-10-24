@@ -531,12 +531,12 @@ fn prepareClear(session: *Session, variant: u32, samples: u32) !ClearPipeline {
     const formats = [_]api.TextureFormat{
         .rgba8_unorm, .bgra8_unorm, .rgba16_float, .r32_float,
     };
-    var colors: [4]u32 = .{ @intFromEnum(api.TextureFormat.rgba8_unorm), 0, 0, 0 };
+    var colors: [4]u32 = .{ @backingInt(api.TextureFormat.rgba8_unorm), 0, 0, 0 };
     var pass_query: engine.render_pass_cache.RenderPassCacheQuery = .{};
     pass_query.setSampleCount(samples);
     for (&colors, 0..) |*color, index| {
         const selected = if (index == 0) api.TextureFormat.rgba8_unorm else formats[(variant >> @intCast((index - 1) * 2)) & 3];
-        color.* = @intFromEnum(selected);
+        color.* = @backingInt(selected);
         pass_query.setColor(.{
             .index = @intCast(index),
             .format = selected,
@@ -743,7 +743,7 @@ const DriverProbe = struct {
     fn created(self: *DriverProbe, kind: HandleKind, handle: anytype) void {
         const value = bits(handle);
         std.debug.assert(value != 0);
-        const bucket = &self.live[@intFromEnum(kind)];
+        const bucket = &self.live[@backingInt(kind)];
         for (bucket) |*slot| {
             if (slot.* == 0) {
                 slot.* = value;
@@ -756,7 +756,7 @@ const DriverProbe = struct {
     fn destroyed(self: *DriverProbe, kind: HandleKind, handle: anytype) void {
         const value = bits(handle);
         if (value == 0) return;
-        for (&self.live[@intFromEnum(kind)]) |*slot| {
+        for (&self.live[@backingInt(kind)]) |*slot| {
             if (slot.* == value) {
                 slot.* = 0;
                 return;
@@ -1408,7 +1408,7 @@ test "native kernels stencil write bits select distinct actual fixed-mask pipeli
     const io = f.threaded.io();
     const value = try command.attachment_state.AttachmentState.fromRenderPipeline(.{
         .color_formats = &.{},
-        .depth_stencil_format = @intFromEnum(api.TextureFormat.depth24_plus_stencil8),
+        .depth_stencil_format = @backingInt(api.TextureFormat.depth24_plus_stencil8),
         .sample_count = 1,
         .expand_resolve = .{},
         .pls = null,

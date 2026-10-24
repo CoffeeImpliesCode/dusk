@@ -3,19 +3,13 @@
 //! into a 4 KiB buffer, a submit, a 5,000 ms fence wait, and a teardown that
 //! leaves no live handle.
 //!
-//! **The gate line runs this shard with `VK_LOADER_LAYERS_DISABLE=*`.**
-//! `docs/40-plan.md` §1 M9 names that environment, and
-//! `docs/50-verification.md` §4.2 records the measured result: the loader forces
-//! every layer off. The test asserts the variable when it is set, and the
-//! instance requests no layer of its own, so a layer cannot reach Vulkan through
-//! this path either way.
+//! The test checks `VK_LOADER_LAYERS_DISABLE=*` when the variable is set.
+//! The instance requests no layer of its own.
 //!
 //! **What this test does not claim.** It does not claim anything about memory
 //! content. `vkCmdFillBuffer` is recorded, submitted and retired, but nothing
 //! reads the buffer back: M10 owns the readback and its 1 MiB pattern, and a
 //! test that asserted on bytes it never read would be an assertion on nothing.
-//! It creates no surface and no swap chain, because the host is headless
-//! (`AGENTS.md` §5).
 //!
 //! **The build wiring this shard needs.** The shard root is this file, the
 //! library is `@import("dusk")` and the bindings are `@import("vulkan")`, the
@@ -74,13 +68,10 @@ const SetupError = vulkan_device.ProcError ||
         /// No compatible memory type is legal for the buffer.
         NoMemoryType,
         /// `vkCmdFillBuffer` is not in the device tier, which `loadDeviceProcs`
-        /// guarantees for core Vulkan 1.0. Reaching this means the dispatch table is
-        /// not what `docs/40-plan.md` §1 M1 says it is.
+        /// guarantees for core Vulkan 1.0. Reaching this means the dispatch table
+        /// is incomplete.
         FillCommandUnavailable,
         /// The device tier did not supply one of the entry points this test calls.
-        /// `dispatch.loadDeviceProcs` refuses with `MissingDeviceProc` for the same
-        /// reason (`src/vk/dispatch.zig:1055`), and `AGENTS.md` §3.1 makes a missing
-        /// entry point an error rather than a panic.
         MissingProc,
     };
 
@@ -197,9 +188,6 @@ test "test-vulkan-device" {
 
     // Teardown, in the order the handles were created. The live-handle count is
     // the assertion that no destroy was missed.
-    // Every teardown below reports rather than returning `void`
-    // (`AGENTS.md` §3.1), and this test runs them as the last statements of its
-    // body because a `defer` cannot hand an error back.
     try destroyFillAllocation(&device, allocation, &handles);
     try q.deinit(io, &objects);
     {
@@ -306,10 +294,6 @@ fn createFillAllocation(
 /// Destroys the fill buffer and its memory. The buffer goes first, because
 /// freeing memory a resource is still bound to is invalid, which is the rule
 /// `FENCED_DELETER_TYPES` states at `FencedDeleter.h:46`-`:47`.
-/// It reports rather than returning `void`, because a teardown that reaches a
-/// dispatch field has no other way to name a missing entry point
-/// (`AGENTS.md` §3.1), and the test runs it as a statement because a `defer`
-/// cannot hand one back.
 fn destroyFillAllocation(
     device: *const vulkan_device.Device,
     allocation: FillAllocation,
@@ -327,12 +311,6 @@ fn destroyFillAllocation(
 
 /// Asserts the gate line's no-layer environment when the variable is present.
 ///
-/// `docs/50-verification.md` §4.2 records that `VK_LOADER_LAYERS_DISABLE=*`
-/// makes the loader force every layer off, and §4.3 says the setting is
-/// per-process. A run without the variable still exercises the same code path,
-/// because the instance asks for no layer, so the absence is not a failure; a
-/// run with the variable set to anything else is a different configuration, and
-/// this says which one it was.
 fn expectNoLayersForced(gpa: std.mem.Allocator) !void {
     // 0.16 removed `std.process.getEnvVarOwned`: the process environment now
     // reaches a test through `std.testing.environ`, which the test runner

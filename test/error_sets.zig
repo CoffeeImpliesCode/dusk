@@ -1,6 +1,5 @@
 //! Sweeps the three error sets of `core`.
 //!
-//! `AGENTS.md` §3 asks that every member of an error set be named by a test.
 //! Each member below gets its own assertion, so a failure names the member and
 //! not the set.
 
@@ -16,19 +15,19 @@ test "every member of every set has a message and a class" {
 test "the merged set holds every member of the three sets" {
     // The bound is the merged set itself, so a member added to any set lands
     // here without a second edit.
-    inline for (@typeInfo(core.Error).error_set.?) |entry| {
+    inline for (@typeInfo(core.Error).error_set.error_names.?) |entry| {
         // Reflection hands back a member's name rather than a value, so
         // `@field` is what turns a swept member into the one `codeFromError`
         // takes (`test/buffer.zig:652-655` sweeps a set the same way).
-        const member = @field(core.Error, entry.name);
+        const member = @field(core.Error, entry);
         const code = core.codeFromError(member);
         try std.testing.expectEqualStrings(@errorName(member), core.nameOf(code));
     }
 
-    const merged_count = @typeInfo(core.Error).error_set.?.len;
-    const validation_count = @typeInfo(core.ValidationError).error_set.?.len;
-    const device_lost_count = @typeInfo(core.DeviceLostError).error_set.?.len;
-    const unrecoverable_count = @typeInfo(core.UnrecoverableError).error_set.?.len;
+    const merged_count = @typeInfo(core.Error).error_set.error_names.?.len;
+    const validation_count = @typeInfo(core.ValidationError).error_set.error_names.?.len;
+    const device_lost_count = @typeInfo(core.DeviceLostError).error_set.error_names.?.len;
+    const unrecoverable_count = @typeInfo(core.UnrecoverableError).error_set.error_names.?.len;
     try std.testing.expectEqual(
         validation_count + device_lost_count + unrecoverable_count,
         merged_count,
@@ -101,16 +100,16 @@ fn sweep(
     comptime ErrorSet: type,
     comptime tag: std.meta.Tag(core.ErrorCode),
 ) !void {
-    const member_count = @typeInfo(ErrorSet).error_set.?.len;
+    const member_count = @typeInfo(ErrorSet).error_set.error_names.?.len;
     try std.testing.expect(member_count > 0);
 
     // The bound is the set itself: every member is checked once. Reflection
     // hands back a member's name rather than a value, so `@field` is what
     // turns a swept member into the one `tag` names.
-    inline for (@typeInfo(ErrorSet).error_set.?) |entry| {
-        const member = @field(ErrorSet, entry.name);
+    inline for (@typeInfo(ErrorSet).error_set.error_names.?) |entry| {
+        const member = @field(ErrorSet, entry);
         const code: core.ErrorCode = @unionInit(core.ErrorCode, @tagName(tag), member);
-        try expectMessageFor(entry.name);
+        try expectMessageFor(entry);
         try std.testing.expectEqualStrings(@tagName(tag), @tagName(core.classOf(code)));
     }
 }

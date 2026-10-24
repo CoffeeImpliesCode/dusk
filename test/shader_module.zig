@@ -1,12 +1,9 @@
 //! The M13 shard: two checked-in fixtures through `createShaderModule`.
 //!
-//! **What the milestone claims.** `docs/40-plan.md` §1 `### M13` names four
-//! assertions and this shard makes all four: the `VkShaderModule` handle is
+//! **What this shard asserts.** The `VkShaderModule` handle is
 //! non-null, `getCompilationInfo()` reports 0 errors and 0 warnings, the
 //! reflected layout carries the one descriptor `triangle.frag.wgsl` declares,
-//! and the words the module holds are the input file word for word. The last
-//! one is why the milestone exists: Dawn cannot pass caller SPIR-V through
-//! (`docs/02-dawn-design.md` §4.9) and the port's claim is that it does.
+//! and the words the module holds are the input file word for word.
 //!
 //! **Why comparing `module.words` compares the driver's bytes.**
 //! `src/pipeline/shader_module_vk.zig:102`-`:103` builds `codeSize` and `pCode`
@@ -48,9 +45,7 @@ const vulkan_device = engine.vulkan_device;
 const Word = spirv.Word;
 const MessageType = shader_module.MessageType;
 
-/// The fixtures are generated from the checked-in `.wgsl`, never hand-written;
-/// `test/spirv.zig:3`-`:5` and `docs/50-verification.md` §6.2 record the
-/// command line that produced each `.spv` from it.
+/// The fixtures are generated from the checked-in `.wgsl`, never hand-written.
 const vertex_fixture: []const u8 = @embedFile("fixtures/triangle.vert.spv");
 const fragment_fixture: []const u8 = @embedFile("fixtures/triangle.frag.spv");
 
@@ -228,12 +223,6 @@ fn specializationDriverFailure(allocator: std.mem.Allocator, io: std.Io) !void {
 
 /// Every refusal this fixture's teardown has not handed back yet.
 ///
-/// Zig 0.16 `defer` cannot fail, so `Backend.deinit`, `Device.deinit` and
-/// `ShaderModule.destroy` — which release through the global, instance and
-/// device procs the loader can be missing — cannot return from where they
-/// refuse. `AGENTS.md` §3.1 makes that a typed error and forbids the panic, so
-/// they record it here and `expectCreatedFrom` returns it once their `defer`s
-/// have run.
 const TeardownError = vulkan_device.ProcError || shader_module_vk.CreateError;
 
 const TeardownErrors = struct {
@@ -318,11 +307,6 @@ fn createdFromOnDevice(want: Fixture, io: std.Io, teardowns: *TeardownErrors) !v
         .label = want.label,
         .words = words,
     });
-    // A failed assertion must still give the Vulkan handle back, so the
-    // cleanup is an `errdefer` and the happy path destroys once more at the
-    // bottom. A refusal from that cleanup is recorded rather than discarded
-    // (`AGENTS.md` §2): the body is already returning the assertion that armed
-    // this, and `report` reads the recording only on the path where it did not.
     errdefer module.destroy(&seam) catch |err| teardowns.record(err);
 
     // The two outcomes are exclusive, exactly as Dawn asserts them

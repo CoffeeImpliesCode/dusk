@@ -227,7 +227,7 @@ pub const ProgrammableEncoder = struct {
         try self.context.validateCanEncodeOn(self.id, false);
         const record = try self.context.pendingAllocator().allocateCommandWithData(
             commands.SetImmediatesCmd,
-            @intFromEnum(commands.Tag.set_immediates),
+            @backingInt(commands.Tag.set_immediates),
             options.data.len,
         );
         record.command.* = .{ .offset = options.offset, .size = @intCast(options.data.len) };
@@ -358,7 +358,7 @@ test "programmable immediate validation refuses alignment and overflowing ranges
         .{ .options = .{ .offset = 1, .data = &word }, .expected = error.ImmediateDataUnaligned },
         .{ .options = .{ .offset = 0, .data = word[0..3] }, .expected = error.ImmediateDataUnaligned },
         .{ .options = .{ .offset = 256, .data = &word }, .expected = error.ImmediateDataTooLarge },
-        .{ .options = .{ .offset = 252, .data = &([_]u8{0} ** 8) }, .expected = error.ImmediateDataTooLarge },
+        .{ .options = .{ .offset = 252, .data = &@as([8]u8, @splat(0)) }, .expected = error.ImmediateDataTooLarge },
         .{ .options = .{ .offset = 0xffff_fffc, .data = &word }, .expected = error.ImmediateDataTooLarge },
         .{ .options = .{ .offset = 4, .data = excessive }, .expected = error.ImmediateDataTooLarge },
     };
@@ -389,7 +389,7 @@ test "programmable immediate allocation failures leave tracker and stream unchan
         tracker.aspects.set(.immediate_data);
         const initial_aspects = tracker.aspects.bits;
         const initial_data = tracker.immediate_data;
-        const full_data = [_]u8{0xa5} ** 256;
+        const full_data: [256]u8 = @splat(0xa5);
         if (encoder.setImmediates(&tracker, .{ .offset = 0, .data = &full_data })) |_| {
             try std.testing.expectEqualSlices(u8, &full_data, &tracker.immediate_data);
             try std.testing.expectEqual(std.math.maxInt(u64), tracker.immediate_data_mask);
@@ -416,7 +416,7 @@ test "programmable immediate rollover failure preserves existing records and the
         defer fixture.deinit(allocator);
         var encoder = ProgrammableEncoder.init(allocator, &fixture.context);
         var tracker = state_tracker.Tracker.init(allocator, false);
-        const label = [_]u8{'x'} ** (4096 - 64);
+        const label: [4096 - 64]u8 = @splat('x');
         try encoder.insertDebugMarker(&label);
         var filled_block_count: usize = 1;
         while (fixture.context.pending.blocks.items.len < fixture.context.pending.blocks.capacity and
@@ -440,7 +440,7 @@ test "programmable immediate rollover failure preserves existing records and the
         try tracker.setImmediateData(16, &initial_word);
         const saved_data = tracker.immediate_data;
         const saved_mask = tracker.immediate_data_mask;
-        const full_data = [_]u8{0xa5} ** 256;
+        const full_data: [256]u8 = @splat(0xa5);
         failing.fail_index = failing.alloc_index + fail_offset;
         failing.resize_fail_index = failing.resize_index;
         const recorded = encoder.setImmediates(&tracker, .{ .offset = 0, .data = &full_data });

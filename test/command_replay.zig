@@ -423,7 +423,7 @@ const Fixture = struct {
         const value = try command.attachment_state.AttachmentState.fromRenderPass(.{
             .colors = &.{.{
                 .view = .{
-                    .format = @intFromEnum(self.view.format),
+                    .format = @backingInt(self.view.format),
                     .sample_count = self.view.texture.sample_count,
                     .aspects = if (self.view.aspects.color != 0) 1 else 0,
                 },
@@ -606,7 +606,7 @@ const Fixture = struct {
 };
 
 fn emit(comptime tag: commands.Tag, arena: *stream.Allocator, value: commands.Payload(tag)) !void {
-    (try arena.allocateCommand(commands.Payload(tag), @intFromEnum(tag))).* = value;
+    (try arena.allocateCommand(commands.Payload(tag), @backingInt(tag))).* = value;
 }
 fn bytes(arena: *stream.Allocator, value: []const u8) !void {
     @memcpy(try arena.allocateData(u8, value.len), value);
@@ -1025,33 +1025,87 @@ test "replay decodes nonzero offset runs and preserves the following command" {
     };
     try fixture.init(null);
     defer _ = fixture.deinit();
-    var buffer: engine.buffer.Buffer = undefined;
-    buffer.size = 1024;
-    var bindings = [_]engine.bind_group.Binding{.{ .buffer = .{
-        .binding = 0,
-        .buffer = &buffer,
-        .offset = 0,
-        .size = 256,
-        .kind = .uniform,
-        .dynamic = true,
-        .alignment = 256,
-        .stages = .none,
-    } }};
-    var group: engine.bind_group.BindGroup = .{
-        .objects = fixture.core_device.borrow().objects,
-        .allocator = allocator,
-        .descriptor_allocator = undefined,
-        .descriptor_allocation = .{},
-        .pipeline_layout = null,
-        .group_index = 0,
-        .bindings = &bindings,
-        .group_layout = .{ .handle = null, .bindings = &.{} },
+    const group = created: {
+        var guard = dusk.core.ObjectGuard.lockUncancelable(
+            std.testing.io,
+            fixture.core_device.borrow().objectList(),
+        );
+        defer guard.unlock(std.testing.io);
+        const resources = engine.native_resources;
+        const device = fixture.native_fixture.resourceDevice();
+        const arena = &fixture.core_device.arena;
+        const buffer = try resources.createBuffer(allocator, std.testing.io, &guard, arena, device, .{
+            .size = 1024,
+            .usage = .{ .uniform = true },
+        });
+        defer buffer.header.releaseUserLocked(&guard, std.testing.io) catch
+            @panic("offset buffer release failed");
+        const group_layout = try resources.createBindGroupLayout(
+            allocator,
+            std.testing.io,
+            &guard,
+            arena,
+            device,
+            .{
+                .descriptor = .{ .entries = &.{.{
+                    .binding_number = 0,
+                    .visibility = .{ .compute = true },
+                    .kind = .{ .buffer = .{
+                        .binding_type = .uniform,
+                        .has_dynamic_offset = true,
+                        .min_binding_size = 256,
+                    } },
+                }} },
+                .validation = .{
+                    .max_storage_buffers_in_vertex_stage = 0,
+                    .max_storage_buffers_in_fragment_stage = 0,
+                },
+            },
+        );
+        defer group_layout.header.releaseUserLocked(&guard, std.testing.io) catch
+            @panic("offset group layout release failed");
+        const layout = try resources.createPipelineLayout(allocator, std.testing.io, &guard, arena, device, .{
+            .groups = &.{group_layout},
+        });
+        defer layout.header.releaseUserLocked(&guard, std.testing.io) catch
+            @panic("offset pipeline layout release failed");
+        break :created try resources.createBindGroup(allocator, std.testing.io, &guard, arena, device, .{
+            .layout = layout,
+            .group_index = 0,
+            .bindings = &.{.{ .buffer = .{
+                .binding = 0,
+                .buffer = buffer,
+                .offset = 0,
+                .size = 256,
+                .kind = .uniform,
+                .dynamic = true,
+                .alignment = 256,
+                .stages = .{ .compute = true },
+            } }},
+        });
+    };
+    defer {
+        var guard = dusk.core.ObjectGuard.lockUncancelable(
+            std.testing.io,
+            fixture.core_device.borrow().objectList(),
+        );
+        defer guard.unlock(std.testing.io);
+        group.header.releaseUserLocked(&guard, std.testing.io) catch
+            @panic("offset group release failed");
+    }
+    const group_ref = reference: {
+        var guard = dusk.core.ObjectGuard.lockUncancelable(
+            std.testing.io,
+            fixture.core_device.borrow().objectList(),
+        );
+        defer guard.unlock(std.testing.io);
+        break :reference try group.ref(&guard);
     };
     var encoder = command.command_encoder.CommandEncoder.init(allocator, fixture.core_device.borrow(), .{});
     defer fixture.deinitEncoder(&encoder);
     var pass = try encoder.beginComputePass(.{});
     defer pass.deinit();
-    try pass.setBindGroup(.{ .index = 0, .group = &group, .dynamic_offset_count = 1, .dynamic_offsets = &.{256} });
+    try pass.setBindGroup(.{ .index = 0, .group = group_ref, .dynamic_offset_count = 1, .dynamic_offsets = &.{256} });
     try pass.insertDebugMarker("after offsets");
     try pass.end();
     var finished = try encoder.finish();
@@ -1358,7 +1412,9 @@ test "bundle failure leaves parent and borrowed bundle storage owned and readabl
     );
     defer guard.unlock(std.testing.io);
     try std.testing.expect(bundle.header.isAlive(&guard));
-    try std.testing.expectEqual(@as(u32, 1), fixture.capture.markers);
+    // The render prepass admits every bundle before starting native execution.
+    try std.testing.expectEqual(@as(u32, 0), fixture.capture.markers);
+    try std.testing.expectEqual(@as(u32, 0), fixture.capture.begins);
     try std.testing.expectEqual(@as(u32, 0), fixture.capture.ends);
     var borrowed = bundle.iterator(&guard);
     defer borrowed.deinit();

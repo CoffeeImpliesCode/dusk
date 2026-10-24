@@ -31,7 +31,7 @@ pub const CacheKey = struct {
     bytes: std.ArrayList(u8) = .empty,
 
     /// Every write can need to grow the buffer, so every write names its
-    /// allocator. `AGENTS.md` §2: an allocator is a parameter, never a global.
+    /// allocator.
     pub const AppendError = std.mem.Allocator.Error;
 
     pub fn init() CacheKey {
@@ -90,7 +90,7 @@ pub const CacheKey = struct {
         if (@typeInfo(@TypeOf(value)) != .@"enum") {
             @compileError("appendEnum takes an enumeration, not a union or an integer");
         }
-        try self.appendWord(allocator, @intCast(@intFromEnum(value)));
+        try self.appendWord(allocator, @intCast(@backingInt(value)));
     }
 
     /// The leading discriminator. Written first by every key builder so a
@@ -101,7 +101,7 @@ pub const CacheKey = struct {
         allocator: std.mem.Allocator,
         kind: Kind,
     ) AppendError!void {
-        try self.appendWord(allocator, @intFromEnum(kind));
+        try self.appendWord(allocator, @backingInt(kind));
     }
 
     /// The bucket index. Two keys with equal bytes always agree here; two keys
@@ -126,7 +126,7 @@ pub const CacheKey = struct {
 /// `std.heap.DebugAllocator.deinit` prints every leaked block with the stack
 /// trace that allocated it and only then answers `.leak`, so asserting that
 /// answer is what turns the report into a failed test. A `defer` has no way to
-/// `try` the result, and `AGENTS.md` §2 forbids dropping it.
+/// `try` the result.
 fn assertNoLeak(state: *std.heap.DebugAllocator(.{})) void {
     std.debug.assert(state.deinit() == .ok);
 }

@@ -637,20 +637,20 @@ test "all capture classes route to their nearest filter on the same immutable no
 }
 
 test "every code matches exactly the filters WebGPU gives it" {
-    inline for (@typeInfo(core.ValidationError).error_set.?) |entry| {
-        const code: core.ErrorCode = .{ .validation = @field(core.ValidationError, entry.name) };
+    inline for (@typeInfo(core.ValidationError).error_set.error_names.?) |entry| {
+        const code: core.ErrorCode = .{ .validation = @field(core.ValidationError, entry) };
         try expectFilter(code, .validation, true);
         try expectFilter(code, .out_of_memory, false);
         try expectFilter(code, .internal, false);
     }
-    inline for (@typeInfo(core.DeviceLostError).error_set.?) |entry| {
-        const code: core.ErrorCode = .{ .device_lost = @field(core.DeviceLostError, entry.name) };
+    inline for (@typeInfo(core.DeviceLostError).error_set.error_names.?) |entry| {
+        const code: core.ErrorCode = .{ .device_lost = @field(core.DeviceLostError, entry) };
         try expectFilter(code, .validation, false);
         try expectFilter(code, .out_of_memory, false);
         try expectFilter(code, .internal, true);
     }
-    inline for (@typeInfo(core.UnrecoverableError).error_set.?) |entry| {
-        const member = @field(core.UnrecoverableError, entry.name);
+    inline for (@typeInfo(core.UnrecoverableError).error_set.error_names.?) |entry| {
+        const member = @field(core.UnrecoverableError, entry);
         const code: core.ErrorCode = .{ .unrecoverable = member };
         const is_memory = member == error.OutOfDeviceMemory or member == error.OutOfHostMemory;
         try expectFilter(code, .validation, false);

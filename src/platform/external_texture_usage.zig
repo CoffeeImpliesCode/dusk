@@ -21,7 +21,8 @@ pub fn textureUsageFlagsForFormat(mask: u32, format: vk.VkFormat) vk.VkImageUsag
     if (mask & 8 != 0) flags |= vk.VK_IMAGE_USAGE_STORAGE_BIT;
     if (mask & 16 != 0) flags |= if (isDepthStencil(format))
         @as(vk.VkImageUsageFlags, vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-    else @as(vk.VkImageUsageFlags, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    else
+        @as(vk.VkImageUsageFlags, vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     if (mask & 32 != 0) flags |= vk.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
     return flags;
 }
@@ -32,10 +33,7 @@ pub fn textureUsageFlags(mask: u32) vk.VkImageUsageFlags {
 
 fn isDepthStencil(format: vk.VkFormat) bool {
     return switch (format) {
-        vk.VK_FORMAT_D16_UNORM, vk.VK_FORMAT_X8_D24_UNORM_PACK32,
-        vk.VK_FORMAT_D32_SFLOAT, vk.VK_FORMAT_S8_UINT,
-        vk.VK_FORMAT_D16_UNORM_S8_UINT, vk.VK_FORMAT_D24_UNORM_S8_UINT,
-        vk.VK_FORMAT_D32_SFLOAT_S8_UINT => true,
+        vk.VK_FORMAT_D16_UNORM, vk.VK_FORMAT_X8_D24_UNORM_PACK32, vk.VK_FORMAT_D32_SFLOAT, vk.VK_FORMAT_S8_UINT, vk.VK_FORMAT_D16_UNORM_S8_UINT, vk.VK_FORMAT_D24_UNORM_S8_UINT, vk.VK_FORMAT_D32_SFLOAT_S8_UINT => true,
         else => false,
     };
 }

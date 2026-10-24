@@ -2,8 +2,7 @@
 //! index spaces.
 //!
 //! **What this file is.** The port of `native/BindGroupLayoutInternal.{h,cpp}`
-//! at Dawn `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`. It validates one descriptor,
+//! at Dawn `32f77c02294310054a660c393feded4bcb3f203c`. It validates one descriptor,
 //! expands the entries Dawn expands, sorts what is left into one dense vector
 //! and turns each kind into a range of that vector.
 //!
@@ -78,8 +77,7 @@ pub fn externalBindingNumbers(
 pub const max_dynamic_storage_buffers_per_pipeline_layout: u32 = 16;
 
 /// Every rule this file can report. The `errors.ValidationError` members carry
-/// the rules other modules own; the rest name a `DAWN_INVALID_IF` site whose
-/// line is in the `#### M12` table of `docs/40-plan.md`.
+/// the rules other modules own; the rest name a `DAWN_INVALID_IF` site.
 pub const Error = errors.ValidationError || std.mem.Allocator.Error || error{
     /// An entry no stage can see. Dawn refuses it in `ValidateShaderStage`,
     /// which `ValidateBindGroupLayoutEntry` calls at
@@ -178,8 +176,7 @@ pub const ShaderStages = packed struct(u32) {
 };
 
 /// The index of one stage inside a per-stage counter, which is the packed
-/// field order of `ShaderStages`. `AGENTS.md` §3 names a switch exhaustively
-/// rather than a cast that can fail silently.
+/// field order of `ShaderStages`, computed by an exhaustive switch.
 pub fn stageIndex(stage: ShaderStage) usize {
     return switch (stage) {
         .vertex => 0,
@@ -206,7 +203,7 @@ pub const BindingTypeOrder = enum(u32) {
     count,
 
     /// One past the last order, which is the length of `Layout.type_start`.
-    pub const range_count = @typeInfo(BindingTypeOrder).@"enum".fields.len;
+    pub const range_count = @typeInfo(BindingTypeOrder).@"enum".field_names.len;
 };
 
 /// Public and private buffer permissions remain distinct canonical kinds.
@@ -433,11 +430,11 @@ pub const BindingIndex = enum(u32) {
     _,
 
     pub fn toInt(self: BindingIndex) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn fromInt(value: u32) BindingIndex {
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 };
 
@@ -447,11 +444,11 @@ pub const ApiBindingIndex = enum(u32) {
     _,
 
     pub fn toInt(self: ApiBindingIndex) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn fromInt(value: u32) ApiBindingIndex {
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 };
 
@@ -508,8 +505,7 @@ pub const BindingCounts = struct {
 
 /// What the device decides about the two storage-buffer limits. Dawn reads them
 /// off `CombinedLimits::compat` (`Limits.cpp:95`-`:96`); the port takes them as
-/// a parameter so a caller with no device can still reach the rules, which is
-/// `AGENTS.md` §3 and not a second convention.
+/// a parameter so a caller with no device can still reach the rules.
 pub const ValidateOptions = struct {
     max_storage_buffers_in_vertex_stage: u32,
     max_storage_buffers_in_fragment_stage: u32,
@@ -722,7 +718,7 @@ pub const Layout = struct {
         var walk_index: u32 = 0;
         while (walk_index < stored_count) : (walk_index += 1) {
             const expanded_binding = expanded.items[walk_index];
-            counts[@intFromEnum(expanded_binding.layout.typeOrder())] += 1;
+            counts[@backingInt(expanded_binding.layout.typeOrder())] += 1;
             switch (expanded_binding.layout) {
                 .buffer => |buffer| {
                     if (buffer.min_binding_size == 0) unverified_buffer_count += 1;
@@ -755,7 +751,7 @@ pub const Layout = struct {
             hash.update(std.mem.asBytes(&expanded_binding.binding_number));
             hash.update(std.mem.asBytes(&expanded_binding.index_in_array));
             hash.update(std.mem.asBytes(&expanded_binding.visibility.bits()));
-            hash.update(std.mem.asBytes(&@intFromEnum(expanded_binding.layout.typeOrder())));
+            hash.update(std.mem.asBytes(&@backingInt(expanded_binding.layout.typeOrder())));
             hashBindingLayout(&hash, expanded_binding.layout);
         }
 
@@ -841,9 +837,9 @@ pub const Layout = struct {
     /// Every entry of one order, which is the slice the prefix sum at
     /// `BindGroupLayoutInternal.cpp:751`-`:756` carves out.
     pub fn bindingsOfType(self: *const Layout, order: BindingTypeOrder) []const Binding {
-        const order_index = @intFromEnum(order);
+        const order_index = @backingInt(order);
         // `count` is the sentinel, not an order, so it has no range of its own.
-        std.debug.assert(order_index < @intFromEnum(BindingTypeOrder.count));
+        std.debug.assert(order_index < @backingInt(BindingTypeOrder.count));
         const start = self.type_start[order_index];
         const end = self.type_start[order_index + 1];
         return self.entries[start..end];
@@ -870,8 +866,8 @@ const NoSortContext = struct {};
 /// buffers are applied in increasing binding number, and binding-array elements
 /// must stay contiguous for a back end (`:510`-`:513`).
 fn lessBindingFirst(_: NoSortContext, left: Binding, right: Binding) bool {
-    const left_order = @intFromEnum(left.layout.typeOrder());
-    const right_order = @intFromEnum(right.layout.typeOrder());
+    const left_order = @backingInt(left.layout.typeOrder());
+    const right_order = @backingInt(right.layout.typeOrder());
     if (left_order != right_order) return left_order < right_order;
     return left.binding_number < right.binding_number;
 }
@@ -892,7 +888,7 @@ fn eqlBinding(left: Binding, right: Binding) bool {
     if (left.binding_number != right.binding_number) return false;
     if (left.index_in_array != right.index_in_array) return false;
     if (left.visibility != right.visibility) return false;
-    if (@intFromEnum(left.layout.typeOrder()) != @intFromEnum(right.layout.typeOrder())) {
+    if (@backingInt(left.layout.typeOrder()) != @backingInt(right.layout.typeOrder())) {
         return false;
     }
     return switch (left.layout) {
@@ -953,33 +949,33 @@ const SamplerLink = struct {
 fn hashBindingLayout(hash: *std.hash.Wyhash, layout: BindingLayout) void {
     switch (layout) {
         .buffer => |buffer| {
-            hash.update(std.mem.asBytes(&@intFromEnum(buffer.binding_type)));
+            hash.update(std.mem.asBytes(&@backingInt(buffer.binding_type)));
             hash.update(std.mem.asBytes(&buffer.has_dynamic_offset));
             hash.update(std.mem.asBytes(&buffer.min_binding_size));
         },
-        .sampler => |sampler| hash.update(std.mem.asBytes(&@intFromEnum(sampler.binding_type))),
+        .sampler => |sampler| hash.update(std.mem.asBytes(&@backingInt(sampler.binding_type))),
         .static_sampler => |sampler| {
-            hash.update(std.mem.asBytes(&@intFromEnum(sampler.use)));
+            hash.update(std.mem.asBytes(&@backingInt(sampler.use)));
             hash.update(std.mem.asBytes(&@as(bool, sampler.sampled_texture_binding != null)));
             if (sampler.sampled_texture_binding) |number| hash.update(std.mem.asBytes(&number));
             hash.update(std.mem.asBytes(&sampler.sampler_identity));
             hash.update(std.mem.asBytes(&sampler.combined_image_sampler_descriptor_count));
         },
         .sampled_texture => |texture| {
-            hash.update(std.mem.asBytes(&@intFromEnum(texture.sample_type)));
-            hash.update(std.mem.asBytes(&@intFromEnum(texture.view_dimension)));
+            hash.update(std.mem.asBytes(&@backingInt(texture.sample_type)));
+            hash.update(std.mem.asBytes(&@backingInt(texture.view_dimension)));
             hash.update(std.mem.asBytes(&texture.multisampled));
             hash.update(std.mem.asBytes(&texture.internal));
             hash.update(std.mem.asBytes(&texture.depth_view));
         },
         .storage_texture => |texture| {
-            hash.update(std.mem.asBytes(&@intFromEnum(texture.access)));
-            hash.update(std.mem.asBytes(&@intFromEnum(texture.view_dimension)));
+            hash.update(std.mem.asBytes(&@backingInt(texture.access)));
+            hash.update(std.mem.asBytes(&@backingInt(texture.view_dimension)));
             hash.update(std.mem.asBytes(&texture.internal));
         },
-        .texel_buffer => |texel| hash.update(std.mem.asBytes(&@intFromEnum(texel.access))),
+        .texel_buffer => |texel| hash.update(std.mem.asBytes(&@backingInt(texel.access))),
         .input_attachment => |attachment| hash.update(
-            std.mem.asBytes(&@intFromEnum(attachment.sample_type)),
+            std.mem.asBytes(&@backingInt(attachment.sample_type)),
         ),
         .external_texture => |external| {
             hash.update(std.mem.asBytes(&external.plane0.toInt()));
@@ -1030,9 +1026,8 @@ fn convertToBinding(entry: Entry) Error!Binding {
 /// `:272`) and refuses a total other than one at `:284`.
 fn countKinds(kind: EntryKind) u32 {
     // One prong per tag. A kind added to `EntryKindTag` without a union field,
-    // or a union field without a prong, is a compile error here
-    // (`AGENTS.md` §3). The switch reads only the member the tag names, which
-    // is what makes the null test below a statement about this entry.
+    // or a union field without a prong, is a compile error here.
+    // The switch reads only the member the tag names.
     return switch (kind) {
         .buffer => @intFromBool(kind.buffer != null),
         .sampler => @intFromBool(kind.sampler != null),
@@ -1063,7 +1058,7 @@ fn validateDescriptor(
     // the expansion runs afterwards, so this is checked before it.
     var sampler_texture_numbers = std.ArrayList(u32).empty;
     defer sampler_texture_numbers.deinit(allocator);
-    var public_numbers = std.StaticBitSet(max_bindings_per_bind_group).initEmpty();
+    var public_numbers: std.bit_set.Static(max_bindings_per_bind_group) = .empty;
     entry_index = 0;
     while (entry_index < max_entry_count) : (entry_index += 1) {
         const entry = descriptor.entries[entry_index];
@@ -1461,7 +1456,7 @@ test "private depth image ABI supports matching multisampled views" {
 }
 
 test "external binding blocks cover the bounded private namespace" {
-    var occupied = std.StaticBitSet(5 * max_bindings_per_bind_group).initEmpty();
+    var occupied: std.bit_set.Static(5 * max_bindings_per_bind_group) = .empty;
     for (0..max_bindings_per_bind_group) |number| {
         const binding_number: u32 = @intCast(number);
         const roles = try externalBindingNumbers(.{

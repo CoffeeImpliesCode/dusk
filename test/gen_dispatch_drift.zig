@@ -1,15 +1,6 @@
 //! Drift check for the generated dispatch table.
 //!
-//! `tools/gen_dispatch.zig` is the only thing that may write
-//! `src/vk/dispatch.zig`, and the file is checked in so a consumer needs no C
-//! toolchain and no Vulkan SDK. That leaves one thing to guard: a generator
-//! change nobody ran. This test renders the table again, writes the bytes to a
-//! scratch file in the build cache, and compares them with the checked-in file
-//! byte for byte (`docs/40-plan.md` §4.2).
-//!
-//! `io` is built here rather than taken from `std.testing.io`, because
-//! `AGENTS.md` §3 says no module reaches for a global one, and a test that
-//! reads the file system is exactly where that rule is easy to break.
+//! Renders the table to a temporary file and compares it with the checked-in file.
 
 const std = @import("std");
 const gen_dispatch = @import("gen_dispatch");
@@ -20,20 +11,10 @@ const options = @import("drift_options");
 /// `error.StreamTooLong` rather than into a byte comparison.
 const max_file_bytes = 1024 * 1024;
 
-/// The reading and rendering helpers declare their own error sets, because Zig
-/// 0.16 gives a `test` body an inferred one and `AGENTS.md` §2 asks for a
-/// declared one.
 const FileError = std.Io.Dir.ReadFileAllocError ||
     std.Io.Dir.WriteFileError ||
-    std.Io.Dir.CreateDirPathOpenError ||
     std.mem.Allocator.Error ||
     std.Io.Writer.Error;
-
-/// Where the generator's bytes go. `zig build generate` names both halves, so a
-/// path without one of them means the build graph changed.
-const ScratchError = error{
-    MissingScratchDir,
-};
 
 test "the checked-in dispatch table is what the generator emits" {
     const allocator = std.testing.allocator;
@@ -64,21 +45,19 @@ fn readCheckedIn(allocator: std.mem.Allocator, io: std.Io) FileError![]u8 {
 /// back. The round trip is the point: the comparison is between two files on
 /// disk, so a generator that produced a partial file fails here instead of
 /// passing against an equally partial tree.
-fn renderToScratch(allocator: std.mem.Allocator, io: std.Io) (FileError || ScratchError)![]u8 {
-    const scratch_dir = std.fs.path.dirname(options.scratch_path) orelse
-        return error.MissingScratchDir;
-    const scratch_name = std.fs.path.basename(options.scratch_path);
+fn renderToScratch(allocator: std.mem.Allocator, io: std.Io) FileError![]u8 {
+    const scratch_name = "dispatch.zig";
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
 
     var rendered: std.Io.Writer.Allocating = .init(allocator);
     defer rendered.deinit();
     try gen_dispatch.render(&rendered.writer);
 
-    const scratch = try std.Io.Dir.cwd().createDirPathOpen(io, scratch_dir, .{});
-    defer scratch.close(io);
-    try scratch.writeFile(io, .{
+    try scratch.dir.writeFile(io, .{
         .sub_path = scratch_name,
         .data = rendered.written(),
     });
 
-    return scratch.readFileAlloc(io, scratch_name, allocator, .limited(max_file_bytes));
+    return scratch.dir.readFileAlloc(io, scratch_name, allocator, .limited(max_file_bytes));
 }

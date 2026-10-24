@@ -300,7 +300,7 @@ fn firstHeapArenaAllocation(allocator: std.mem.Allocator) !void {
     var guard = fixture.lock();
     defer guard.unlock(io);
     var log: Log = .{};
-    const label = [_]u8{'x'} ** 8192;
+    const label: [8192]u8 = @splat('x');
     const probe = fixture.arena.create(allocator, &guard, Probe, .{
         .kind = .native_surface,
         .initial_reference = .user,

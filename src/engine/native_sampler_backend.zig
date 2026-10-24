@@ -38,29 +38,29 @@ pub const SemanticKey = struct {
 
     /// Compares every semantic field, including conversion presence and all conversion fields.
     pub fn eql(self: SemanticKey, other: SemanticKey) bool {
-        inline for (@typeInfo(SemanticKey).@"struct".fields) |field| {
-            if (comptime std.mem.eql(u8, field.name, "y_cb_cr")) {
+        inline for (@typeInfo(SemanticKey).@"struct".field_names) |field_name| {
+            if (comptime std.mem.eql(u8, field_name, "y_cb_cr")) {
                 if ((self.y_cb_cr == null) != (other.y_cb_cr == null)) return false;
                 if (self.y_cb_cr) |conversion| {
-                    inline for (@typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct".fields) |part| {
-                        if (@field(conversion, part.name) != @field(other.y_cb_cr.?, part.name)) return false;
+                    inline for (@typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct".field_names) |part_name| {
+                        if (@field(conversion, part_name) != @field(other.y_cb_cr.?, part_name)) return false;
                     }
                 }
-            } else if (@field(self, field.name) != @field(other, field.name)) return false;
+            } else if (@field(self, field_name) != @field(other, field_name)) return false;
         }
         return true;
     }
     pub fn hash(self: SemanticKey) u64 {
         var hasher = std.hash.Wyhash.init(0);
-        inline for (@typeInfo(SemanticKey).@"struct".fields) |field| {
-            if (comptime std.mem.eql(u8, field.name, "y_cb_cr")) {
+        inline for (@typeInfo(SemanticKey).@"struct".field_names) |field_name| {
+            if (comptime std.mem.eql(u8, field_name, "y_cb_cr")) {
                 hashScalar(&hasher, self.y_cb_cr != null);
                 if (self.y_cb_cr) |conversion| {
-                    inline for (@typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct".fields) |part| {
-                        hashScalar(&hasher, @field(conversion, part.name));
+                    inline for (@typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct".field_names) |part_name| {
+                        hashScalar(&hasher, @field(conversion, part_name));
                     }
                 }
-            } else hashScalar(&hasher, @field(self, field.name));
+            } else hashScalar(&hasher, @field(self, field_name));
         }
         return hasher.final();
     }
@@ -69,7 +69,7 @@ pub const SemanticKey = struct {
 fn hashScalar(hasher: *std.hash.Wyhash, value: anytype) void {
     switch (@typeInfo(@TypeOf(value))) {
         .@"enum" => {
-            const integer = @intFromEnum(value);
+            const integer = @backingInt(value);
             hasher.update(std.mem.asBytes(&integer));
         },
         .bool => {

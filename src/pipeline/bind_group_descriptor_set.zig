@@ -3,8 +3,7 @@
 //!
 //! **What this file is.** The port of `vulkan/DescriptorSetAllocator.{h,cpp}`
 //! and `vulkan/DescriptorSetAllocation.h` at Dawn
-//! `32f77c02294310054a660c393feded4bcb3f203c`, read-only at
-//! `/tmp/scratch/research/dawn`.
+//! `32f77c02294310054a660c393feded4bcb3f203c`.
 //!
 //! **Why pools of sets, and not a pool per set.** The Vulkan specification
 //! guarantees only bump-plus-rollback for a descriptor pool, and freeing one
@@ -186,8 +185,7 @@ pub const DescriptorSetAllocator = struct {
     ///
     /// The destroy proc is resolved before the first pool is released, so a
     /// loader that missed it still frees the host memory and then reports,
-    /// instead of leaving the pools half torn down. `AGENTS.md` §3.1 makes the
-    /// refusal typed rather than a trap.
+    /// instead of leaving the pools half torn down. The refusal is typed.
     pub fn deinit(self: *DescriptorSetAllocator) Error!void {
         const destroy_pool = self.procs.destroy_descriptor_pool orelse null;
         const pool_count = self.pools.items.len;
@@ -318,7 +316,7 @@ pub const DescriptorSetAllocator = struct {
             .pPoolSizes = self.pool_sizes.ptr,
         };
         // Both procs are resolved before the pool is created, so a loader that
-        // missed either one leaves no half-built pool behind (`AGENTS.md` §3.1).
+        // missed either one leaves no half-built pool behind.
         const create_pool = self.procs.create_descriptor_pool orelse
             return error.MissingDeviceProc;
         const destroy_pool = self.procs.destroy_descriptor_pool orelse

@@ -79,7 +79,7 @@ pub const Stage = enum {
 
 /// The bit in `StageInput`'s mask. `0` is not a member: a stage mask with no
 /// stage set is a descriptor error, so the count starts at one.
-pub const stage_count = @typeInfo(Stage).@"enum".fields.len;
+pub const stage_count = @typeInfo(Stage).@"enum".field_names.len;
 
 /// What the reflected entry point uses, as Dawn's `EntryPointMetadata`
 /// (`src/dawn/native/Pipeline.cpp:120`) carries it.
@@ -340,8 +340,7 @@ pub const LayoutInput = struct {
 };
 
 /// Every rule a descriptor can break. One member per `DAWN_INVALID_IF` site, so
-/// a caller matches on the rule instead of on the message text
-/// (`AGENTS.md` §2).
+/// a caller matches on the rule instead of on the message text.
 pub const PipelineError = error{
     CompatibleRenderPassMissing,
     ImmediateSizeInvalid,
@@ -478,13 +477,11 @@ pub const State = union(enum) {
 /// (`src/vulkan.zig:5152`), so the field adds no second optional and the one
 /// `orelse` below reaches the pointer.
 /// The `: type` says what the binding is, because the spelling alone does not:
-/// `zwanzig` reads the bare call as a constant and asks for `snake_case`, and
-/// `AGENTS.md` §2 makes a type `PascalCase`. The two agree once the type is
-/// written down.
+/// The explicit type annotation keeps this a type alias.
 pub const DestroyPipelineFn: type = std.meta.Child(vulkan.PFN_vkDestroyPipeline);
 
 /// The destroy entry point the seam carries, or the error naming the one it
-/// did not. `AGENTS.md` §3.1 makes a missing proc a value and not a panic, and
+/// did not. A missing proc is a value, not a panic, and
 /// the arena's teardown has no channel to carry one
 /// (`DestroyFn` returns `void`, `src/core/object.zig:55`), so the create paths
 /// ask here and store what they get.
@@ -855,7 +852,7 @@ pub fn createComputePipelineLocked(
     };
     errdefer object.deinitPayloadLocked(guard, io);
     try object.initLayout(guard, descriptor.layout);
-    object.state.compute.entry_point = try gpa.dupeZ(u8, descriptor.compute.entry_point);
+    object.state.compute.entry_point = try gpa.dupeSentinel(u8, descriptor.compute.entry_point, 0);
 
     // Upstream asks the device for a pipeline cache
     // (`GetOrCreatePipelineCacheImpl`, `vulkan/DeviceVk.cpp:275`) and passes its
@@ -1210,8 +1207,8 @@ fn stageMask(first: StageInput, second: ?StageInput) u32 {
     // shift amount is only known at runtime, and a shift needs a fixed-width
     // left operand. The mask is what the second thing the content hash records
     // holds (`Pipeline.cpp:387`), so its width is the key's width.
-    var mask: u32 = @as(u32, 1) << @intFromEnum(first.stage);
-    if (second) |stage| mask |= @as(u32, 1) << @intFromEnum(stage.stage);
+    var mask: u32 = @as(u32, 1) << @backingInt(first.stage);
+    if (second) |stage| mask |= @as(u32, 1) << @backingInt(stage.stage);
     return mask;
 }
 

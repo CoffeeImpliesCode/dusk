@@ -15,7 +15,6 @@ const dusk = @import("dusk");
 
 const platform = dusk.platform;
 
-/// The serial count `docs/40-plan.md` §1 M4 names.
 const serial_count = 10_000;
 
 /// How many times the test completes the timeline. Dawn's tick drains on every

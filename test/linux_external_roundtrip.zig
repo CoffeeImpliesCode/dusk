@@ -80,9 +80,7 @@ fn expectFdOpen(io: std.Io, fd: c_int) !void {
     platform.external_semaphore.closeHandle(io, duplicate);
 }
 
-fn releaseApi(device: *engine.Device, io: std.Io, comptime Payload: type,
-    alias: anytype, kind: core.Handle.Kind) void
-{
+fn releaseApi(device: *engine.Device, io: std.Io, comptime Payload: type, alias: anytype, kind: core.Handle.Kind) void {
     var guard = core.ObjectGuard.lockUncancelable(io, device.core.arena.objectList());
     defer guard.unlock(io);
     const payload = device.core.resolve(&guard, Payload, .{
@@ -92,9 +90,7 @@ fn releaseApi(device: *engine.Device, io: std.Io, comptime Payload: type,
     payload.header.releaseUserLocked(&guard, io) catch @panic("fixture alias release");
 }
 
-fn resolveApi(device: *engine.Device, io: std.Io, comptime Payload: type,
-    alias: anytype, kind: core.Handle.Kind) !*Payload
-{
+fn resolveApi(device: *engine.Device, io: std.Io, comptime Payload: type, alias: anytype, kind: core.Handle.Kind) !*Payload {
     var guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     defer guard.unlock(io);
     return device.core.resolve(&guard, Payload, .{
@@ -145,14 +141,11 @@ fn runRoundtrip(handle_type: MemoryHandle) !void {
             },
         },
     };
-    const memory_alias = try memory_module.importSharedTextureMemory(t.allocator, io,
-        consumer, &descriptor);
-    defer releaseApi(consumer, io, memory_module.SharedTextureMemory,
-        memory_alias, .shared_texture_memory);
+    const memory_alias = try memory_module.importSharedTextureMemory(t.allocator, io, consumer, &descriptor);
+    defer releaseApi(consumer, io, memory_module.SharedTextureMemory, memory_alias, .shared_texture_memory);
     // Successful imports consume only a duplicate, not either caller descriptor.
     try expectFdOpen(io, producer.memory_fd);
-    const memory = try resolveApi(consumer, io, memory_module.SharedTextureMemory,
-        memory_alias, .shared_texture_memory);
+    const memory = try resolveApi(consumer, io, memory_module.SharedTextureMemory, memory_alias, .shared_texture_memory);
     var properties: api.descriptors.SharedTextureMemoryProperties = undefined;
     try t.expectEqual(api.Status.success, try memory.getProperties(io, &properties));
     try t.expectEqual(api.TextureFormat.rgba8_unorm, properties.format);
@@ -165,8 +158,7 @@ fn runRoundtrip(handle_type: MemoryHandle) !void {
         .usage = .{ .copy_src = true, .copy_dst = true },
     });
     defer releaseApi(consumer, io, engine.texture.Texture, texture_alias, .texture);
-    const texture = try resolveApi(consumer, io, engine.texture.Texture,
-        texture_alias, .texture);
+    const texture = try resolveApi(consumer, io, engine.texture.Texture, texture_alias, .texture);
     const input_fence = try fence_module.importSharedFence(t.allocator, io, consumer, &.{
         .shared_fence_vk_semaphore_opaque_fd_descriptor = .{ .handle = producer.signal_fd },
     });
@@ -208,8 +200,7 @@ fn runRoundtrip(handle_type: MemoryHandle) !void {
             .new_layout = vulkan.VK_IMAGE_LAYOUT_GENERAL,
         },
     };
-    try t.expectEqual(api.Status.success,
-        try memory.endAccess(t.allocator, io, texture_alias, &end));
+    try t.expectEqual(api.Status.success, try memory.endAccess(t.allocator, io, texture_alias, &end));
     defer t.allocator.free(end.fences.?);
     defer t.allocator.free(end.signaled_values.?);
     try t.expect(end.initialized);
@@ -217,10 +208,8 @@ fn runRoundtrip(handle_type: MemoryHandle) !void {
     try t.expectEqual(@as(usize, 1), end.signaled_value_count);
     try t.expectEqual(@as(u64, 1), end.signaled_values.?[0]);
     const output_fence_alias = end.fences.?[0];
-    defer releaseApi(consumer, io, fence_module.SharedFence,
-        output_fence_alias, .shared_fence);
-    const output_fence = try resolveApi(consumer, io, fence_module.SharedFence,
-        output_fence_alias, .shared_fence);
+    defer releaseApi(consumer, io, fence_module.SharedFence, output_fence_alias, .shared_fence);
+    const output_fence = try resolveApi(consumer, io, fence_module.SharedFence, output_fence_alias, .shared_fence);
     var export_info: api.descriptors.SharedFenceExportInfo = .{
         .type_ = .vk_semaphore_opaque_fd,
         .shared_fence_vk_semaphore_opaque_fd_export_info = .{ .handle = -2 },
@@ -233,26 +222,24 @@ fn runRoundtrip(handle_type: MemoryHandle) !void {
     try expectFdOpen(io, returned_fd);
     // A descriptor refusal cannot consume the caller-owned memory handle either.
     switch (handle_type) {
-        .opaque_fd => try t.expectError(error.InvalidImageCreateInfo,
-            memory_module.importSharedTextureMemory(t.allocator, io, consumer, &.{
-                .shared_texture_memory_opaque_fd_descriptor = .{
-                    .vk_image_create_info = null,
-                    .memory_fd = producer.memory_fd,
-                    .memory_type_index = producer.memory_type_index,
-                    .allocation_size = producer.allocation_size,
-                    .dedicated_allocation = true,
-                },
-            })),
-        .dma_buf => try t.expectError(error.InvalidDmaBufPlaneCount,
-            memory_module.importSharedTextureMemory(t.allocator, io, consumer, &.{
-                .shared_texture_memory_dma_buf_descriptor = .{
-                    .size = .{ .width = 4, .height = 4 },
-                    .drm_format = producer.drm_format,
-                    .drm_modifier = producer.drm_modifier,
-                    .plane_count = 0,
-                    .planes = null,
-                },
-            })),
+        .opaque_fd => try t.expectError(error.InvalidImageCreateInfo, memory_module.importSharedTextureMemory(t.allocator, io, consumer, &.{
+            .shared_texture_memory_opaque_fd_descriptor = .{
+                .vk_image_create_info = null,
+                .memory_fd = producer.memory_fd,
+                .memory_type_index = producer.memory_type_index,
+                .allocation_size = producer.allocation_size,
+                .dedicated_allocation = true,
+            },
+        })),
+        .dma_buf => try t.expectError(error.InvalidDmaBufPlaneCount, memory_module.importSharedTextureMemory(t.allocator, io, consumer, &.{
+            .shared_texture_memory_dma_buf_descriptor = .{
+                .size = .{ .width = 4, .height = 4 },
+                .drm_format = producer.drm_format,
+                .drm_modifier = producer.drm_modifier,
+                .plane_count = 0,
+                .planes = null,
+            },
+        })),
     }
     try expectFdOpen(io, producer.memory_fd);
 }
@@ -293,15 +280,14 @@ fn rejectUnsupportedModifier() !void {
         .offset = 0,
         .stride = 16,
     }};
-    try t.expectError(error.UnsupportedDmaBufModifier,
-        engine.shared_texture_memory.importSharedTextureMemory(t.allocator, io, device, &.{
-            .shared_texture_memory_dma_buf_descriptor = .{
-                .size = .{ .width = 4, .height = 4 },
-                .drm_format = dma_buf.drmFourcc('A', 'B', '2', '4'),
-                .drm_modifier = invalid_modifier,
-                .plane_count = planes.len,
-                .planes = &planes,
-            },
-        }));
+    try t.expectError(error.UnsupportedDmaBufModifier, engine.shared_texture_memory.importSharedTextureMemory(t.allocator, io, device, &.{
+        .shared_texture_memory_dma_buf_descriptor = .{
+            .size = .{ .width = 4, .height = 4 },
+            .drm_format = dma_buf.drmFourcc('A', 'B', '2', '4'),
+            .drm_modifier = invalid_modifier,
+            .plane_count = planes.len,
+            .planes = &planes,
+        },
+    }));
     try expectFdOpen(io, probe.handle);
 }

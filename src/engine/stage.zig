@@ -47,7 +47,7 @@ comptime {
     // The first three `static_assert`s of `PerStage.h:43-45`: every ordinal
     // addresses a slot.
     for (stages) |stage| {
-        std.debug.assert(@intFromEnum(stage) < stage_count);
+        std.debug.assert(@backingInt(stage) < stage_count);
     }
     // The next three, `:47-52`: the API bit for a stage is the ordinal shifted
     // once. A wire value that stopped matching the ordinal would make
@@ -67,7 +67,7 @@ pub inline fn stageBit(stage: SingleShaderStage) ShaderStage {
 /// `DAWN_CHECK` at `PerStage.cpp:38` is a claim about the enum, so it is a
 /// comptime one here.
 pub inline fn stageOrdinal(stage: SingleShaderStage) usize {
-    const ordinal: usize = @intFromEnum(stage);
+    const ordinal: usize = @backingInt(stage);
     std.debug.assert(ordinal < stage_count);
     return ordinal;
 }
@@ -79,7 +79,7 @@ pub inline fn stageOrdinal(stage: SingleShaderStage) usize {
 /// this one comparison per stage.
 pub fn iterateStages(mask: ShaderStage) [stage_count]bool {
     const flags = mask.toFlags();
-    var set = [_]bool{false} ** stage_count;
+    var set: [stage_count]bool = @splat(false);
     inline for (0..stage_count) |ordinal| {
         const bit = @as(u32, 1) << ordinal;
         set[ordinal] = (flags & bit) == bit;
@@ -148,7 +148,7 @@ pub fn stageOfBit(mask: ShaderStage) StageOfBitError!SingleShaderStage {
     if (flags & (flags - @as(u32, 1)) != 0) return error.NotOneStageBit;
     const ordinal: usize = @ctz(flags);
     if (ordinal >= stage_count) return error.StageBitOutOfRange;
-    return @enumFromInt(ordinal);
+    return @fromBackingInt(@intCast(ordinal));
 }
 
 /// The three ways a mask can fail to name exactly one stage.

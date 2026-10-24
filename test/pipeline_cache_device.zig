@@ -52,9 +52,7 @@ const Storage = struct {
     fn interface(self: *Storage) provider.PipelineCacheProvider {
         return .{ .context = self, .load_fn = load, .store_fn = store };
     }
-    fn load(allocator: std.mem.Allocator, _: std.Io, context: *anyopaque,
-        key: [32]u8, _: usize) provider.ProviderError!provider.LoadResult
-    {
+    fn load(allocator: std.mem.Allocator, _: std.Io, context: *anyopaque, key: [32]u8, _: usize) provider.ProviderError!provider.LoadResult {
         const self: *Storage = @ptrCast(@alignCast(context));
         self.load_count += 1;
         std.debug.assert(std.mem.eql(u8, &key, &artifact.storageKey(identity, isolation_hash)));
@@ -62,9 +60,7 @@ const Storage = struct {
         if (self.bytes) |bytes| return .{ .hit = try allocator.dupe(u8, bytes) };
         return .{ .miss = .not_found };
     }
-    fn store(_: std.Io, context: *anyopaque, key: [32]u8,
-        bytes: []const u8) provider.ProviderError!void
-    {
+    fn store(_: std.Io, context: *anyopaque, key: [32]u8, bytes: []const u8) provider.ProviderError!void {
         const self: *Storage = @ptrCast(@alignCast(context));
         self.store_count += 1;
         std.debug.assert(std.mem.eql(u8, &key, &artifact.storageKey(identity, isolation_hash)));
@@ -92,10 +88,7 @@ const NativeFailure = struct {
     fn device(self: *NativeFailure) vk.VkDevice {
         return @ptrCast(self);
     }
-    fn create(device_handle: vk.VkDevice, info: [*c]const vk.VkPipelineCacheCreateInfo,
-        _: [*c]const vk.VkAllocationCallbacks, output: [*c]vk.VkPipelineCache)
-        callconv(.c) vk.VkResult
-    {
+    fn create(device_handle: vk.VkDevice, info: [*c]const vk.VkPipelineCacheCreateInfo, _: [*c]const vk.VkAllocationCallbacks, output: [*c]vk.VkPipelineCache) callconv(.c) vk.VkResult {
         const self = state(device_handle);
         self.create_count += 1;
         self.initial_byte_count = info[0].initialDataSize;
@@ -103,16 +96,12 @@ const NativeFailure = struct {
         output[0] = @ptrCast(self);
         return vk.VK_SUCCESS;
     }
-    fn destroy(device_handle: vk.VkDevice, cache: vk.VkPipelineCache,
-        _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void
-    {
+    fn destroy(device_handle: vk.VkDevice, cache: vk.VkPipelineCache, _: [*c]const vk.VkAllocationCallbacks) callconv(.c) void {
         const self = state(device_handle);
         std.debug.assert(cache == @as(vk.VkPipelineCache, @ptrCast(self)));
         self.destroy_count += 1;
     }
-    fn query(device_handle: vk.VkDevice, _: vk.VkPipelineCache,
-        byte_count: [*c]usize, output: ?*anyopaque) callconv(.c) vk.VkResult
-    {
+    fn query(device_handle: vk.VkDevice, _: vk.VkPipelineCache, byte_count: [*c]usize, output: ?*anyopaque) callconv(.c) vk.VkResult {
         const self = state(device_handle);
         if (output) |pointer| {
             self.data_query_count += 1;
@@ -161,12 +150,9 @@ const Admission = struct {
             .pipeline_cache = true,
         };
     }
-    fn options(self: *Admission, seam: *NativeFailure, storage: *Storage)
-        handler.CreateOptions
-    {
+    fn options(self: *Admission, seam: *NativeFailure, storage: *Storage) handler.CreateOptions {
         return .{
-            .backend = dusk.pipeline.pipeline_backend.Backend.fromDeviceProcs(
-                seam.device(), &self.device_procs),
+            .backend = dusk.pipeline.pipeline_backend.Backend.fromDeviceProcs(seam.device(), &self.device_procs),
             .capabilities = &self.native,
             .identity = identity,
             .isolation_key_hash = isolation_hash,
@@ -181,8 +167,7 @@ test "driver cache rejects unavailable capability before provider or native call
     admission.native.pipeline_cache = false;
     var seam: NativeFailure = .{};
     var storage: Storage = .{};
-    try t.expectError(error.PipelineCacheUnavailable,
-        handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
+    try t.expectError(error.PipelineCacheUnavailable, handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
     try t.expectEqual(@as(usize, 0), storage.load_count);
     try t.expectEqual(@as(usize, 0), seam.create_count);
 }
@@ -192,22 +177,19 @@ test "driver cache rejects missing PFNs and device or proc disagreement" {
         .{ "create_pipeline_cache", error.CreatePipelineCacheNotLoaded },
         .{ "get_pipeline_cache_data", error.GetPipelineCacheDataNotLoaded },
         .{ "destroy_pipeline_cache", error.DestroyPipelineCacheNotLoaded },
-    }) |entry|
-    {
+    }) |entry| {
         var admission: Admission = .{};
         admission.init();
         var seam: NativeFailure = .{};
         var storage: Storage = .{};
         var options = admission.options(&seam, &storage);
         @field(options.backend, entry[0]) = null;
-        try t.expectError(entry[1],
-            handler.DriverCacheHandler.create(t.allocator, t.io, options));
+        try t.expectError(entry[1], handler.DriverCacheHandler.create(t.allocator, t.io, options));
         try t.expectEqual(@as(usize, 0), storage.load_count);
         try t.expectEqual(@as(usize, 0), seam.create_count);
         options = admission.options(&seam, &storage);
         @field(admission.device_procs, entry[0]) = null;
-        try t.expectError(error.PipelineCacheDeviceMismatch,
-            handler.DriverCacheHandler.create(t.allocator, t.io, options));
+        try t.expectError(error.PipelineCacheDeviceMismatch, handler.DriverCacheHandler.create(t.allocator, t.io, options));
         try t.expectEqual(@as(usize, 0), storage.load_count);
         try t.expectEqual(@as(usize, 0), seam.create_count);
     }
@@ -217,8 +199,7 @@ test "driver cache rejects missing PFNs and device or proc disagreement" {
     var storage: Storage = .{};
     var options = admission.options(&seam, &storage);
     options.backend.device = null;
-    try t.expectError(error.PipelineCacheDeviceMismatch,
-        handler.DriverCacheHandler.create(t.allocator, t.io, options));
+    try t.expectError(error.PipelineCacheDeviceMismatch, handler.DriverCacheHandler.create(t.allocator, t.io, options));
     try t.expectEqual(@as(usize, 0), storage.load_count);
     try t.expectEqual(@as(usize, 0), seam.create_count);
 }
@@ -231,8 +212,7 @@ test "driver cache corrupt and foreign identity artifacts become cold loads" {
         admission.init();
         var seam: NativeFailure = .{};
         var storage: Storage = .{ .bytes = &bytes };
-        var cache = try handler.DriverCacheHandler.create(t.allocator, t.io,
-            admission.options(&seam, &storage));
+        var cache = try handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage));
         cache.destroy();
         try t.expectEqual(@as(usize, 0), seam.initial_byte_count);
         try t.expectEqual(@as(usize, 1), seam.create_count);
@@ -245,8 +225,7 @@ test "driver cache native failure never publishes or destroys an absent handle" 
     admission.init();
     var seam: NativeFailure = .{ .create_result = vk.VK_ERROR_OUT_OF_DEVICE_MEMORY };
     var storage: Storage = .{};
-    try t.expectError(error.OutOfDeviceMemory,
-        handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
+    try t.expectError(error.OutOfDeviceMemory, handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
     try t.expectEqual(@as(usize, 1), seam.create_count);
     try t.expectEqual(@as(usize, 0), seam.destroy_count);
 }
@@ -256,11 +235,9 @@ test "driver cache native snapshot stops after three incomplete attempts" {
     admission.init();
     var seam: NativeFailure = .{ .incomplete = true };
     var storage: Storage = .{};
-    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io,
-        admission.options(&seam, &storage));
+    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage));
     defer cache.destroy();
-    try t.expectError(error.PipelineCacheDataUnstable,
-        handler.DriverCacheHandler.collectArtifact(t.allocator, &cache));
+    try t.expectError(error.PipelineCacheDataUnstable, handler.DriverCacheHandler.collectArtifact(t.allocator, &cache));
     try t.expectEqual(@as(usize, 3), seam.data_query_count);
     try t.expectEqual(@as(usize, 0), storage.store_count);
 }
@@ -272,12 +249,10 @@ test "driver cache rejects oversized native query before allocation" {
         .query_byte_count = artifact.default_maximum_payload_byte_count + 1,
     };
     var storage: Storage = .{};
-    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io,
-        admission.options(&seam, &storage));
+    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage));
     defer cache.destroy();
     var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
-    try t.expectError(error.ArtifactTooLarge,
-        handler.DriverCacheHandler.collectArtifact(failing.allocator(), &cache));
+    try t.expectError(error.ArtifactTooLarge, handler.DriverCacheHandler.collectArtifact(failing.allocator(), &cache));
     try t.expectEqual(@as(usize, 0), failing.alloc_index);
     try t.expectEqual(@as(usize, 0), seam.data_query_count);
 }
@@ -287,8 +262,7 @@ test "driver cache provider failure propagates without creating a native cache" 
     admission.init();
     var seam: NativeFailure = .{};
     var storage: Storage = .{ .load_error = error.Io };
-    try t.expectError(error.Io,
-        handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
+    try t.expectError(error.Io, handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage)));
     try t.expectEqual(@as(usize, 0), seam.create_count);
     try t.expectEqual(@as(usize, 0), seam.destroy_count);
 }
@@ -298,12 +272,10 @@ test "driver cache storage failure does not prevent mandatory native destroy" {
     admission.init();
     var seam: NativeFailure = .{};
     var storage: Storage = .{ .store_error = error.AtomicReplaceFailed };
-    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io,
-        admission.options(&seam, &storage));
+    var cache = try handler.DriverCacheHandler.create(t.allocator, t.io, admission.options(&seam, &storage));
     const bytes = try handler.DriverCacheHandler.collectArtifact(t.allocator, &cache);
     defer t.allocator.free(bytes);
-    try t.expectError(error.AtomicReplaceFailed,
-        handler.DriverCacheHandler.persist(t.io, &cache, bytes));
+    try t.expectError(error.AtomicReplaceFailed, handler.DriverCacheHandler.persist(t.io, &cache, bytes));
     cache.destroy();
     try t.expectEqual(@as(usize, 1), storage.store_count);
     try t.expectEqual(@as(usize, 1), seam.destroy_count);
@@ -316,8 +288,7 @@ fn allocationLifecycle(allocator: std.mem.Allocator) !void {
     admission.init();
     var seam: NativeFailure = .{};
     var storage: Storage = .{ .bytes = &bytes };
-    var cache = handler.DriverCacheHandler.create(allocator, t.io,
-        admission.options(&seam, &storage)) catch |err| {
+    var cache = handler.DriverCacheHandler.create(allocator, t.io, admission.options(&seam, &storage)) catch |err| {
         try t.expectEqual(@as(usize, 0), seam.destroy_count);
         try t.expectEqual(@as(usize, 0), seam.create_count);
         return err;
@@ -350,9 +321,7 @@ const CallbackStorage = struct {
         if (self.bytes) |bytes| t.allocator.free(bytes);
         if (self.delivered_bytes) |bytes| t.allocator.free(bytes);
     }
-    fn load(userdata: ?*anyopaque, key_byte_count: usize, key: ?[]const u8,
-        capacity: usize, output: []u8) usize
-    {
+    fn load(userdata: ?*anyopaque, key_byte_count: usize, key: ?[]const u8, capacity: usize, output: []u8) usize {
         const self: *CallbackStorage = @ptrCast(@alignCast(userdata.?));
         std.debug.assert(key_byte_count == 32);
         if (self.key) |stored_key| {
@@ -373,9 +342,7 @@ const CallbackStorage = struct {
         self.copied_load_count += 1;
         return bytes.len;
     }
-    fn store(userdata: ?*anyopaque, key_byte_count: usize, key: ?[]const u8,
-        value_byte_count: usize, value: ?[]const u8) void
-    {
+    fn store(userdata: ?*anyopaque, key_byte_count: usize, key: ?[]const u8, value_byte_count: usize, value: ?[]const u8) void {
         const self: *CallbackStorage = @ptrCast(@alignCast(userdata.?));
         std.debug.assert(key_byte_count == 32);
         std.debug.assert(value_byte_count == value.?.len);
@@ -399,9 +366,7 @@ fn uncaptured(_: std.mem.Allocator, _: std.Io, _: *anyopaque, _: dusk.core.Error
     @panic("native cache fixture reported an uncaptured error");
 }
 
-fn nativeDeviceLifetime(adapter: *dusk.engine.Adapter, storage: *CallbackStorage,
-    configuration: provider.PipelineCacheConfiguration, isolation: []const u8) !NativeIdentity
-{
+fn nativeDeviceLifetime(adapter: *dusk.engine.Adapter, storage: *CallbackStorage, configuration: provider.PipelineCacheConfiguration, isolation: []const u8) !NativeIdentity {
     const required: dusk.api.Limits = .{ .max_immediate_size = 256 };
     var device = try adapter.createDevice(t.allocator, t.io, .{
         .adapter = adapter,
@@ -424,8 +389,7 @@ fn nativeDeviceLifetime(adapter: *dusk.engine.Adapter, storage: *CallbackStorage
     try t.expectEqual(properties.vendorID, expected.driver.vendor_id);
     try t.expectEqual(properties.deviceID, expected.driver.device_id);
     try t.expectEqual(properties.driverVersion, expected.driver.driver_version);
-    try t.expectEqualSlices(u8, &properties.pipelineCacheUUID,
-        &expected.driver.pipeline_cache_uuid);
+    try t.expectEqualSlices(u8, &properties.pipelineCacheUUID, &expected.driver.pipeline_cache_uuid);
     try gpu_consumer.exercise(t.allocator, t.io, &device);
     const snapshot = try handler.DriverCacheHandler.collectArtifact(t.allocator, driver_cache);
     defer t.allocator.free(snapshot);
@@ -456,13 +420,11 @@ test "two actual Vulkan device lifetimes persist and reload compute and render c
         .load = .{ .callback = CallbackStorage.load, .userdata = &storage },
         .store = .{ .callback = CallbackStorage.store, .userdata = &storage },
     } };
-    const first = try nativeDeviceLifetime(&adapters.items[0], &storage, configuration,
-        "pipeline-cache-device-fixture");
+    const first = try nativeDeviceLifetime(&adapters.items[0], &storage, configuration, "pipeline-cache-device-fixture");
     try t.expectEqual(@as(usize, 1), storage.store_count);
     try t.expectEqual(@as(usize, 1), storage.load_count);
     try t.expectEqual(@as(usize, 0), storage.copied_load_count);
-    const committed = try t.allocator.dupe(u8,
-        storage.bytes orelse return error.TestUnexpectedResult);
+    const committed = try t.allocator.dupe(u8, storage.bytes orelse return error.TestUnexpectedResult);
     defer t.allocator.free(committed);
     storage.expected_reload = committed;
     const first_payload = try artifact.decodeView(committed, .{
@@ -470,10 +432,8 @@ test "two actual Vulkan device lifetimes persist and reload compute and render c
         .isolation_key_hash = first.isolation,
     });
     try t.expect(first_payload.len >= 32);
-    const second = try nativeDeviceLifetime(&adapters.items[0], &storage, configuration,
-        "pipeline-cache-device-fixture");
-    try t.expectEqualSlices(u8, committed,
-        storage.delivered_bytes orelse return error.TestUnexpectedResult);
+    const second = try nativeDeviceLifetime(&adapters.items[0], &storage, configuration, "pipeline-cache-device-fixture");
+    try t.expectEqualSlices(u8, committed, storage.delivered_bytes orelse return error.TestUnexpectedResult);
     try t.expectEqual(first.driver.vendor_id, second.driver.vendor_id);
     try t.expectEqual(first.driver.device_id, second.driver.device_id);
     try t.expectEqual(first.driver.driver_version, second.driver.driver_version);
@@ -525,9 +485,7 @@ test "actual Vulkan persistence failure consumes device and still destroys nativ
 
 fn loadCommitted(filesystem: *provider.FilesystemProvider, expected: NativeIdentity) ![]u8 {
     const key = artifact.storageKey(expected.driver, expected.isolation);
-    return switch (try provider.PipelineCacheProvider.load(t.allocator, t.io,
-        filesystem.provider(), key, artifact.default_maximum_payload_byte_count))
-    {
+    return switch (try provider.PipelineCacheProvider.load(t.allocator, t.io, filesystem.provider(), key, artifact.default_maximum_payload_byte_count)) {
         .hit => |bytes| bytes,
         .miss => return error.TestUnexpectedResult,
     };
@@ -538,8 +496,7 @@ fn expectCommitted(filesystem: *provider.FilesystemProvider, expected: NativeIde
     defer t.allocator.free(bytes);
     const key = artifact.storageKey(expected.driver, expected.isolation);
     const name = provider.fileName(key);
-    const raw = try filesystem.configuration.root.readFileAlloc(t.io, &name, t.allocator,
-        .limited(artifact.header_byte_count + artifact.default_maximum_payload_byte_count));
+    const raw = try filesystem.configuration.root.readFileAlloc(t.io, &name, t.allocator, .limited(artifact.header_byte_count + artifact.default_maximum_payload_byte_count));
     defer t.allocator.free(raw);
     try t.expectEqualSlices(u8, raw, bytes);
     const payload = try artifact.decodeView(bytes, .{
@@ -583,14 +540,12 @@ test "actual filesystem device cache cold warm malformed and isolation lifetimes
         .expected_identity = warm.driver,
         .isolation_key_hash = warm.isolation,
     }));
-    const recovered = try nativeDeviceLifetime(&adapters.items[0], &context,
-        configuration, "first");
+    const recovered = try nativeDeviceLifetime(&adapters.items[0], &context, configuration, "first");
     try expectCommitted(&filesystem, recovered);
 
     const before_isolation = try loadCommitted(&filesystem, recovered);
     defer t.allocator.free(before_isolation);
-    const isolated = try nativeDeviceLifetime(&adapters.items[0], &context,
-        configuration, "second");
+    const isolated = try nativeDeviceLifetime(&adapters.items[0], &context, configuration, "second");
     try t.expect(!std.mem.eql(u8, &recovered.isolation, &isolated.isolation));
     const isolated_key = artifact.storageKey(isolated.driver, isolated.isolation);
     try t.expect(!std.mem.eql(u8, &first_key, &isolated_key));

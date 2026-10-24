@@ -6,21 +6,14 @@
 //! asserts that the tracked byte count is back where the cycle found it, and
 //! every allocation asserts that no two live allocations share an offset and
 //! that no two live ranges overlap. The nine `BuddyAllocatorTests.cpp` fixtures
-//! keep their exact offsets, because the offset tree stays in Zig
-//! (`docs/40-plan.md` §M6) and the offsets are the contract.
+//! keep their exact offsets, because the offset tree stays in Zig and the
+//! offsets are the contract.
 //!
 //! **What this shard does not claim.** It claims nothing about a device, a
 //! `VkDeviceMemory` or a mapping. The buddy tree and the size tracker are pure:
 //! the tree carves offsets out of one region and the tracker counts bytes that a
 //! serial releases. Neither needs a device, and neither is given one.
 //!
-//! **VMA needs a device and is asserted separately.** Every entry point
-//! `src/memory/vma.zig` declares needs a `VkDevice`, and the test calls none of
-//! them: the C++ half of `vk_mem_alloc.h` is behind `#ifdef VMA_IMPLEMENTATION`
-//! (`vk_mem_alloc.h:3039`), so a translation of the header yields declarations
-//! with no definition anywhere in the closure and `AGENTS.md` §1 forbids
-//! compiling one. Its own test therefore asserts the declaration half — the tag
-//! numbering and the struct layout — and names the gap.
 //!
 //! **The library is reached through `@import("dusk")`**, like every other
 //! acceptance shard.
@@ -40,19 +33,12 @@ const BuddyMemoryAllocator = memory.buddy_memory_allocator.BuddyMemoryAllocator;
 const BlockPool = memory.block_pool.BlockPool;
 const SlabAllocator = memory.slab_allocator.SlabAllocator;
 
-/// `SizeTracker` threads `io` before `self` in every operation it declares
-/// (`src/memory/size_tracker.zig:90`), so Zig builds no member function for any
-/// of them and every call below is qualified through the type name
-/// (`src/engine/queue.zig:591`, `test/buffer.zig:293`). Naming the type once
-/// keeps those qualified calls inside `AGENTS.md` §2's column bound.
 const SizeTracker = size_tracker.SizeTracker;
 const vma = memory.vma;
 
 /// The cycle count §M6 names, verbatim.
 const cycle_count = 100_000;
 
-/// The seed. `AGENTS.md` §3, "inject the seed": the run must be the same run on
-/// every machine, and a failure must be reproducible from this one number.
 const prng_seed: u64 = 0xD0C5_40A6_2026_0001;
 
 /// The small end of the acceptance size range.
@@ -969,9 +955,6 @@ const HeapAllocatorFake = struct {
     maximum_request_byte_count: u64 = 0,
     error_to_report: ?resource_heap_allocator.Error = null,
 
-    /// The allocator the vtable was handed. `AGENTS.md` §3 makes the allocator a
-    /// parameter of every allocating function, so a vtable that closed over one
-    /// would be a hidden allocator and the test would not notice.
     allocator_seen: ?std.mem.Allocator = null,
 };
 
@@ -1037,15 +1020,12 @@ test "the heap-allocator seam passes the request and the allocator to the implem
     try std.testing.expectEqual(@as(usize, 1), fake.deallocate_count);
     try std.testing.expectEqual(@as(usize, 1), fake.allocate_count);
 
-    // Every member of the declared set, one assertion each, so a failure names
-    // the member. `AGENTS.md` §2 splits the single upstream out-of-memory bit
-    // into the driver's two answers and the caller's own over-large request.
-    inline for (@typeInfo(resource_heap_allocator.Error).error_set.?) |member| {
+    inline for (@typeInfo(resource_heap_allocator.Error).error_set.error_names.?) |member| {
         // Reflection hands back a member's name, not a value, and `@field` is
         // what turns a swept member into the error the fake reports.
         const reported: resource_heap_allocator.Error = @field(
             resource_heap_allocator.Error,
-            member.name,
+            member,
         );
         fake.error_to_report = reported;
         try std.testing.expectError(
@@ -1129,10 +1109,10 @@ const size_tracker_error_members = [_]struct {
 comptime {
     // A member with no row is a member no test names, and a row naming a member
     // the set does not declare is a typo that would otherwise pass as coverage.
-    for (@typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.?) |member| {
+    for (@typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.error_names.?) |member| {
         // Reflection hands back a member's name, not a value, so `@field` is
         // what turns the swept member into the error the rows hold.
-        const value = @field(buddy_allocator.BuddyAllocator.OperationError, member.name);
+        const value = @field(buddy_allocator.BuddyAllocator.OperationError, member);
         var named = false;
         for (buddy_error_members) |row| {
             if (row.member == value) named = true;
@@ -1140,13 +1120,13 @@ comptime {
         if (!named) @compileError("a BuddyAllocator error member has no row");
     }
     if (buddy_error_members.len !=
-        @typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.?.len)
+        @typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.error_names.?.len)
     {
         @compileError("a BuddyAllocator row names a member the set does not declare");
     }
 
-    for (@typeInfo(SizeTracker.OperationError).error_set.?) |member| {
-        const value = @field(SizeTracker.OperationError, member.name);
+    for (@typeInfo(SizeTracker.OperationError).error_set.error_names.?) |member| {
+        const value = @field(SizeTracker.OperationError, member);
         var named = false;
         for (size_tracker_error_members) |row| {
             if (row.member == value) named = true;
@@ -1154,15 +1134,15 @@ comptime {
         if (!named) @compileError("a SizeTracker error member has no row");
     }
     if (size_tracker_error_members.len !=
-        @typeInfo(SizeTracker.OperationError).error_set.?.len)
+        @typeInfo(SizeTracker.OperationError).error_set.error_names.?.len)
     {
         @compileError("a SizeTracker row names a member the set does not declare");
     }
 }
 
 test "every member of the offset tree's error set is named and reachable as declared" {
-    inline for (@typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.?) |member| {
-        const value = @field(buddy_allocator.BuddyAllocator.OperationError, member.name);
+    inline for (@typeInfo(buddy_allocator.BuddyAllocator.OperationError).error_set.error_names.?) |member| {
+        const value = @field(buddy_allocator.BuddyAllocator.OperationError, member);
         var row: ?@TypeOf(buddy_error_members[0]) = null;
         for (buddy_error_members) |candidate| {
             if (candidate.member == value) row = candidate;
@@ -1309,28 +1289,28 @@ test "the VMA binding matches the pinned header's numbering and layout" {
 
     // `VmaMemoryUsage` at `vk_mem_alloc.h:513-587`. The numbers are the header's
     // and a change of number is a wire change, so each tag is asserted by name.
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(vma.VmaMemoryUsage.unknown));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(vma.VmaMemoryUsage.gpu_only));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(vma.VmaMemoryUsage.cpu_only));
-    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(vma.VmaMemoryUsage.cpu_to_gpu));
-    try std.testing.expectEqual(@as(u32, 4), @intFromEnum(vma.VmaMemoryUsage.gpu_to_cpu));
-    try std.testing.expectEqual(@as(u32, 5), @intFromEnum(vma.VmaMemoryUsage.cpu_copy));
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(vma.VmaMemoryUsage.unknown));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(vma.VmaMemoryUsage.gpu_only));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(vma.VmaMemoryUsage.cpu_only));
+    try std.testing.expectEqual(@as(u32, 3), @backingInt(vma.VmaMemoryUsage.cpu_to_gpu));
+    try std.testing.expectEqual(@as(u32, 4), @backingInt(vma.VmaMemoryUsage.gpu_to_cpu));
+    try std.testing.expectEqual(@as(u32, 5), @backingInt(vma.VmaMemoryUsage.cpu_copy));
     try std.testing.expectEqual(
         @as(u32, 6),
-        @intFromEnum(vma.VmaMemoryUsage.gpu_lazily_allocated),
+        @backingInt(vma.VmaMemoryUsage.gpu_lazily_allocated),
     );
-    try std.testing.expectEqual(@as(u32, 7), @intFromEnum(vma.VmaMemoryUsage.auto));
+    try std.testing.expectEqual(@as(u32, 7), @backingInt(vma.VmaMemoryUsage.auto));
     try std.testing.expectEqual(
         @as(u32, 8),
-        @intFromEnum(vma.VmaMemoryUsage.auto_prefer_device),
+        @backingInt(vma.VmaMemoryUsage.auto_prefer_device),
     );
     try std.testing.expectEqual(
         @as(u32, 9),
-        @intFromEnum(vma.VmaMemoryUsage.auto_prefer_host),
+        @backingInt(vma.VmaMemoryUsage.auto_prefer_host),
     );
     try std.testing.expectEqual(
         @as(u32, 0x7FFF_FFFF),
-        @intFromEnum(vma.VmaMemoryUsage.max_enum),
+        @backingInt(vma.VmaMemoryUsage.max_enum),
     );
 
     // The `AUTO` arms only work where a `VkBufferCreateInfo` or a
@@ -1341,8 +1321,8 @@ test "the VMA binding matches the pinned header's numbering and layout" {
     try std.testing.expect(vma.VmaMemoryUsage.auto.needsResourceInfo());
     try std.testing.expect(vma.VmaMemoryUsage.auto_prefer_device.needsResourceInfo());
     try std.testing.expect(vma.VmaMemoryUsage.auto_prefer_host.needsResourceInfo());
-    inline for (@typeInfo(vma.VmaMemoryUsage).@"enum".fields) |field| {
-        const tag: vma.VmaMemoryUsage = @enumFromInt(field.value);
+    inline for (@typeInfo(vma.VmaMemoryUsage).@"enum".field_values) |field_value| {
+        const tag: vma.VmaMemoryUsage = @fromBackingInt(@intCast(field_value));
         if (tag == .auto or tag == .auto_prefer_device or tag == .auto_prefer_host) continue;
         try std.testing.expect(!tag.needsResourceInfo());
     }
@@ -1385,18 +1365,6 @@ test "the VMA binding matches the pinned header's numbering and layout" {
     try std.testing.expectEqual(@as(u64, 0), total.total.statistics.blockBytes);
     try std.testing.expectEqual(@as(u64, 0), total.total.statistics.allocationBytes);
     try std.testing.expectEqual(@as(u64, 0), total.memoryType[0].statistics.blockBytes);
-
-    // **What this test does not claim.** It claims nothing about a VMA
-    // allocation, a heap budget, a mapping or a memory type search. Every entry
-    // point in `src/memory/vma.zig` needs a `VkDevice`, and none of them has a
-    // definition anywhere in the closure: `vk_mem_alloc.h` is 13,573 lines of
-    // which lines 1-3047 are the declaration half and `#ifdef
-    // VMA_IMPLEMENTATION` at `:3039` opens the C++ half, and the nixpkgs package
-    // `vulkan-memory-allocator` installs `include/` and the CMake config and
-    // nothing else. `AGENTS.md` §1 forbids the C++ compilation that would
-    // produce an object to link. The `VkDeviceMemory` layer is therefore a
-    // declared seam with no body, and it lands when a hand-written C shim
-    // exists to give it one.
 }
 
 const ComposedHeapParent = struct {
@@ -1670,7 +1638,7 @@ test "caller-owned zero-retention pool drains recycled slabs without destroying 
         .pool = &pool,
         .object_budget_byte_count = slab_budget_byte_count,
     });
-    var objects = [_]?*SlabObject{null} ** (slab_object_count * 2);
+    var objects: [slab_object_count * 2]?*SlabObject = @splat(null);
     errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
         std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
     };
@@ -1728,7 +1696,7 @@ test "failed slab acquisition preserves full objects and retries into a second s
         .pool = &pool,
         .object_budget_byte_count = slab_budget_byte_count,
     });
-    var objects = [_]?*SlabObject{null} ** (slab_object_count + 1);
+    var objects: [slab_object_count + 1]?*SlabObject = @splat(null);
     errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
         std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
     };
@@ -1767,7 +1735,7 @@ fn constructAndDrainSlabs(allocator: std.mem.Allocator) !void {
         .pool = &pool,
         .object_budget_byte_count = slab_budget_byte_count,
     });
-    var objects = [_]?*SlabObject{null} ** (slab_object_count + 1);
+    var objects: [slab_object_count + 1]?*SlabObject = @splat(null);
     errdefer drainSlabObjects(allocator, &slab, &pool, &objects) catch |cleanup_error| {
         std.log.warn("slab rollback failed: {s}", .{@errorName(cleanup_error)});
     };

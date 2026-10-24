@@ -4,8 +4,7 @@
 //!
 //! `spec_*` is what the WebGPU specification fixes, so it is the same on every
 //! device and the port can reject a call before it reads a device. Dawn holds
-//! these in `src/dawn/common/Constants.h`; the row in `docs/40-plan.md` §M15
-//! gives the line for each.
+//! these in `src/dawn/common/Constants.h`.
 //!
 //! `Limits` is what the device reports. Dawn reaches the device through
 //! `GetDevice()->GetLimits()`

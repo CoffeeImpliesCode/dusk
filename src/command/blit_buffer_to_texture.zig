@@ -8,9 +8,9 @@
 //!
 //! **What this file does not claim.** It does not claim a render pipeline:
 //! `GenerateShaderSource` (`:214`) emits WGSL and `GetOrCreatePipeline` (`:284`)
-//! compiles it, and `AGENTS.md` §3.2 forbids a WGSL front end in the library. It
+//! compiles it; the library has no WGSL front end. It
 //! does not claim the viewport and the draw upstream sets at `:501-505` and
-//! `:509`; `AGENTS.md` §3 keeps Vulkan out of `command`, so the pass belongs to
+//! `:509`; Vulkan stays out of `command`, so the pass belongs to
 //! `engine`.
 
 const std = @import("std");

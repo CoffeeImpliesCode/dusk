@@ -90,10 +90,7 @@ pub const Allocator = struct {
             std.debug.assert(last.remaining() >= @sizeOf(u32));
             std.mem.writeInt(u32, last.bytes[last.len..][0..4], constants.end_of_block, .little);
         }
-        const moved: Blocks = .{
-            .items = self.blocks.items,
-            .capacity = self.blocks.capacity,
-        };
+        const moved = self.blocks;
         self.blocks = .empty;
         self.current_index = 0;
         return moved;
@@ -448,7 +445,7 @@ pub const BorrowedIterator = struct {
 test "borrowed cursors reset and discard views without consuming stream storage" {
     var writer = try Allocator.init(std.testing.allocator, 4096);
     defer writer.deinit();
-    const command = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    const command = try writer.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
     command.* = .{ .vertex_count = 7, .instance_count = 1, .first_vertex = 0, .first_instance = 0 };
     var owner = Iterator.init(std.testing.allocator, writer.acquireBlocks());
     defer owner.deinit();
@@ -469,11 +466,11 @@ test "borrowed cursors reset and discard views without consuming stream storage"
 test "combined command data allocation refuses overflow without changing blocks" {
     var writer = try Allocator.init(std.testing.allocator, 4096);
     defer writer.deinit();
-    _ = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    _ = try writer.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
     const previous_len = writer.blocks.items[0].len;
     try std.testing.expectError(error.CopyExtentOutOfRange, writer.allocateCommandWithData(
         commands.SetImmediatesCmd,
-        @intFromEnum(commands.Tag.set_immediates),
+        @backingInt(commands.Tag.set_immediates),
         std.math.maxInt(usize),
     ));
     try std.testing.expectEqual(previous_len, writer.blocks.items[0].len);
@@ -484,7 +481,7 @@ test "failed combined allocation leaves the prior block tail and cursor unchange
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var writer = try Allocator.init(failing.allocator(), 4096);
     defer writer.deinit();
-    const draw = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    const draw = try writer.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
     draw.* = .{ .vertex_count = 9, .instance_count = 1, .first_vertex = 0, .first_instance = 0 };
     const before_len = writer.blocks.items[0].len;
     const before_index = writer.current_index;
@@ -492,7 +489,7 @@ test "failed combined allocation leaves the prior block tail and cursor unchange
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, writer.allocateCommandWithData(
         commands.SetImmediatesCmd,
-        @intFromEnum(commands.Tag.set_immediates),
+        @backingInt(commands.Tag.set_immediates),
         8192,
     ));
     try std.testing.expectEqual(before_len, writer.blocks.items[0].len);
@@ -510,14 +507,14 @@ test "combined record publishes its full byte run in the existing block" {
     defer writer.deinit();
     const record = try writer.allocateCommandWithData(
         commands.SetImmediatesCmd,
-        @intFromEnum(commands.Tag.set_immediates),
+        @backingInt(commands.Tag.set_immediates),
         5,
     );
     record.command.* = .{ .offset = 0, .size = 5 };
     @memcpy(record.data, "bytes");
     const second = try writer.allocateCommandWithData(
         commands.SetImmediatesCmd,
-        @intFromEnum(commands.Tag.set_immediates),
+        @backingInt(commands.Tag.set_immediates),
         0,
     );
     second.command.* = .{ .offset = 0, .size = 0 };
@@ -536,7 +533,7 @@ test "combined record publishes its full byte run in the existing block" {
 test "borrowed cursor rejects invalid block bounds before reading payload bytes" {
     var writer = try Allocator.init(std.testing.allocator, 4096);
     defer writer.deinit();
-    _ = try writer.allocateCommand(commands.DrawCmd, @intFromEnum(commands.Tag.draw));
+    _ = try writer.allocateCommand(commands.DrawCmd, @backingInt(commands.Tag.draw));
     var owner = Iterator.init(std.testing.allocator, writer.acquireBlocks());
     defer owner.deinit();
     owner.blocks.items[0].len = owner.blocks.items[0].bytes.len + 1;
@@ -558,7 +555,7 @@ fn testCombinedAllocationFailures(allocator: std.mem.Allocator) !void {
         }
         const record = writer.allocateCommandWithData(
             commands.SetImmediatesCmd,
-            @intFromEnum(commands.Tag.set_immediates),
+            @backingInt(commands.Tag.set_immediates),
             4096,
         ) catch |err| {
             try std.testing.expectEqual(before_count, writer.blocks.items.len);

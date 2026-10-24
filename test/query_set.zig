@@ -103,15 +103,6 @@ fn runPass(
     var guard = try core.ObjectGuard.lock(io, core_device.borrow().objectList());
     defer guard.unlock(io);
     try front.device.bindObjectsLocked(&guard, allocator);
-    const resource_device: engine.buffer.Device = .{
-        .allocator = allocator,
-        .dispatch = device.dispatchTable(),
-        .vk_device = device.vk_device,
-        .memory_properties = device.memoryProperties(),
-        .non_coherent_atom_size = 1,
-        .max_buffer_size = std.math.maxInt(u64),
-        .handles = handles,
-    };
     const target = created: {
         guard.unlock(io);
         defer guard = core.ObjectGuard.lockUncancelable(io, core_device.borrow().objectList());
@@ -174,12 +165,15 @@ fn runPass(
         @as(usize, 1),
         context.pipeline_store.?.queryPipelineCount(&guard),
     );
-    var destination = triangle.borrowBuffer(
-        resource_device,
+    const destination = try triangle.borrowBuffer(
+        io,
+        &guard,
+        &front.device,
         scene.staging,
         gpu_resolve_size,
         .{ .query_resolve = true, .copy_dst = true },
     );
+    defer triangle.releaseBorrowedBuffer(io, &guard, destination);
     const created = try front.createQuerySet(io, &guard, .occlusion, gpu_query_count);
     defer front.releaseQuerySet(&guard, io, created.handle) catch @panic("GPU query release failed");
     try engine.vulkan_query_set.createPool(&guard, q, created.set);
@@ -246,7 +240,7 @@ fn runPass(
         .query_count_of_set = gpu_query_count,
         .first_query = 0,
         .query_count = gpu_query_count,
-        .destination = &destination,
+        .destination = try destination.ref(&guard),
         .destination_size = gpu_resolve_size,
         .destination_usage = .{ .query_resolve = true, .copy_dst = true },
     });

@@ -20,11 +20,19 @@ pub const Error = engine.instance.Error || engine.device.InitError ||
     engine.device.OperationError || memory_mod.ImportTextureError || memory_mod.Error ||
     fence_mod.ImportFenceError || fence_mod.SharedFenceExportError || transfer.Error ||
     core.HandleError || core.ReferenceError || error{
-        NoPhysicalDevice, HardwareBufferAllocationFailed, InvalidAllocatedHardwareBuffer,
-        UnexpectedImportedFormat, InvalidImportedExtent, TransferUsageUnavailable,
-        UnexpectedStatus, InvalidEndFence, InvalidEndLayout, InvalidExportedFence,
-        InvalidImportedProvenance, InvalidOwner,
-    };
+    NoPhysicalDevice,
+    HardwareBufferAllocationFailed,
+    InvalidAllocatedHardwareBuffer,
+    UnexpectedImportedFormat,
+    InvalidImportedExtent,
+    TransferUsageUnavailable,
+    UnexpectedStatus,
+    InvalidEndFence,
+    InvalidEndLayout,
+    InvalidExportedFence,
+    InvalidImportedProvenance,
+    InvalidOwner,
+};
 
 fn requireSuccess(status: api.Status) error{UnexpectedStatus}!void {
     if (status != .success) return error.UnexpectedStatus;
@@ -52,18 +60,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
     var actual: ndk.AHardwareBuffer_Desc = undefined;
     ndk.AHardwareBuffer_describe(buffer, &actual);
     if (actual.width != transfer.extent or actual.height != transfer.extent or
-        actual.layers != 1 or actual.format != descriptor.format) {
+        actual.layers != 1 or actual.format != descriptor.format)
+    {
         return error.InvalidAllocatedHardwareBuffer;
     }
     var instance = engine.Instance.init(.{ .backend_type = .vulkan });
     defer instance.deinit(allocator, io) catch @panic("AHB instance teardown failed");
     var adapters = try instance.enumerateAdapters(allocator, io, .{
-        .backend_type = .vulkan, .feature_level = .core, .power_preference = .undefined_,
+        .backend_type = .vulkan,
+        .feature_level = .core,
+        .power_preference = .undefined_,
     });
     defer adapters.deinit(io) catch @panic("AHB adapter teardown failed");
     if (adapters.items.len == 0) return error.NoPhysicalDevice;
     var device = try adapters.items[0].createDevice(allocator, io, .{
-        .adapter = &adapters.items[0], .feature_level = .core,
+        .adapter = &adapters.items[0],
+        .feature_level = .core,
     });
     defer device.deinit(allocator, io) catch @panic("AHB device teardown failed");
     const imported = try memory_mod.importSharedTextureMemory(allocator, io, &device, &.{
@@ -73,7 +85,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
     const memory = try resolveMemory(io, &device, imported);
     defer device.release(allocator, io, memory) catch @panic("AHB memory release failed");
     var properties: api.descriptors.SharedTextureMemoryProperties = .{
-        .usage = .{}, .size = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 },
+        .usage = .{},
+        .size = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 },
         .format = .undefined_,
     };
     try requireSuccess(try memory.getProperties(io, &properties));
@@ -81,7 +94,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
         return error.UnexpectedImportedFormat;
     }
     if (memory.backing.imported.provenance != .android_hardware_buffer or
-        memory.backing.imported.external_queue_family != vk.VK_QUEUE_FAMILY_FOREIGN_EXT) {
+        memory.backing.imported.external_queue_family != vk.VK_QUEUE_FAMILY_FOREIGN_EXT)
+    {
         return error.InvalidImportedProvenance;
     }
     if (properties.size.width != transfer.extent or properties.size.height != transfer.extent or
@@ -91,9 +105,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
     const texture = try resolveTexture(io, &device, texture_api);
     defer device.release(allocator, io, texture) catch @panic("AHB texture release failed");
     try requireSuccess(try memory.beginAccess(io, texture_api, &.{
-        .concurrent_read = false, .initialized = false, .fence_count = 0,
+        .concurrent_read = false,
+        .initialized = false,
+        .fence_count = 0,
         .shared_texture_memory_vk_image_layout_begin_state = .{
-            .old_layout = vk.VK_IMAGE_LAYOUT_UNDEFINED, .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .old_layout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
         },
     }));
     var access_active = true;
@@ -116,10 +133,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
     const waits = [_]api.SharedFence{waited_api};
     const values = [_]u64{1};
     try requireSuccess(try memory.beginAccess(io, texture_api, &.{
-        .concurrent_read = false, .initialized = true, .fence_count = 1,
-        .fences = &waits, .signaled_value_count = 1, .signaled_values = &values,
+        .concurrent_read = false,
+        .initialized = true,
+        .fence_count = 1,
+        .fences = &waits,
+        .signaled_value_count = 1,
+        .signaled_values = &values,
         .shared_texture_memory_vk_image_layout_begin_state = .{
-            .old_layout = vk.VK_IMAGE_LAYOUT_GENERAL, .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .old_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
         },
     }));
     access_active = true;
@@ -129,8 +151,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io) Error!void {
     defer external_fd.closeHandle(io, final_fd);
 }
 
-fn resolveMemory(io: std.Io, device: *engine.Device, value: api.SharedTextureMemory)
-    Error!*memory_mod.SharedTextureMemory {
+fn resolveMemory(io: std.Io, device: *engine.Device, value: api.SharedTextureMemory) Error!*memory_mod.SharedTextureMemory {
     const header = try handles.resourceHeader(api.SharedTextureMemory, value, .shared_texture_memory);
     var guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     defer guard.unlock(io);
@@ -138,8 +159,7 @@ fn resolveMemory(io: std.Io, device: *engine.Device, value: api.SharedTextureMem
     return @fieldParentPtr("header", header);
 }
 
-fn resolveTexture(io: std.Io, device: *engine.Device, value: api.Texture)
-    Error!*engine.texture.Texture {
+fn resolveTexture(io: std.Io, device: *engine.Device, value: api.Texture) Error!*engine.texture.Texture {
     const header = try handles.resourceHeader(api.Texture, value, .texture);
     var guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     defer guard.unlock(io);
@@ -147,8 +167,7 @@ fn resolveTexture(io: std.Io, device: *engine.Device, value: api.Texture)
     return @fieldParentPtr("header", header);
 }
 
-fn resolveFence(io: std.Io, device: *engine.Device, value: api.SharedFence)
-    Error!*fence_mod.SharedFence {
+fn resolveFence(io: std.Io, device: *engine.Device, value: api.SharedFence) Error!*fence_mod.SharedFence {
     const header = try handles.resourceHeader(api.SharedFence, value, .shared_fence);
     var guard = try core.ObjectGuard.lock(io, device.core.arena.objectList());
     defer guard.unlock(io);
@@ -156,12 +175,13 @@ fn resolveFence(io: std.Io, device: *engine.Device, value: api.SharedFence)
     return @fieldParentPtr("header", header);
 }
 
-fn endAndExport(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device,
-    memory: *memory_mod.SharedTextureMemory, texture: api.Texture) Error!c_int {
+fn endAndExport(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device, memory: *memory_mod.SharedTextureMemory, texture: api.Texture) Error!c_int {
     var out: api.descriptors.SharedTextureMemoryEndAccessState = .{
-        .initialized = false, .fence_count = 0,
+        .initialized = false,
+        .fence_count = 0,
         .shared_texture_memory_vk_image_layout_end_state = .{
-            .old_layout = vk.VK_IMAGE_LAYOUT_GENERAL, .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .old_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .new_layout = vk.VK_IMAGE_LAYOUT_GENERAL,
         },
     };
     try requireSuccess(try memory.endAccess(allocator, io, texture, &out));
@@ -176,7 +196,8 @@ fn endAndExport(allocator: std.mem.Allocator, io: std.Io, device: *engine.Device
     const layout = out.shared_texture_memory_vk_image_layout_end_state orelse return error.InvalidEndLayout;
     if (layout.new_layout != vk.VK_IMAGE_LAYOUT_GENERAL) return error.InvalidEndLayout;
     var exported: api.descriptors.SharedFenceExportInfo = .{
-        .type_ = .sync_fd, .shared_fence_sync_fd_export_info = .{ .handle = -2 },
+        .type_ = .sync_fd,
+        .shared_fence_sync_fd_export_info = .{ .handle = -2 },
     };
     try requireSuccess(try fence.exportInfo(io, &exported));
     const fd = exported.shared_fence_sync_fd_export_info.?.handle;

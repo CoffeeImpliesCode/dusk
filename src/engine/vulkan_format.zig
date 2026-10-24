@@ -4,10 +4,7 @@
 //! `VulkanAttachmentLoadOp` and `VulkanAttachmentStoreOp`
 //! (`vulkan/UtilsVulkan.cpp:170`, `:185`), `VulkanSampleCount`
 //! (`vulkan/TextureVk.cpp:839`) and `VulkanImageLayoutForDepthStencilAttachment`
-//! (`vulkan/TextureVk.cpp:822`). Those five live in files Appendix A4 of
-//! `docs/40-plan.md` gives to M9 and M11, and the replay is their only caller
-//! at this milestone, so the symbols are here and M9 and M11 call them rather
-//! than declaring a second table.
+//! (`vulkan/TextureVk.cpp:822`). Those helpers share one table here.
 //!
 //! **What this file is not.** It is not the whole of `vulkan/UtilsVulkan.cpp`.
 //! The sampling and copy conversions stay M9's; only the five above are here,
@@ -53,8 +50,7 @@ pub const DepthStencilLayout = struct {
 /// rather than at a hundred arms.
 ///
 /// The switch has no `else`: a new upstream format is a compile error until it
-/// is mapped, which is the point `AGENTS.md` §3 makes about comptime
-/// exhaustiveness. The two toggle arms and the census below are the only
+/// is mapped. The two toggle arms and the census below are the only
 /// places a format is not a fixed Vulkan name.
 pub fn vkFormat(format: TextureFormat) vulkan.VkFormat {
     return @intCast(vulkanFormatValue(format));
@@ -270,8 +266,8 @@ comptime {
     // `VK_FORMAT_UNDEFINED`. An arm that fell through to the undefined value
     // would otherwise compile and produce an image no driver can create, and
     // the failure would name a driver rather than this line.
-    for (@typeInfo(TextureFormat).@"enum".fields) |field| {
-        const format: TextureFormat = @enumFromInt(field.value);
+    for (@typeInfo(TextureFormat).@"enum".field_values) |field_value| {
+        const format: TextureFormat = @fromBackingInt(@intCast(field_value));
         if (format == .undefined_) continue;
         if (vkFormat(format) == @as(vulkan.VkFormat, @intCast(vulkan.VK_FORMAT_UNDEFINED))) {
             @compileError("a texture format maps to VK_FORMAT_UNDEFINED: " ++ @tagName(format));

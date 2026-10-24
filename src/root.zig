@@ -9,13 +9,7 @@
 //! **What this file is.** The module root. Everything a consumer reaches must
 //! be re-exported here, and nothing else: each line below names one module of
 //! `docs/10-architecture.md` and points at that module's own root. The module
-//! layout is fixed by `docs/10-architecture.md` and `docs/30-port-design.md`,
-//! and the milestones that fill each module in are in `docs/40-plan.md`.
-//!
-//! **Read first.** `docs/02-dawn-design.md` is the upstream surface being
-//! ported, mapped at a pinned Dawn revision. `docs/20-dependencies.md` is the
-//! dependency ladder and the C-library questions. `AGENTS.md` holds the house
-//! rules this code is written under.
+//! layout is fixed by `docs/10-architecture.md` and `docs/30-port-design.md`.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -941,7 +941,7 @@ test "browser transform ABI retains all coefficients and padding" {
         try std.testing.expectEqual(@as(u32, @bitCast(value)), readWord(&parameters, 32 + index));
     for (transform.matrix, 0..) |value, index|
         try std.testing.expectEqual(@as(u32, @bitCast(value)), readWord(&parameters, 40 + @divFloor(index, 3) * 4 + index % 3));
-    for (.{ 31, 39, 43, 47, 51, 52, 53, 54, 55 }) |word|
+    for ([_]usize{ 31, 39, 43, 47, 51, 52, 53, 54, 55 }) |word|
         try std.testing.expectEqual(@as(u32, 0), readWord(&parameters, word));
 }
 

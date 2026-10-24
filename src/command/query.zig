@@ -12,13 +12,11 @@
 //! **What this file does not claim.** It does not claim the Vulkan replay. It
 //! does not claim the timestamp conversion of `native/QueryHelper.{h,cpp}`:
 //! `CommandEncoder.cpp:2334-2336` returns before that path for an occlusion
-//! set, and `docs/40-plan.md` §3.3 carries the row as a `skip` with that
-//! reason.
+//! set.
 //!
 //! **Where the rules live.** Dawn puts `ValidateQuerySetDescriptor` in
 //! `native/QuerySet.cpp`, which is engine-side. The port puts it here because a
-//! rule is a front-end rule and `AGENTS.md` §3 asks that the whole front end be
-//! drivable with no device. `docs/40-plan.md` §3.3 records the move.
+//! front-end rule must be drivable with no device.
 
 const std = @import("std");
 const api = @import("../api/api.zig");
@@ -84,9 +82,7 @@ pub const DescriptorOptions = struct {
 /// `validateSamplerDescriptor` and `validateTextureDescriptor` have: every
 /// rule this function raises is about the object the call makes, so the
 /// caller that records one in that object's `last_error` reaches the field
-/// without narrowing the caught rule first. `docs/40-plan.md` §3.3 records
-/// the move of the function out of the engine side, and this is the half of
-/// that move the error set shows.
+/// without narrowing the caught rule first.
 ///
 /// One upstream rule does not become a member of any set, and the same row
 /// records it: the `nextInChain` test at `QuerySet.cpp:51` cannot fire,
@@ -99,7 +95,7 @@ pub fn validateDescriptor(
 ) core.ValidationError!void {
     // `std.enums.fromInt` answers with an optional, not an error union, because
     // the only failure is "the value names no tag".
-    const tag = std.enums.fromInt(QueryType, @intFromEnum(descriptor.type_)) orelse
+    const tag = std.enums.fromInt(QueryType, @backingInt(descriptor.type_)) orelse
         return error.QueryTypeUnknown;
     switch (tag) {
         .occlusion => {},

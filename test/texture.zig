@@ -18,11 +18,6 @@
 //! canonical rows specialized from the device's enabled features. The fixture
 //! keeps those rows alive until its device arena releases every object.
 //!
-//! **What this shard does not claim.** It does not claim a Vulkan image. The
-//! front end holds no Vulkan (`AGENTS.md` §3), so the store below is the whole
-//! texture as far as M11 is concerned; the image behind it is M18's. It claims
-//! nothing about the sampler: the sampler rules have no reader in this
-//! milestone, and a test that asserted them would be asserting presence.
 
 const std = @import("std");
 const dusk = @import("dusk");

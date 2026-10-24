@@ -2,8 +2,7 @@
 //! or force, and the state that records what one object holds.
 //!
 //! Ports `src/dawn/native/Toggles.{h,cpp}` (`Toggles.h:44-315`,
-//! `Toggles.cpp:49-1140`). `docs/40-plan.md` section 3.3 `#### M7` holds
-//! the row table, one row per upstream definition.
+//! `Toggles.cpp:49-1140`).
 //!
 //! **What this file does not claim.** It does not claim which toggles a
 //! device turns on. Every row here is data. The defaults that choose a
@@ -1900,7 +1899,7 @@ pub const infos: [toggle_count]ToggleInfo = .{
 /// The wire name of a toggle. `ToggleEnumToName` (`Toggles.cpp:1150-1157`).
 /// The string is data, so this reads it and never spells it out.
 pub fn toggleName(toggle: Toggle) []const u8 {
-    const ordinal: usize = @intFromEnum(toggle);
+    const ordinal: usize = @backingInt(toggle);
     std.debug.assert(ordinal < toggle_count);
     return infos[ordinal].name;
 }
@@ -1911,11 +1910,11 @@ pub fn toggleName(toggle: Toggle) []const u8 {
 /// Dawn builds a `const char*` to `Toggle` map on first use inside a
 /// `TogglesInfo` that each caller builds and drops (`Toggles.cpp:1204`). The
 /// table here is comptime, so the scan replaces the map, and the map, its
-/// boolean guard and its destructor go away with it (`AGENTS.md` section 3).
+/// boolean guard and its destructor go away with it.
 pub fn toggleFromName(name: []const u8) ?Toggle {
     // Bound: `infos`, the `toggle_count` rows. No other bound is possible.
     for (infos, 0..) |info, ordinal| {
-        if (std.mem.eql(u8, info.name, name)) return @enumFromInt(ordinal);
+        if (std.mem.eql(u8, info.name, name)) return @fromBackingInt(@intCast(ordinal));
     }
     return null;
 }
@@ -1923,7 +1922,7 @@ pub fn toggleFromName(name: []const u8) ?Toggle {
 /// The row of one toggle. `TogglesInfo::GetToggleInfo(Toggle)`
 /// (`Toggles.cpp:1186-1190`).
 pub fn toggleInfo(toggle: Toggle) ToggleInfo {
-    const ordinal: usize = @intFromEnum(toggle);
+    const ordinal: usize = @backingInt(toggle);
     std.debug.assert(ordinal < toggle_count);
     return infos[ordinal];
 }
@@ -1931,7 +1930,7 @@ pub fn toggleInfo(toggle: Toggle) ToggleInfo {
 /// Which toggles one piece of state holds. `TogglesSet` (`Toggles.h:245-257`)
 /// is an `ityp::bitset` upstream, which is a word array and a few reads here.
 pub const TogglesSet = struct {
-    bits: [toggle_word_count]u64 = [_]u64{0} ** toggle_word_count,
+    bits: [toggle_word_count]u64 = @splat(0),
 
     /// Marks a toggle present. `TogglesSet::Set` (`Toggles.cpp:978-982`).
     /// Dawn takes a value and can clear a bit. This set records presence
@@ -1967,7 +1966,7 @@ pub const TogglesSet = struct {
     /// `init` (`Toggles.cpp:994`) and a test rebuilds it with `init` too, so
     /// no caller mutates a state in place.
     pub fn clear(self: *TogglesSet) void {
-        self.bits = [_]u64{0} ** toggle_word_count;
+        self.bits = @splat(0);
     }
 
     /// The walk over the set toggles in ascending ordinal order. It replaces
@@ -1988,9 +1987,9 @@ pub const TogglesSet = struct {
         pub fn next(self: *Iterator) ?Toggle {
             var ordinal = self.next_ordinal;
             while (ordinal < toggle_count) : (ordinal += 1) {
-                if (self.set_bits.has(@enumFromInt(ordinal))) {
+                if (self.set_bits.has(@fromBackingInt(@intCast(ordinal)))) {
                     self.next_ordinal = ordinal + 1;
-                    return @enumFromInt(ordinal);
+                    return @fromBackingInt(@intCast(ordinal));
                 }
             }
             self.next_ordinal = toggle_count;
@@ -2055,7 +2054,7 @@ pub const TogglesState = struct {
     /// toggle the earlier level forced, because a force carries to every
     /// later level (`:1045-1050`).
     pub fn inheritFrom(self: *TogglesState, earlier: TogglesState) void {
-        std.debug.assert(@intFromEnum(earlier.stage_value) < @intFromEnum(self.stage_value));
+        std.debug.assert(@backingInt(earlier.stage_value) < @backingInt(self.stage_value));
         var walk = earlier.set.iterator();
         while (walk.next()) |toggle| {
             std.debug.assert(toggleInfo(toggle).stage < self.stage_value);
@@ -2135,7 +2134,7 @@ pub const TogglesState = struct {
     /// The names of the toggles that are set and enabled.
     /// `TogglesState::GetEnabledToggleNames` (`Toggles.cpp:1108-1122`). Dawn
     /// returns a vector. This writes into `out` and returns the prefix it
-    /// filled, so the caller owns the storage (`AGENTS.md` section 3).
+    /// filled, so the caller owns the storage.
     pub fn getEnabledToggleNames(
         self: TogglesState,
         out: *[toggle_count][]const u8,
@@ -2196,7 +2195,7 @@ fn assertTableIsWellFormed() void {
         std.debug.assert(instance_toggle_count + adapter_toggle_count + device_toggle_count ==
             toggle_count);
         var enum_field_count: usize = 0;
-        for (@typeInfo(Toggle).@"enum".fields) |_| enum_field_count += 1;
+        for (@typeInfo(Toggle).@"enum".field_names) |_| enum_field_count += 1;
         std.debug.assert(enum_field_count == toggle_count);
 
         var instance_rows: usize = 0;

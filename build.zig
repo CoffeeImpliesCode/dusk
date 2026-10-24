@@ -1,45 +1,6 @@
 //! Build wiring for dusk.
 //!
-//! **What this build publishes.** One module, `dusk`, rooted at
-//! `src/root.zig`. A dependent package reaches it as `dep.module("dusk")`.
-//! No executable and no C artifact exist yet, so `dep.artifact("dusk")` is
-//! unsupported and `zig-out/bin` stays empty. `docs/40-plan.md` names the
-//! milestone that adds each; neither is declared before it exists.
-//!
-//! **The two generated files.** `src/vulkan.zig` is `zig translate-c` over the
-//! pinned `vulkan_core.h`, and `src/vk/dispatch.zig` is the output of
-//! `tools/gen_dispatch.zig`. Both are checked in, so a consumer needs no C
-//! toolchain and no Vulkan SDK headers. `zig build generate` rewrites them from
-//! the pinned inputs, and that step is outside the default graph on purpose: a
-//! build must never mutate a checked-in file without being asked.
-//! `test/gen_dispatch_drift.zig` fails when the two disagree.
-//!
-//! **What the `test` step runs.** Explicit Debug and ReleaseSafe library
-//! graphs, the generated dispatch table in both modes, the drift test, and
-//! one Debug acceptance shard per file under `test/`, plus ReleaseSafe shards
-//! for native ownership, GPU execution, SPIR-V, pipeline-cache, asynchronous
-//! completion, core lifetimes, error scopes, object arenas and API regressions. A test
-//! file is its own module with the library as an import, so a file that stops
-//! compiling fails alone and its step name says which file it was.
-//!
-//! **How the library's own tests get in.** The two shards that root
-//! `src/root.zig` are also what runs every `test` block under `src/`: the test
-//! block at the end of `src/root.zig` calls `std.testing.refAllDecls` on each
-//! of the nine module namespaces, which references every name they publish and
-//! so puts every file behind them into the compilation. A `pub const`
-//! re-export on its own is only a name, and a file that is never imported
-//! never contributes its tests; measured before that block existed, the
-//! published-module shard ran 2 tests against 78 `test` blocks in the tree.
-//! The generated table's own four tests are in that 78 by way of the `vk`
-//! namespace, and the dedicated dispatch shards below still add what a module
-//! root adds: the file as the root, its own safety mode, and `link_libc` on a
-//! compilation that has no other reason to set it.
-//!
-//! **Compiler.** `build.zig.zon` declares `.minimum_zig_version = "0.16.0"`.
-//! That is a lower bound, not the supported compiler. Zig 0.16.0 is the line
-//! this project intends. On this host `zig` is an anyzig shim that reads the
-//! same field to select the toolchain, so the manifest is the single version
-//! authority for the project and for every tool the gate runs.
+//! Publishes the `dusk` module. Generation is explicit; tests use Debug and ReleaseSafe shards.
 
 const std = @import("std");
 
@@ -50,10 +11,8 @@ const std = @import("std");
 /// because the C ABI header embeds it.
 const version = "0.0.0";
 
-/// Compiler floor. Mirrors `.minimum_zig_version` in `build.zig.zon`, which is
-/// the authority and also selects the toolchain through the anyzig shim.
-/// `src/root.zig` checks it against the running compiler.
-const minimum_zig_version = "0.16.0";
+/// Compiler floor, mirrored in `build.zig.zon`.
+const minimum_zig_version = "0.17.0";
 
 /// Address-space ceiling for one test shard, in kibibytes. Four gigabytes is
 /// far above an honest test and far below what an unbounded allocation loop
@@ -61,9 +20,7 @@ const minimum_zig_version = "0.16.0";
 /// taking the machine with it.
 const test_address_space_kb: u32 = 4 * 1024 * 1024;
 
-/// The header `zig translate-c` reads, relative to the header tree's root.
-/// `docs/20-dependencies.md` "Vulkan bindings" owns the pin and the reason the
-/// standard library cannot cover the slot.
+/// Header path relative to the pinned Vulkan include tree.
 const vulkan_header_sub_path = "vulkan/vulkan_core.h";
 
 /// The line `zig translate-c` emits for the pinned header version. It is the
@@ -84,10 +41,6 @@ const dispatch_zig_sub_path = "src/vk/dispatch.zig";
 /// Python.
 const gen_dispatch_sub_path = "tools/gen_dispatch.zig";
 const dispatch_drift_test_sub_path = "test/gen_dispatch_drift.zig";
-
-/// Directory under the build cache for the bytes the drift test generates. It
-/// is scratch, so it is cached rather than committed.
-const drift_scratch_dir = "gen_dispatch_drift";
 
 /// Name the generator writes its output under, in the cache and in scratch.
 const dispatch_name = "dispatch.zig";
@@ -111,12 +64,12 @@ pub fn build(b: *std.Build) void {
     // names the second `vulkan0` and rejects the file for belonging to two
     // modules. A module's optimize mode is fixed at creation, so one instance
     // cannot serve both modes, and there must be exactly one per mode.
-    const vulkan_debug = addVulkanModule(b, target, .Debug);
-    const vulkan_release = addVulkanModule(b, target, .ReleaseSafe);
+    const vulkan_debug = addVulkanModule(b, target, .debug);
+    const vulkan_release = addVulkanModule(b, target, .safe);
     const vulkan_published = switch (optimize) {
-        .Debug => vulkan_debug,
-        .ReleaseSafe => vulkan_release,
-        .ReleaseFast, .ReleaseSmall => addVulkanModule(b, target, optimize),
+        .debug => vulkan_debug,
+        .safe => vulkan_release,
+        .fast, .small => addVulkanModule(b, target, optimize),
     };
 
     // The published module. Consumers import `@import("dusk")`. The `vulkan`
@@ -149,20 +102,20 @@ pub fn build(b: *std.Build) void {
     // The published module follows the consumer's optimize option. Acceptance
     // graphs remain explicitly Debug and ReleaseSafe regardless of that option,
     // and each graph shares exactly one matching Vulkan module instance.
-    const debug_mod = if (optimize == .Debug) mod else b.createModule(.{
+    const debug_mod = if (optimize == .debug) mod else b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .Debug,
+        .optimize = .debug,
         .link_libc = true,
         .imports = &.{
             .{ .name = "build_options", .module = options.createModule() },
             .{ .name = "vulkan", .module = vulkan_debug },
         },
     });
-    const release_mod = if (optimize == .ReleaseSafe) mod else b.createModule(.{
+    const release_mod = if (optimize == .safe) mod else b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
         .imports = &.{
             .{ .name = "build_options", .module = options.createModule() },
@@ -194,13 +147,13 @@ pub fn build(b: *std.Build) void {
     // compile it.
     const dispatch_debug = b.addTest(.{
         .name = "test-vk-dispatch-Debug",
-        .root_module = addDispatchTestModule(b, target, .Debug, vulkan_debug),
+        .root_module = addDispatchTestModule(b, target, .debug, vulkan_debug),
     });
     test_step.dependOn(&addCeilingedRun(b, "test-vk-dispatch-Debug", dispatch_debug).step);
 
     const dispatch_release = b.addTest(.{
         .name = "test-vk-dispatch-ReleaseSafe",
-        .root_module = addDispatchTestModule(b, target, .ReleaseSafe, vulkan_release),
+        .root_module = addDispatchTestModule(b, target, .safe, vulkan_release),
     });
     test_step.dependOn(&addCeilingedRun(b, "test-vk-dispatch-ReleaseSafe", dispatch_release).step);
 
@@ -208,18 +161,13 @@ pub fn build(b: *std.Build) void {
     // enough: byte identity does not depend on the safety mode, and the two
     // dispatch shards above already answer that question.
     const drift_options = b.addOptions();
-    drift_options.addOption([]const u8, "checked_in_path", b.pathFromRoot(dispatch_zig_sub_path));
-    drift_options.addOption([]const u8, "scratch_path", b.pathJoin(&.{
-        b.cache_root.path orelse ".",
-        drift_scratch_dir,
-        dispatch_name,
-    }));
+    drift_options.addOptionPath("checked_in_path", b.path(dispatch_zig_sub_path));
     const drift_tests = b.addTest(.{
         .name = "test-gen-dispatch-drift",
         .root_module = b.createModule(.{
             .root_source_file = b.path(dispatch_drift_test_sub_path),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
             .imports = &.{
                 .{ .name = "gen_dispatch", .module = addGenDispatchModule(b) },
                 .{ .name = "drift_options", .module = drift_options.createModule() },
@@ -285,7 +233,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-worker-pool", .sub_path = "test/worker_pool.zig" },
     };
     for (acceptance_shards) |shard| {
-        addAcceptanceShard(b, test_step, shard.name, shard.sub_path, target, .Debug, debug_mod, vulkan_debug);
+        addAcceptanceShard(b, test_step, shard.name, shard.sub_path, target, .debug, debug_mod, vulkan_debug);
     }
     // ReleaseSafe acceptance must compile the test root, library, and bindings
     // in the same safety mode; a second step pointing at a Debug run proves
@@ -395,7 +343,7 @@ pub fn build(b: *std.Build) void {
             shard.name,
             shard.sub_path,
             target,
-            .ReleaseSafe,
+            .safe,
             release_tests.root_module,
             vulkan_release,
         );
@@ -441,7 +389,7 @@ pub fn build(b: *std.Build) void {
             shard.name,
             shard.sub_path,
             target,
-            .Debug,
+            .debug,
             debug_mod,
             vulkan_debug,
         );
@@ -451,7 +399,7 @@ pub fn build(b: *std.Build) void {
             b.fmt("{s}-release-safe", .{shard.name}),
             shard.sub_path,
             target,
-            .ReleaseSafe,
+            .safe,
             release_mod,
             vulkan_release,
         );
@@ -477,7 +425,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
             // An explicit Debug root keeps cross-test independent of the
             // published module's consumer-selected optimize mode.
             .link_libc = true,
@@ -500,7 +448,7 @@ pub fn build(b: *std.Build) void {
 fn addVulkanModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(vulkan_zig_sub_path),
@@ -522,7 +470,7 @@ fn addVulkanModule(
 fn addDispatchTestModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     vulkan: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{
@@ -542,39 +490,19 @@ fn addGenDispatchModule(b: *std.Build) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(gen_dispatch_sub_path),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
 }
 
-/// Rewrites the two generated files from the pinned inputs.
-///
-/// The step writes into the source tree, and only when it is asked to:
-/// `std.Build.Step.UpdateSourceFiles` exists for that case, and it is the only
-/// step here that is not part of the default graph.
-///
-/// **Where the header comes from.** `-Dheader-dir`, or `DUSK_VULKAN_HEADERS`,
-/// which `devenv.nix` sets. `docs/20-dependencies.md` "Vulkan bindings" owns
-/// the pin, commit `8249cb829eb402c65cb7e3778c51b0f8edc4a4b6` at Vulkan-Headers
-/// v1.4.365, and it is not a `build.zig.zon` dependency. That was measured, not
-/// inferred: with the entry present, `zig build` compiles the dependency's own
-/// build script and fails in `toolbox` 2.2.5, which needs the `Build.root` that
-/// Zig 0.16 removed and a one-argument `findProgram`
-/// (`zig-pkg/toolbox-2.2.5-*/build.zig:819`). A `.paths` filter does not save
-/// it, and it could not: `translate-c` reads `vulkan_core.h` together with
-/// `vk_platform.h` and the eleven `vk_video` headers, so the input is a header
-/// tree. What the step does check is the version, through the generated file
-/// itself, so a tree from another Vulkan release cannot be mistaken for the
-/// pin.
+/// Rewrites bindings and dispatch using Vulkan-Headers v1.4.365.
+/// Supply the include tree through `-Dheader-dir` or `DUSK_VULKAN_HEADERS`.
 fn addGenerateStep(b: *std.Build) void {
     const generate_step = b.step(
         "generate",
         "Rewrite src/vulkan.zig and src/vk/dispatch.zig from the pinned inputs",
     );
 
-    // The bindings. `AGENTS.md` §3.1: `src/vulkan.zig` is generated and never
-    // hand-edited, so the header tree is its only input. The run is a plain
-    // child process rather than `std.Build.Step.TranslateC` because the tree
-    // is outside the package, and a `LazyPath` cannot name it.
+    // The header tree can be outside the package.
     const header_dir = b.option([]const u8, "header-dir", "Directory holding vulkan/vulkan_core.h") orelse
         b.graph.environ_map.get("DUSK_VULKAN_HEADERS") orelse {
         const missing_header = std.Build.Step.Fail.create(
@@ -586,14 +514,10 @@ fn addGenerateStep(b: *std.Build) void {
         return;
     };
 
-    // No `-lc`: the header is freestanding C and the bindings declare no libc
-    // type, so linking libc into the translation only adds the platform's
-    // `int_least64_t` aliases to a file that must stay a pure translation of
-    // the header. `docs/20-dependencies.md` records the same command.
+    // The header is freestanding and does not need libc.
     const translate_c = b.addSystemCommand(&.{ b.graph.zig_exe, "translate-c" });
-    translate_c.addArg("-I");
-    translate_c.addArg(header_dir);
-    translate_c.addArg(b.pathJoin(&.{ header_dir, vulkan_header_sub_path }));
+    translate_c.setCwd(.{ .cwd_relative = header_dir });
+    translate_c.addArgs(&.{ "-I", ".", vulkan_header_sub_path });
     const bindings = translate_c.captureStdOut(.{ .basename = vulkan_name });
     const pin_check = std.Build.Step.CheckFile.create(b, bindings, .{
         .expected_matches = &.{pinned_header_version_line},
@@ -629,9 +553,6 @@ fn addFetchDawnStep(b: *std.Build, aggregate_tests: *std.Build.Step) void {
         if (b.graph.environ_map.get("DUSK_DAWN_SRC")) |source| {
             if (source.len != 0) break :blk source;
         }
-        if (b.graph.environ_map.get("buildhost_SCRATCH_ROOT")) |scratch| {
-            if (scratch.len != 0) break :blk b.pathJoin(&.{ scratch, "research", "dawn" });
-        }
         const home = b.graph.environ_map.get("HOME") orelse {
             const missing = std.Build.Step.Fail.create(
                 b,
@@ -645,7 +566,7 @@ fn addFetchDawnStep(b: *std.Build, aggregate_tests: *std.Build.Step) void {
     const module = b.createModule(.{
         .root_source_file = b.path("tools/fetch_dawn.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const executable = b.addExecutable(.{ .name = "fetch-dawn", .root_module = module });
     const run = b.addRunArtifact(executable);
@@ -669,12 +590,12 @@ fn addNativeKernelSteps(b: *std.Build, aggregate_tests: *std.Build.Step) void {
     const debug_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_native_kernels.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const release_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_native_kernels.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     const tool_test_shards = [_]struct { name: []const u8, module: *std.Build.Module }{
         .{ .name = "test-gen-native-kernels", .module = debug_module },
@@ -768,7 +689,7 @@ fn addAcceptanceShard(
     name: []const u8,
     sub_path: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: *std.Build.Module,
     vulkan: *std.Build.Module,
 ) void {

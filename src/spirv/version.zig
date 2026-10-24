@@ -19,8 +19,7 @@ pub const Version = struct {
     /// SPIR-V 1.0, the first published version.
     pub const first: Version = .{ .major = 1, .minor = 0 };
 
-    /// SPIR-V 1.6, the highest version the `spirv-val` in `devenv.nix`
-    /// validates (`docs/50-verification.md` §7.1).
+    /// SPIR-V 1.6, the highest version supported here.
     pub const last: Version = .{ .major = 1, .minor = 6 };
 
     pub fn eql(left: Version, right: Version) bool {

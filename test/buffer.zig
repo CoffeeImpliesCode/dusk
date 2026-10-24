@@ -1,14 +1,10 @@
 //! The M10 shard: a 1 MiB buffer, written, copied into a readback buffer, and
 //! read back byte for byte, twice.
 //!
-//! **What the acceptance sentence names, and what it does not.**
-//! `docs/40-plan.md` §1 M10 says `test/buffer.zig` "creates a 1 MiB
-//! mapped-at-creation buffer, writes a 1,048,576-byte pattern through
-//! `writeBuffer`, copies the buffer into a readback buffer with
-//! `copyBufferToBuffer`, maps the readback buffer and asserts all 1,048,576
-//! bytes equal the pattern. It repeats the write with `mapped_at_creation`
-//! false to take the `DynamicUploader` path (`Buffer.cpp:1183`) and asserts the
-//! same result."
+//! The tests create a 1 MiB buffer, fill a 1,048,576-byte pattern, copy it
+//! through `copyBufferToBuffer`, map the readback buffer and compare every byte.
+//! They repeat the write with `mapped_at_creation` false to take the
+//! `DynamicUploader` path (`Buffer.cpp:1183`) and assert the same result.
 //!
 //! `writeBuffer` requires public `copy_dst` usage. Creation mapping does not
 //! require `map_write`: its writable `getMappedRange` is a one-time privilege,
@@ -34,12 +30,6 @@
 //! whole index, so a copy that shifted by four bytes, a copy that ran backwards
 //! and an allocation that was never written all fail.
 //!
-//! **What this shard does not claim.** It claims no `DynamicUploader` ring
-//! wrap: a reservation is released the moment its copy is recorded, because
-//! reclaiming on the serial needs the memory module's reclaim queue
-//! (`src/engine/buffer.zig:1710`). It claims no host-mapped import and no texel
-//! buffer view; both are M21's rows. It creates no surface, because the host is
-//! headless (`AGENTS.md` §5).
 
 const std = @import("std");
 const dusk = @import("dusk");
@@ -64,13 +54,6 @@ const pattern_size: u64 = pattern_byte_count;
 
 /// Every teardown refusal one test body has not returned yet.
 ///
-/// `defer` cannot fail in Zig 0.16, so a teardown that can refuse cannot
-/// return from the point where it refuses. It records the error here and the
-/// body returns it once its own frame has unwound, which keeps every teardown
-/// a `defer` and still hands the shard the loader's own words instead of a trap
-/// carrying ours. `AGENTS.md` §3.1 makes a missing proc a typed error and
-/// forbids the panic, so recording is the shape that leaves both standing.
-/// `test/render_pipeline.zig:242-269` is the same shape.
 const TeardownErrors = struct {
     first: ?Harness.TeardownError = null,
 
@@ -177,11 +160,6 @@ const Harness = struct {
         self.backend = vulkan_device.Backend.init(std.testing.allocator, .{
             .handles = &self.handles,
         });
-        // The backend teardown reaches a global proc, and `AGENTS.md` §3.1
-        // makes a null one a typed error. A backend that cannot close leaves a
-        // live `VkInstance` behind, so the refusal is recorded rather than
-        // discarded: the harness is already unwinding and the caller reads the
-        // recorder once its own frame has returned.
         errdefer self.backend.deinit() catch |err| teardowns.record(err);
         self.adapters = try self.backend.discoverPhysicalDevices(.{});
         errdefer self.adapters.deinit();
@@ -231,12 +209,6 @@ const Harness = struct {
     /// Tears down in the order the handles were created: the ring's staging
     /// buffer, the queue's pools, then the device.
     ///
-    /// It reports rather than returning `void`, because the ring, the queue,
-    /// the device and the backend each reach a dispatch proc on the way down
-    /// and `AGENTS.md` §3.1 makes a null one a typed error. A refusal is
-    /// returned rather than caught here, so the error is never dropped on the
-    /// floor; the caller reads it, and a Zig 0.16 `defer` cannot `try`, so each
-    /// of the three call sites below catches and re-fails with the error named.
     fn deinit(self: *Harness, io: std.Io) TeardownError!void {
         try self.ring.deinit();
         // Queue teardown acquires its own guard only for header lifetime phases.
@@ -352,12 +324,6 @@ fn firstNonZero(bytes: []const u8) usize {
 /// `destroy` releases the mapping, the `VkBuffer`, the `VkDeviceMemory` and
 /// then the struct itself, in that order.
 ///
-/// It records because `destroy` releases the `VkBuffer` and the
-/// `VkDeviceMemory` through dispatch procs and `AGENTS.md` §3.1 makes a null
-/// one a typed error. A Zig 0.16 `defer` cannot `try`, so each of the deferred
-/// call sites below records the failure instead of dropping it: a buffer whose
-/// teardown refused has leaked a device allocation, and the `handles.isEmpty`
-/// assert in `Harness.deinit` would never see the handle.
 fn destroyBuffer(subject: *buffer_mod.Buffer, teardowns: *TeardownErrors) void {
     subject.destroy(std.testing.allocator) catch |err| teardowns.record(err);
 }
@@ -817,8 +783,8 @@ fn ringUploadRoundTrip(harness: *Harness, teardowns: *TeardownErrors) !void {
     // usage, so `memoryKindFor` (`src/engine/buffer.zig:460`) asks for no host
     // access and `allocateMemory` takes no mapping.
     // Destination and staging share a VkDevice, not a host allocation owner.
-    var destination_heap: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(destination_heap.deinit() == .ok) catch
+    var destination_heap: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(destination_heap.deinit() == 0) catch
         @panic("buffer: destination allocator leaked");
     const destination_allocator = destination_heap.allocator();
     var destination_device = harness.buffers;
@@ -971,21 +937,21 @@ test "buffer: every rule and every state has a name" {
     // it sweeps both domains and asserts the names are not empty, so a name that
     // reaches an error message cannot be an empty string.
     const rule_info = @typeInfo(buffer_mod.Rule);
-    try std.testing.expect(rule_info.error_set.?.len != 0);
+    try std.testing.expect(rule_info.error_set.error_names.?.len != 0);
     // `inline for` because both domains are comptime-known and `ruleName` takes
     // its rule by value: folding here is what makes a member with no branch a
     // compile error in this shard too, not only in the module. Reflection hands
     // back each member's name rather than a `Rule` value, so `@field` is what
     // turns a swept member back into the value `ruleName` takes.
-    inline for (rule_info.error_set.?) |rule| {
-        const member = @field(buffer_mod.Rule, rule.name);
+    inline for (rule_info.error_set.error_names.?) |rule| {
+        const member = @field(buffer_mod.Rule, rule);
         try std.testing.expect(buffer_mod.ruleName(member).len != 0);
     }
 
-    const states = @typeInfo(buffer_mod.State).@"enum".fields;
+    const states = @typeInfo(buffer_mod.State).@"enum".field_values;
     try std.testing.expect(states.len != 0);
-    inline for (states) |field| {
-        try std.testing.expect(buffer_mod.stateName(@enumFromInt(field.value)).len != 0);
+    inline for (states) |field_value| {
+        try std.testing.expect(buffer_mod.stateName(@fromBackingInt(@intCast(field_value))).len != 0);
     }
 
     // The one state `isMappedState` answers for is the pair the acceptance

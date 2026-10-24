@@ -31,8 +31,8 @@
 //! file, and this shard deliberately enables more than M9 does.
 //!
 //! **What this shard does not claim.** It does not claim the dma-buf service
-//! or the Android `AHardwareBuffer` service; `docs/40-plan.md` §M21 records
-//! why both are skipped, and `src/platform/external_memory.zig` says the same.
+//! or the Android `AHardwareBuffer` service; `src/platform/external_memory.zig`
+//! describes those paths.
 //! It does not claim a disjoint image, because the fd family is never
 //! disjoint. It does not claim that a duplicated descriptor is independent of
 //! the original, which `dup(2)` does not promise.
@@ -167,10 +167,6 @@ const TeardownErrors = struct {
     }
 };
 
-/// The teardown entry points, one function each, so a `defer` has something it
-/// can call that cannot fail. `AGENTS.md` §3.1 makes a null dispatch field a
-/// typed error, and the typed error goes into the recorder rather than into a
-/// forced unwrap.
 fn destroyImage(
     procs: *const dispatch.DeviceProcs,
     handle: vulkan.VkDevice,
@@ -368,10 +364,6 @@ const Fixture = struct {
         fixture.instance = instance;
         errdefer destroyInstance(fixture.global, instance, teardowns);
 
-        // The `errdefer` above is the whole undo: it fires after this call, so
-        // it reads `destroy_instance` once `loadInstanceProcs` has filled it. It
-        // hands a failure to the recorder rather than dropping it, because a
-        // `defer` body cannot return and `AGENTS.md` §2 forbids going quiet.
         fixture.instance_procs = try dispatch.loadInstanceProcs(gpa, .{
             .get_instance_proc_addr = get_instance_proc_addr,
             .instance = instance,
@@ -600,9 +592,6 @@ const Fixture = struct {
             &handle,
         ));
         if (handle == null) return error.HandleCreationReturnedNull;
-        // A resolved entry point, so the undo below is a call that cannot fail:
-        // an `errdefer` has nowhere to put an error, and `AGENTS.md` §2 forbids
-        // going quiet about one.
         errdefer destroy_device(handle, null);
 
         const procs = try dispatch.loadDeviceProcs(gpa, .{
@@ -1611,10 +1600,6 @@ fn waitForFence(device: Device, fence: vulkan.VkFence) TestError!void {
     try dispatch.checkVkSuccess(result);
 }
 
-/// The first memory type whose bits intersect `type_bits` and whose properties
-/// carry every required flag and none of the forbidden ones. Dawn's selector
-/// (`MemoryTypeSelector.cpp`) reports an invalid index rather than a null, so
-/// this reports an error rather than an index, per `AGENTS.md` §3.
 fn findMemoryTypeIndex(
     properties: *const vulkan.VkPhysicalDeviceMemoryProperties,
     type_bits: u32,

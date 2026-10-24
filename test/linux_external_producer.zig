@@ -82,7 +82,9 @@ pub const Producer = struct {
     drm_modifier: u64 = 0,
     plane_count: usize = 0,
     planes: [4]dusk.api.descriptors.SharedTextureMemoryDmaBufPlane = @splat(.{
-        .fd = -1, .offset = 0, .stride = 0,
+        .fd = -1,
+        .offset = 0,
+        .stride = 0,
     }),
     drm_format: u32 = 0x34324241,
 
@@ -247,8 +249,7 @@ pub const Producer = struct {
             return error.UnsupportedDmaBuf;
         for (self.planes[0..self.plane_count], 0..) |*plane, index| {
             const subresource: vk.VkImageSubresource = .{
-                .aspectMask = @as(vk.VkImageAspectFlags,
-                    vk.VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) << @intCast(index),
+                .aspectMask = @as(vk.VkImageAspectFlags, vk.VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT) << @intCast(index),
                 .mipLevel = 0,
                 .arrayLayer = 0,
             };
@@ -306,8 +307,7 @@ pub const Producer = struct {
             .image = self.image,
             .subresourceRange = colorRange(),
         };
-        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            vk.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, null, 0, null, 1, &acquire);
+        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, null, 0, null, 1, &acquire);
         try dispatch.checkVkSuccess(end(self.command_buffer));
         try self.submitAndWait(returned, null);
     }
@@ -334,8 +334,7 @@ pub const Producer = struct {
             .image = self.image,
             .subresourceRange = colorRange(),
         };
-        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &transition);
+        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &transition);
         const magenta: vk.VkClearColorValue = .{ .float32 = .{ 1, 0, 1, 1 } };
         const range = colorRange();
         clear(self.command_buffer, self.image, vk.VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &range);
@@ -344,8 +343,7 @@ pub const Producer = struct {
         transition.oldLayout = vk.VK_IMAGE_LAYOUT_GENERAL;
         transition.srcQueueFamilyIndex = self.native.queue_family_index;
         transition.dstQueueFamilyIndex = vk.VK_QUEUE_FAMILY_EXTERNAL;
-        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, null, 0, null, 1, &transition);
+        barrier(self.command_buffer, vk.VK_PIPELINE_STAGE_TRANSFER_BIT, vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, null, 0, null, 1, &transition);
         try dispatch.checkVkSuccess(end(self.command_buffer));
     }
 
@@ -379,7 +377,11 @@ pub const Producer = struct {
         errdefer dispatch.checkVkSuccess(idle(self.queue)) catch @panic("producer queue wait failed");
         const fences = [1]vk.VkFence{fence};
         try dispatch.checkVkSuccess(wait_fence(
-            self.native.vk_device, 1, &fences, vk.VK_TRUE, 30 * std.time.ns_per_s,
+            self.native.vk_device,
+            1,
+            &fences,
+            vk.VK_TRUE,
+            30 * std.time.ns_per_s,
         ));
     }
 };
@@ -440,8 +442,7 @@ fn queryExternalImage(native: *engine.vulkan_device.Device, info: vk.VkImageCrea
 }
 
 fn colorRange() vk.VkImageSubresourceRange {
-    return .{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
-        .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+    return .{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
 }
 
 fn createPool(native: *engine.vulkan_device.Device) Error!struct {

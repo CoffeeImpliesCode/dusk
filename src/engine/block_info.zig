@@ -330,9 +330,9 @@ test "aggregate equality compares every typed coordinate" {
     inline for (.{ TexelOrigin3D, BlockOrigin3D, TexelExtent3D, BlockExtent3D }) |T| {
         const original: T = .{};
         try std.testing.expect(std.meta.eql(original, original));
-        inline for (std.meta.fields(T)) |field| {
+        inline for (@typeInfo(T).@"struct".field_names) |field_name| {
             var changed = original;
-            @field(changed, field.name).value += 1;
+            @field(changed, field_name).value += 1;
             try std.testing.expect(!std.meta.eql(original, changed));
         }
     }

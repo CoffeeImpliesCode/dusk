@@ -1,8 +1,7 @@
 //! The instance: the object that owns the back ends and answers "which adapters
 //! exist".
 //!
-//! Ports `src/dawn/native/Instance.{h,cpp}`. `docs/40-plan.md` §3.3 `#### M8`
-//! holds the row table.
+//! Ports `src/dawn/native/Instance.{h,cpp}`.
 //!
 //! This module does not implement surfaces or WGSL language features.
 //! Root request execution and event delivery belong to `async_root_requests.zig`.

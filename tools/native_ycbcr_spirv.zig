@@ -115,7 +115,7 @@ const Id = enum(u32) {
     srgb_exponent,
 };
 fn id(value: Id) u32 {
-    return @intFromEnum(value);
+    return @backingInt(value);
 }
 
 // These opcodes are the finite instruction set used by this shader, not a parser grammar.
@@ -189,7 +189,7 @@ const Builder = struct {
     fn instruction(self: *Builder, opcode: Op, operands: []const u32) void {
         std.debug.assert(self.words.items.len + operands.len + 1 <= word_capacity);
         self.words.appendAssumeCapacity((@as(u32, @intCast(operands.len + 1)) << 16) |
-            @intFromEnum(opcode));
+            @backingInt(opcode));
         self.words.appendSliceAssumeCapacity(operands);
     }
 
@@ -197,7 +197,7 @@ const Builder = struct {
         const result_id = self.fresh();
         std.debug.assert(self.words.items.len + operands.len + 3 <= word_capacity);
         self.words.appendAssumeCapacity((@as(u32, @intCast(operands.len + 3)) << 16) |
-            @intFromEnum(opcode));
+            @backingInt(opcode));
         self.words.appendSliceAssumeCapacity(&.{ result_type, result_id });
         self.words.appendSliceAssumeCapacity(operands);
         return result_id;
@@ -212,7 +212,7 @@ const Builder = struct {
         const count = 1 + prefix.len + text_word_count + suffix.len;
         std.debug.assert(self.words.items.len + count <= word_capacity);
         self.words.appendAssumeCapacity((@as(u32, @intCast(count)) << 16) |
-            @intFromEnum(opcode));
+            @backingInt(opcode));
         self.words.appendSliceAssumeCapacity(prefix);
         self.words.appendSliceAssumeCapacity(&text_words);
         self.words.appendSliceAssumeCapacity(suffix);

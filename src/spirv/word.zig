@@ -3,8 +3,8 @@
 //!
 //! **What this file does not claim.** It does not claim to accept a module in
 //! both byte orders. SPIR-V fixes the magic number in a little-endian word, and
-//! `AGENTS.md` §3.2 requires the caller's own words to reach
-//! `vkCreateShaderModule`, so the port reads little-endian and never swaps.
+//! the caller's own words reach `vkCreateShaderModule`, so the port reads
+//! little-endian and never swaps.
 
 const std = @import("std");
 const error_mod = @import("error.zig");

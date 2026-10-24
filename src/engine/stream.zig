@@ -1,7 +1,6 @@
 //! The Vulkan serialiser: one generic, one comptime field list per type.
 //!
-//! **What this file is.** `vulkan/StreamImplVk.cpp` upstream: 434 lines, 36
-//! rows (`docs/40-plan.md` §M18). Upstream declares one `Write` specialisation
+//! **What this file is.** `vulkan/StreamImplVk.cpp` upstream. It declares one `Write` specialisation
 //! per Vulkan struct and every one of them writes a field list through one
 //! sink. Here the field list is a comptime value and the writer is one generic,
 //! so the 31 `vulkan.zig` types below are 31 instantiations of one function
@@ -29,9 +28,8 @@ pub const WriteError = cache_key.CacheKey.AppendError;
 
 /// One step of a field list, in the order upstream's `StreamIn` writes it.
 ///
-/// Naming a field the type does not have is a compile error, which is how
-/// `AGENTS.md` §3's comptime exhaustiveness reaches a table that is data: a
-/// renamed Vulkan member cannot compile into a key that silently omits it.
+/// Naming a field the type does not have is a compile error: a renamed Vulkan
+/// member cannot compile into a key that silently omits it.
 pub const Step = union(enum) {
     /// The field's own bytes: an integer, a float, a bool, an enum, or a fixed
     /// C array copied raw (`stream/Stream.h:119-133`, `:316-324`).
@@ -249,7 +247,7 @@ fn writeScalar(
             try writeWord(allocator, key, @bitCast(wide));
         },
         .bool => try writeWord(allocator, key, if (item) 1 else 0),
-        .@"enum" => try writeWord(allocator, key, @intFromEnum(item)),
+        .@"enum" => try writeWord(allocator, key, @backingInt(item)),
         .float => |info| {
             if (info.bits == 32) {
                 try writeWord(allocator, key, @as(u32, @bitCast(@as(f32, item))));
@@ -534,7 +532,6 @@ const graphics_pipeline_steps = [_]Step{
 };
 
 /// The 31 instantiations. Each name is the upstream `Stream<T>` in snake_case,
-/// so a reader can match one row of `docs/40-plan.md` §M18 to one line here,
 /// and the `vulkan.` reference beside it keeps the C spelling the Vulkan
 /// headers use. Three names spell the extension suffix the house way, `_ext`
 /// and `_khr`, where the header spells it `EXT` and `KHR`.

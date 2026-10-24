@@ -2,9 +2,7 @@
 //!
 //! **What this file is.** The C declarations `zig translate-c` emits for the
 //! Vulkan Memory Allocator, written by hand because the pinned header is
-//! header-only and `AGENTS.md` §1 forbids the C++ compilation that would make
-//! an archive to link. It is the `translate-c` rung of the `AGENTS.md` §6
-//! ladder, and the rung above it — a hand-written C shim — is not taken here.
+//! header-only and no C++ implementation is linked here.
 //!
 //! **What this file does not claim.** It does not claim a working VMA. Nothing
 //! in it is called. `vk_mem_alloc.h` at v3.4.0 is 13,573 lines; lines 1-3047 are
@@ -12,9 +10,7 @@
 //! half, so a translation of the header yields declarations with no definition
 //! anywhere in the closure. The nixpkgs package `vulkan-memory-allocator` is
 //! `stdenvNoCC` and installs `include/` and the CMake config, nothing else, so
-//! there is no object to bind to. `docs/40-plan.md` §M6 records the
-//! consequence: the offset tree stays in Zig and this file is the seam where the
-//! `VkDeviceMemory` layer lands when the shim exists.
+//! there is no object to bind to. The offset tree stays in Zig.
 //!
 //! **Layout is `extern`, not hand-computed.** Every struct below is an
 //! `extern struct` in the declaration order of the header, so the C layout holds
@@ -65,9 +61,7 @@ pub const VmaPool = ?*VmaPoolT;
 /// `FlagBits` names stop at `0x7FFFFFFF` and the type stays open, so the port
 /// keeps it `u32` and names the bits it reads.
 ///
-/// The bits below are the header's `VMA_*_CREATE_*_BIT` macros. `AGENTS.md` §2
-/// gives a value `snake_case`, and the macro name is what a reader greps
-/// `vk_mem_alloc.h` for, so it is recorded once here instead of per constant.
+/// The bits below are the header's `VMA_*_CREATE_*_BIT` macros.
 pub const VmaAllocatorCreateFlags = vulkan.VkFlags;
 pub const VmaAllocationCreateFlags = vulkan.VkFlags;
 pub const VmaVirtualBlockCreateFlags = vulkan.VkFlags;
@@ -191,8 +185,8 @@ pub const VmaVulkanFunctions = extern struct {
 /// requirements. `preferredLargeHeapBlockSize` is where Dawn's
 /// `GetHeapBlockSize` value lands: `allocatorHeapBlockSize` is a WebGPU ABI
 /// field (`dawn.json:321`), so the knob stays Zig and only its value is
-/// forwarded. `pVulkanFunctions` is the seam `AGENTS.md` §3.1 asks for: the
-/// table points at dusk's dispatch pointers, never at VMA's own.
+/// forwarded. `pVulkanFunctions` points at dusk's dispatch pointers, never at
+/// VMA's own.
 pub const VmaAllocatorCreateInfo = extern struct {
     flags: VmaAllocatorCreateFlags,
     physicalDevice: vulkan.VkPhysicalDevice,
@@ -215,8 +209,7 @@ pub const VmaAllocatorCreateInfo = extern struct {
 /// No member carries Dawn's `isLazyMemoryType`. VMA takes
 /// `requiredFlags`/`preferredFlags` at create time and exposes nothing
 /// afterwards on the handle that says "this one was allocated lazily", which is
-/// one of the three reasons `docs/20-dependencies.md` gives for keeping the lazy
-/// flag on dusk's own record. `minAlignment` is the last member and is new in
+/// why the lazy flag stays on dusk's own record. `minAlignment` is the last member and is new in
 /// 3.4.0; it is absent from the copy Dawn vendors (`DEPS:365-368`), so a port
 /// that was translated against Dawn's copy would be one member short.
 pub const VmaAllocationCreateInfo = extern struct {
@@ -266,8 +259,7 @@ pub const VmaDetailedStatistics = extern struct {
 };
 
 /// `VmaTotalStatistics` (`vk_mem_alloc.h:1173-1260`). A large out-parameter,
-/// which is the second reason it never appears on a runtime path: it is the
-/// cross-check `docs/50-verification.md` owns, and a test calls it.
+/// which is why it does not appear on a runtime path; a test calls it.
 pub const VmaTotalStatistics = extern struct {
     memoryType: [vulkan.VK_MAX_MEMORY_TYPES]VmaDetailedStatistics,
     memoryHeap: [vulkan.VK_MAX_MEMORY_HEAPS]VmaDetailedStatistics,
@@ -289,8 +281,7 @@ pub const VmaBudget = extern struct {
 
 // Declared, not called. Zig emits no reference to an `extern` declaration that
 // nothing takes the address of, so a translation unit that only imports this
-// file links without a VMA implementation. `docs/40-plan.md` §M6 records why
-// nothing takes one yet.
+// file links without a VMA implementation.
 
 pub extern fn vmaCreateAllocator(
     pCreateInfo: *const VmaAllocatorCreateInfo,

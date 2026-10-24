@@ -45,10 +45,11 @@ test "sampler semantic identity excludes labels and normalizes signed zero" {
     var conversion = base;
     conversion.y_cb_cr = .{};
     try t.expect(!base.eql(conversion));
-    inline for (@typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct".fields) |field| {
+    const info = @typeInfo(api.descriptors.YCbCrVkDescriptor).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
         var changed = conversion;
-        const value = &@field(changed.y_cb_cr.?, field.name);
-        switch (@typeInfo(field.type)) {
+        const value = &@field(changed.y_cb_cr.?, field_name);
+        switch (@typeInfo(field_type)) {
             .bool => value.* = true,
             .@"enum" => value.* = .linear,
             .int => value.* = 1,
@@ -314,7 +315,7 @@ test "bind group and pending GPU work retain sampler after every sampler user re
         defer guard.unlock(t.io);
         try encoder.copyBufferToTexture(.{
             .source = .{ .buffer = try upload.ref(&guard), .blocks_per_row = 64, .rows_per_image = 1 },
-            .destination = .{ .texture = image, .format = @intFromEnum(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 } },
+            .destination = .{ .texture = image, .format = @backingInt(api.TextureFormat.rgba8_unorm), .dimension = ._2d, .aspect = .all, .extent = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 } },
             .copy_size = .{ .width = 2, .height = 1, .depth_or_array_layers = 1 },
         });
         var pass = try encoder.beginComputePass(.{});
@@ -682,17 +683,19 @@ test "native sampler allocation limit admits cached aliases but refuses distinct
     try f.init();
     defer f.deinit();
     const native_device = &f.device.native.?.native_device;
-    const original_limit = native_device.physical.properties.limits.maxSamplerAllocationCount;
+    const backend = &f.device.native.?.sampler_backend.?;
+    const original_limit = backend.max_sampler_allocation_count;
     {
         var guard = core.ObjectGuard.lockUncancelable(t.io, f.device.core.arena.objectList());
         defer guard.unlock(t.io);
         try t.expectEqual(@as(u32, 0), native_device.sampler_allocation_count);
-        native_device.physical.properties.limits.maxSamplerAllocationCount = 1;
+        // Admission uses the backend's device-creation snapshot of the physical limit.
+        backend.max_sampler_allocation_count = 1;
     }
     defer {
         var guard = core.ObjectGuard.lockUncancelable(t.io, f.device.core.arena.objectList());
         defer guard.unlock(t.io);
-        native_device.physical.properties.limits.maxSamplerAllocationCount = original_limit;
+        backend.max_sampler_allocation_count = original_limit;
     }
     var old: *sampler.Sampler = undefined;
     {

@@ -1,7 +1,7 @@
 //! What one entry point declares at which descriptor slot, in the shape a bind
 //! group layout declares.
 //!
-//! `AGENTS.md` §3.2 makes reflection the port's own: Dawn reads it out of a
+//! Reflection is the port's own: Dawn reads it out of a
 //! `tint::Program` (`ShaderModule.cpp:1314`, `:795`) and the port reads it out
 //! of the SPIR-V binary `src/spirv` already read. The upstream record
 //! (`ShaderModule.h:201` `ShaderBindingInfo`, `:204-205`

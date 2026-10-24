@@ -136,7 +136,7 @@ const Fixture = struct {
             defer guard.unlock(io);
             try encoder.copyBufferToTexture(.{
                 .source = .{ .buffer = try upload.ref(&guard), .blocks_per_row = pitch / channels, .rows_per_image = size },
-                .destination = .{ .texture = image, .format = @intFromEnum(format), .dimension = ._2d, .aspect = .all, .extent = .{ .width = size, .height = size, .depth_or_array_layers = 1 } },
+                .destination = .{ .texture = image, .format = @backingInt(format), .dimension = ._2d, .aspect = .all, .extent = .{ .width = size, .height = size, .depth_or_array_layers = 1 } },
                 .copy_size = .{ .width = size, .height = size, .depth_or_array_layers = 1 },
             });
         }
@@ -472,8 +472,8 @@ test "external two-plane native sampling consumes Y UV matrix gamma gamut HLG OO
     var fixture: Fixture = .{};
     try fixture.init(allocator);
     defer fixture.deinit();
-    const y = [_]u8{153} ** 16;
-    const uv = [_]u8{ 117, 139 } ** 4;
+    const y: [16]u8 = @splat(153);
+    const uv = [8]u8{ 117, 139, 117, 139, 117, 139, 117, 139 };
     const gamma = [7]f32{ 2.2, 1, 0, 1, 0, 0, 0 };
     const destination = [7]f32{ 0.45454545, 1, 0, 1, 0, 0, 0 };
     const gamut = [9]f32{ 0.75, 0.05, 0.1, 0.1, 0.8, 0.05, 0.05, 0.1, 0.7 };
@@ -506,7 +506,7 @@ test "external two-plane native sampling consumes Y UV matrix gamma gamut HLG OO
         for (0..3) |channel| rgb[channel] = @as(f64, yuv_matrix[channel * 4]) * 153.0 / 255 +
             @as(f64, yuv_matrix[channel * 4 + 1]) * 117.0 / 255 +
             @as(f64, yuv_matrix[channel * 4 + 2]) * 139.0 / 255 + yuv_matrix[channel * 4 + 3];
-        const expected = [_][4]f64{colorOracle(rgb, 1, options)} ** 16;
+        const expected: [16][4]f64 = @splat(colorOracle(rgb, 1, options));
         try scene.expectPixels(&fixture, serial, &expected, 2.0 / 255.0);
     }
 }
@@ -845,7 +845,7 @@ fn expandedProbe(expire_before_submit: bool) !void {
     {
         var guard = core.ObjectGuard.lockUncancelable(io, source.header.tracking);
         defer guard.unlock(io);
-        const padding = [_]u8{sentinel} ** 640;
+        const padding: [640]u8 = @splat(sentinel);
         try encoder.writeBuffer(.{ .buffer = try readback.ref(&guard), .data = &padding });
         var pass = try encoder.beginComputePass(.{});
         defer pass.deinit();
@@ -1171,7 +1171,7 @@ fn hardwareScene(fixture: *Fixture, descriptor: api.descriptors.SamplerDescripto
     }
     fixture.release(source);
     source_user = false;
-    const expected = [_][4]f64{hardwareColorOracle(vector, descriptor.y_cb_cr_vk_descriptor.?)} ** 16;
+    const expected: [16][4]f64 = @splat(hardwareColorOracle(vector, descriptor.y_cb_cr_vk_descriptor.?));
     try scene.expectPixels(fixture, serial, &expected, 1.0 / 255.0);
 }
 

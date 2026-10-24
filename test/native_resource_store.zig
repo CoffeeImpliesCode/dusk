@@ -693,7 +693,7 @@ test "native resource fail-N rolls back every real factory and post-driver inser
             } else |err| {
                 try t.expectEqual(error.OutOfMemory, err);
                 saw_failure = true;
-                if (probe.created[@intFromEnum(kind)] != 0) saw_native_rollback = true;
+                if (probe.created[@backingInt(kind)] != 0) saw_native_rollback = true;
             }
             try t.expectEqualSlices(usize, &probe.created, &probe.destroyed);
             {
@@ -710,7 +710,7 @@ test "native resource fail-N rolls back every real factory and post-driver inser
                     .shader => try t.expect(store.shader_modules.isEmpty(&guard)),
                 }
             }
-            const before_retry = probe.created[@intFromEnum(kind)];
+            const before_retry = probe.created[@backingInt(kind)];
             const retried = try rollbackCreate(kind, &f, group);
             var retried_owned = true;
             defer if (retried_owned) f.release(retried);
@@ -718,7 +718,7 @@ test "native resource fail-N rolls back every real factory and post-driver inser
             var alias_owned = true;
             defer if (alias_owned) f.release(alias);
             try t.expect(retried == alias);
-            try t.expectEqual(before_retry + 1, probe.created[@intFromEnum(kind)]);
+            try t.expectEqual(before_retry + 1, probe.created[@backingInt(kind)]);
             try expectUsable(kind, &f, alias);
             f.release(retried);
             retried_owned = false;
@@ -1044,7 +1044,7 @@ test "native cache misses refuse missing cleanup procedures before real native c
         const alias = try create(kind, &f, f.allocator);
         defer f.release(alias);
         try t.expect(created == alias);
-        try t.expectEqual(@as(usize, 1), probe.created[@intFromEnum(kind)]);
+        try t.expectEqual(@as(usize, 1), probe.created[@backingInt(kind)]);
         try expectUsable(kind, &f, alias);
     }
 }

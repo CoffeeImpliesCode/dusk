@@ -5,8 +5,7 @@
 //! `command` the stream, the encoders, the passes and the validation that runs
 //! against recorded state rather than against live objects. It records intent:
 //! a tag, an aligned payload and, for the six variable-length tags, a counted
-//! run. `AGENTS.md` §3 requires it to hold no Vulkan at all, and it does — the
-//! back end replays what this module recorded.
+//! run. It holds no Vulkan; the back end replays what this module recorded.
 //!
 //! **What this module does not claim.** It does not claim to execute anything.
 //! A recorded stream is worth nothing until `engine` replays it into `vk`, and

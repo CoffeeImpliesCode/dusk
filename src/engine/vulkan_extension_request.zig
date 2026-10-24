@@ -17,8 +17,8 @@ pub const VulkanExtensionRequest = struct {
     instance: []const RequestedInstanceExtension,
     device: []const RequestedDeviceExtension,
 };
-pub const instance_extension_count = @typeInfo(dispatch.InstanceExt).@"enum".fields.len;
-pub const device_extension_count = @typeInfo(dispatch.DeviceExt).@"enum".fields.len;
+pub const instance_extension_count = @typeInfo(dispatch.InstanceExt).@"enum".field_names.len;
+pub const device_extension_count = @typeInfo(dispatch.DeviceExt).@"enum".field_names.len;
 pub const SelectionError = error{ ExtensionUnavailable, ExtensionDependencyUnavailable };
 pub const EnumerationError = std.mem.Allocator.Error || dispatch.Error || dispatch.LoadError ||
     error{ExtensionEnumerationUnstable};
@@ -76,13 +76,12 @@ pub fn selectInstance(
             if (!selected.enabled.has(extension)) continue;
             const satisfied = switch (extension) {
                 .xlib_surface, .wayland_surface, .android_surface => selected.enabled.has(.surface),
-                .external_memory_capabilities, .external_semaphore_capabilities =>
-                    selected.enabled.has(.get_physical_device_properties2),
+                .external_memory_capabilities, .external_semaphore_capabilities => selected.enabled.has(.get_physical_device_properties2),
                 else => true,
             };
             if (satisfied) continue;
             if (required.has(extension)) return error.ExtensionDependencyUnavailable;
-            selected.enabled.bits &= ~@intFromEnum(extension);
+            selected.enabled.bits &= ~@backingInt(extension);
             changed = true;
         }
         if (!changed) break;
@@ -115,14 +114,13 @@ fn deviceDependencySatisfied(
         .get_memory_requirements2, .bind_memory2, .maintenance1, .image_format_list => true,
         .sampler_ycbcr_conversion => core11 or
             (enabled.has(.maintenance1) and enabled.has(.bind_memory2) and
-            enabled.has(.get_memory_requirements2) and
-            dependencies.enabled_instance.has(.get_physical_device_properties2)),
+                enabled.has(.get_memory_requirements2) and
+                dependencies.enabled_instance.has(.get_physical_device_properties2)),
         .image_drm_format_modifier => (core11 or enabled.has(.bind_memory2)) and
             (core12 or enabled.has(.image_format_list)) and
             (core11 or enabled.has(.sampler_ycbcr_conversion)) and
             (core11 or dependencies.enabled_instance.has(.get_physical_device_properties2)),
-        .external_memory_android_hardware_buffer =>
-            enabled.has(.queue_family_foreign) and
+        .external_memory_android_hardware_buffer => enabled.has(.queue_family_foreign) and
             (core11 or enabled.has(.external_memory)) and
             (core11 or enabled.has(.sampler_ycbcr_conversion)) and
             (core11 or enabled.has(.dedicated_allocation)) and
@@ -135,11 +133,8 @@ fn deviceDependencySatisfied(
 
 fn devicePromoted(extension: dispatch.DeviceExt, api_version: u32) bool {
     return switch (extension) {
-        .external_memory, .external_semaphore, .sampler_ycbcr_conversion,
-        .dedicated_allocation, .get_memory_requirements2, .bind_memory2, .maintenance1 =>
-            api_version >= vulkan.VK_API_VERSION_1_1,
-        .image_format_list, .draw_indirect_count, .create_renderpass2 =>
-            api_version >= vulkan.VK_API_VERSION_1_2,
+        .external_memory, .external_semaphore, .sampler_ycbcr_conversion, .dedicated_allocation, .get_memory_requirements2, .bind_memory2, .maintenance1 => api_version >= vulkan.VK_API_VERSION_1_1,
+        .image_format_list, .draw_indirect_count, .create_renderpass2 => api_version >= vulkan.VK_API_VERSION_1_2,
         .dynamic_rendering, .maintenance4 => api_version >= vulkan.VK_API_VERSION_1_3,
         .maintenance6 => api_version >= vulkan.VK_API_VERSION_1_4,
         else => false,
@@ -168,7 +163,7 @@ pub fn selectDevice(
             if (!selected.enabled.has(extension)) continue;
             if (deviceDependencySatisfied(extension, selected.enabled, dependencies)) continue;
             if (required.has(extension)) return error.ExtensionDependencyUnavailable;
-            selected.enabled.bits &= ~@intFromEnum(extension);
+            selected.enabled.bits &= ~@backingInt(extension);
             changed = true;
         }
         if (!changed) break;
@@ -304,9 +299,7 @@ const Enumerator = union(enum) {
         enumerate: @typeInfo(vulkan.PFN_vkEnumerateDeviceExtensionProperties).optional.child,
     },
 
-    fn call(self: Enumerator, count: *u32, properties: ?[*]vulkan.VkExtensionProperties)
-        vulkan.VkResult
-    {
+    fn call(self: Enumerator, count: *u32, properties: ?[*]vulkan.VkExtensionProperties) vulkan.VkResult {
         return switch (self) {
             .instance => |enumerate| enumerate(null, count, properties),
             .device => |device| device.enumerate(device.physical_device, null, count, properties),

@@ -1,5 +1,5 @@
 //! Fixed native-kernel generator. Run from the repository root.
-//! Build: zig build-exe tools/gen_native_kernels.zig -O ReleaseSafe -femit-bin=gen-native-kernels
+//! Build: zig build-exe tools/gen_native_kernels.zig -O safe -femit-bin=gen-native-kernels
 //! Run: DUSK_TINT=/absolute/path/to/tint ./gen-native-kernels --regen (or --check).
 
 const std = @import("std");
@@ -650,7 +650,7 @@ fn pointee(module: Module, variable: Node) Error!*const Node {
 fn checkBindings(module: Module, entry: manifest.Entry) Error!void {
     if (entry.bindings.len > max_bindings) return error.BindingMismatch;
     var found_count: usize = 0;
-    var seen = [_]bool{false} ** max_bindings;
+    var seen: [max_bindings]bool = @splat(false);
     for (module.nodes) |variable| {
         if (variable.opcode != 59) {
             if (variable.binding != null or variable.group != null) return error.BindingMismatch;
@@ -923,7 +923,7 @@ fn hasRuntimeArray(module: Module, id: u32, depth: usize) Error!bool {
 fn checkUniformWords(module: Module, id: u32, expected: []const UniformWord) Error!void {
     const max_uniform_words = 1024;
     if (expected.len > max_uniform_words) return error.UnsupportedSchema;
-    var buffer = [_]UniformWord{.padding} ** max_uniform_words;
+    var buffer: [max_uniform_words]UniformWord = @splat(.padding);
     const actual = buffer[0..expected.len];
     try scalarFootprint(module, id, actual, .{});
     if (!std.mem.eql(UniformWord, actual, expected)) return error.BindingMismatch;

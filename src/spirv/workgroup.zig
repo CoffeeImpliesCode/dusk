@@ -151,7 +151,7 @@ fn checkModeTarget(words: []const u32, id: u32) error_mod.Error!void {
         if (inst.opcode() != 15) continue;
         const entry = try instruction.readEntryPoint(inst);
         if (entry.id != id) continue;
-        if (@intFromEnum(entry.execution_model) != 5) return error.SpirvMalformed;
+        if (@backingInt(entry.execution_model) != 5) return error.SpirvMalformed;
         return;
     }
     return error.SpirvMalformed;
