@@ -6,6 +6,7 @@
 //! Evaluation is limited to 64 nested dependencies and 4096 visited nodes.
 const instruction = @import("instruction.zig");
 const error_mod = @import("error.zig");
+const word = @import("word.zig");
 
 /// The declaration form, not the Vulkan feature-support decision.
 pub const Size = union(enum) {
@@ -150,6 +151,7 @@ fn checkModeTarget(words: []const u32, id: u32) error_mod.Error!void {
     while (try cursor.next()) |inst| {
         if (inst.opcode() != 15) continue;
         const entry = try instruction.readEntryPoint(inst);
+        try word.validateString(entry.name_words);
         if (entry.id != id) continue;
         if (@backingInt(entry.execution_model) != 5) return error.SpirvMalformed;
         return;

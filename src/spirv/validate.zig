@@ -58,6 +58,7 @@ pub fn validate(words: []const Word) Error!void {
 /// must be a well-formed literal string.
 fn checkEntryPoint(inst: instruction.Instruction, id_bound: u32) Error!void {
     const fields = try instruction.readEntryPoint(inst);
+    try word.validateString(fields.name_words);
     try checkId(fields.id, id_bound);
     for (fields.interface) |interface_id| try checkId(interface_id, id_bound);
 }

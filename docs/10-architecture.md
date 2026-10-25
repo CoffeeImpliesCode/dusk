@@ -48,6 +48,8 @@ arena can outlive native payload destruction. See the
 
 The native shader path accepts SPIR-V, validates it, and reflects entry points
 and resource bindings. Vulkan shader modules use the supplied shader words.
+Reflected names borrow those words on little-endian hosts. On big-endian hosts,
+the reflection module owns decoded UTF-8 names and frees them at `deinit`.
 Native-kernel WGSL compilation uses external Tint during generation, not runtime.
 
 Raw Vulkan capabilities and frontend feature policy are separate.

@@ -103,6 +103,55 @@ test "spirv: the fragment entry point takes one input at set 0 binding 1" {
     try std.testing.expectEqual(@as(u32, 1), entry_point.resources[0].binding);
 }
 
+test "spirv: literal names preserve byte order and interface offsets" {
+    const cases = [_]struct { words: []const Word, text: []const u8 }{
+        .{ .words = &.{0}, .text = "" },
+        .{ .words = &.{0x0000_0061}, .text = "a" },
+        .{ .words = &.{0x0000_6261}, .text = "ab" },
+        .{ .words = &.{0x0063_6261}, .text = "abc" },
+        .{ .words = &.{ 0x6463_6261, 0 }, .text = "abcd" },
+        .{ .words = &.{ 0x6463_6261, 0x0000_0065 }, .text = "abcde" },
+        .{ .words = &.{ 0xc362_a1c3, 0x0000_00a9 }, .text = "ábé" },
+        .{ .words = &.{ 0xf063_6261, 0x0080_989f }, .text = "abc😀" },
+    };
+    for (cases) |case| {
+        var words: std.ArrayList(Word) = .empty;
+        defer words.deinit(std.testing.allocator);
+        try words.appendSlice(std.testing.allocator, &.{
+            spirv.magic_number, version_1_0, 0, 8, 0,
+            spirv.makeInstructionWord(15, @intCast(4 + case.words.len)),
+            5, 1,
+        });
+        try words.appendSlice(std.testing.allocator, case.words);
+        try words.append(std.testing.allocator, 7);
+        try spirv.validate(words.items);
+        const module = try spirv.reflect(std.testing.allocator, words.items);
+        defer module.deinit();
+        try std.testing.expectEqualStrings(case.text, module.entry_points[0].name);
+        if (@import("builtin").target.cpu.arch.endian() == .little) {
+            const borrowed = std.mem.sliceAsBytes(words.items[8..]);
+            try std.testing.expectEqual(borrowed.ptr, module.entry_points[0].name.ptr);
+        }
+    }
+}
+
+test "spirv: packed names reject invalid UTF-8 across word boundaries" {
+    for ([_][2]Word{
+        .{ 0xc363_6261, 0x0000_0028 },
+        .{ 0xf463_6261, 0x0080_8090 },
+        .{ 0xc363_6261, 0 },
+        .{ 0x6463_6261, 0x6867_6665 },
+    }) |name| {
+        const words = [_]Word{
+            spirv.magic_number, version_1_0, 0, 8, 0,
+            spirv.makeInstructionWord(15, 5), 5, 1,
+            name[0], name[1],
+        };
+        try std.testing.expectError(error.SpirvMalformed, spirv.validate(&words));
+        try std.testing.expectError(error.SpirvMalformed, spirv.reflect(std.testing.allocator, &words));
+    }
+}
+
 test "spirv: a decoration word replaced by OpNop is a malformed module" {
     const allocator = std.testing.allocator;
     const words = try loadFixture(allocator, fragment_fixture);

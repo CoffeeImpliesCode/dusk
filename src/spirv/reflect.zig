@@ -68,7 +68,7 @@ pub const EntryPoint = struct {
     execution_model: ExecutionModel,
     id: u32,
 
-    /// Borrowed from the words `reflect` was given.
+    /// Borrowed from the module words on LE, or Module.name_arena on BE.
     name: []const u8,
     resources: []Resource,
     /// Compute dimensions, borrowed ID declarations, or an absent declaration.
@@ -87,7 +87,7 @@ pub const ScalarType = union(enum) {
 pub const SpecializationConstant = struct {
     result_id: u32,
     spec_id: u32,
-    /// Borrowed from the module words; empty when no OpName is present.
+    /// Borrowed from module words or Module.name_arena; empty without OpName.
     name: []const u8,
     scalar_type: ScalarType,
 };
@@ -103,13 +103,16 @@ pub const Module = struct {
     /// In the order the module declares them.
     entry_points: []EntryPoint,
     specialization_constants: []SpecializationConstant,
+    /// Owns decoded names on BE; remains empty on LE.
+    name_arena: std.heap.ArenaAllocator,
 
-    /// Names borrow the words `reflect` was given, so a `Module` must not
-    /// outlive them. Both metadata slices and resource arrays are owned.
+    /// The module must not outlive its words. Metadata, resource arrays, and
+    /// any big-endian name storage are released here.
     pub fn deinit(self: Module) void {
         for (self.entry_points) |entry_point| freeResources(self.allocator, entry_point.resources);
         self.allocator.free(self.entry_points);
         self.allocator.free(self.specialization_constants);
+        self.name_arena.deinit();
     }
 
     pub const WorkgroupOverride = workgroup.Override;
@@ -172,7 +175,13 @@ pub const Module = struct {
 pub fn reflect(allocator: std.mem.Allocator, words: []const Word) ErrorOrOutOfMemory!Module {
     const module_header = try header.parse(words);
 
-    var tables: Tables = .{ .allocator = allocator, .id_bound = module_header.id_bound };
+    var name_arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer name_arena.deinit();
+    var tables: Tables = .{
+        .allocator = allocator,
+        .name_allocator = name_arena.allocator(),
+        .id_bound = module_header.id_bound,
+    };
     defer tables.deinit();
 
     try tables.readDeclarations(words);
@@ -185,14 +194,16 @@ pub fn reflect(allocator: std.mem.Allocator, words: []const Word) ErrorOrOutOfMe
     const specialization_constants = try tables.readSpecializationConstants();
     errdefer allocator.free(specialization_constants);
 
+    const entry_points = try readEntryPoints(allocator, words, &tables);
     return .{
         .allocator = allocator,
         .version = module_header.version,
         .generator_magic = module_header.generator_magic,
         .id_bound = module_header.id_bound,
         .words = words,
-        .entry_points = try readEntryPoints(allocator, words, &tables),
+        .entry_points = entry_points,
         .specialization_constants = specialization_constants,
+        .name_arena = name_arena,
     };
 }
 
@@ -209,6 +220,7 @@ fn readEntryPoints(
         if (inst.knownOpcode() != .entry_point) continue;
 
         const fields = try instruction.readEntryPoint(inst);
+        const name = try word.decodeString(tables.name_allocator, fields.name_words);
         if (fields.id == 0 or fields.id >= tables.id_bound) return error.SpirvMalformed;
         const workgroup_size = try workgroup.read(
             words,
@@ -226,7 +238,7 @@ fn readEntryPoints(
         try entry_points.append(allocator, .{
             .execution_model = fields.execution_model,
             .id = fields.id,
-            .name = fields.name,
+            .name = name,
             .resources = resources,
             .workgroup_size = workgroup_size.size,
             .has_local_size_id = workgroup_size.has_local_size_id,
@@ -478,6 +490,7 @@ const SpecDeclaration = struct {
 /// no module uses.
 const Tables = struct {
     allocator: std.mem.Allocator,
+    name_allocator: std.mem.Allocator,
     id_bound: u32,
     types: std.AutoHashMapUnmanaged(u32, TypeInfo) = .empty,
     variables: std.AutoHashMapUnmanaged(u32, Variable) = .empty,
@@ -578,7 +591,7 @@ const Tables = struct {
                 .name => {
                     if (operands.len < 2) return error.SpirvMalformed;
                     try self.checkId(operands[0]);
-                    const name = try word.decodeString(operands[1..]);
+                    const name = try word.decodeString(self.name_allocator, operands[1..]);
                     try self.names.put(self.allocator, operands[0], name);
                 },
                 .decoration_group => {

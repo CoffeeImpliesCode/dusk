@@ -54,7 +54,7 @@ fn read(words: []const Word, index: usize) Error!Instruction {
 pub const EntryPointFields = struct {
     execution_model: grammar.ExecutionModel,
     id: u32,
-    name: []const u8,
+    name_words: []const Word,
     interface: []const Word,
 };
 
@@ -62,6 +62,7 @@ pub const EntryPointFields = struct {
 ///
 /// The name is a packed literal string, so the interface starts after the word
 /// the terminator lands in rather than at a fixed offset.
+/// The caller must validate or decode `name_words` before using the entry point.
 pub fn readEntryPoint(inst: Instruction) Error!EntryPointFields {
     const operands = inst.operands();
     if (operands.len < 3) return error.SpirvMalformed;
@@ -75,7 +76,7 @@ pub fn readEntryPoint(inst: Instruction) Error!EntryPointFields {
     return .{
         .execution_model = execution_model,
         .id = operands[1],
-        .name = try word.decodeString(operands[2..][0..name_word_count]),
+        .name_words = operands[2..][0..name_word_count],
         .interface = operands[2 + name_word_count ..],
     };
 }

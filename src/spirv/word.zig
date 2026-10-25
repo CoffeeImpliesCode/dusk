@@ -7,6 +7,7 @@
 //! little-endian and never swaps.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const error_mod = @import("error.zig");
 
 const Error = error_mod.Error;
@@ -57,21 +58,20 @@ pub fn wordsFromBytes(
     return words;
 }
 
-/// The words of an operand list seen as the bytes a packed string is made of.
-fn stringBytes(words: []const Word) []const u8 {
-    return std.mem.bytesAsSlice(u8, std.mem.sliceAsBytes(words));
+/// A literal byte is packed from the least-significant end of each word,
+/// independent of the host's memory byte order.
+fn stringByte(words: []const Word, index: usize) u8 {
+    return @truncate(words[index / 4] >> @as(u5, @intCast((index % 4) * 8)));
 }
 
-/// Where the NUL that ends a packed string sits in its bytes, or null when the
-/// slice holds none.
-///
-/// SPIR-V packs a literal string into whole words in byte order and pads the
-/// last word with zeros, so the terminator is the first zero byte and not the
-/// first word whose low byte is zero. `inner` packs as the bytes
-/// `69 6e 6e 65 72 00 00 00` and ends at byte five.
-fn terminatorAt(bytes: []const u8) ?usize {
-    for (bytes, 0..) |byte, index| {
-        if (byte == 0) return index;
+fn terminatorAt(words: []const Word) ?usize {
+    if (builtin.target.cpu.arch.endian() == .little)
+        return std.mem.indexOfScalar(u8, std.mem.sliceAsBytes(words), 0);
+    for (words, 0..) |value, index| {
+        inline for (0..4) |byte| {
+            if (@as(u8, @truncate(value >> (byte * 8))) == 0)
+                return index * 4 + byte;
+        }
     }
     return null;
 }
@@ -82,23 +82,47 @@ fn terminatorAt(bytes: []const u8) ?usize {
 /// An instruction operand list can hold a string and then more operands, as
 /// `OpEntryPoint` holds its name and then its interface.
 pub fn stringEnd(words: []const Word) ?usize {
-    const terminator = terminatorAt(stringBytes(words)) orelse return null;
+    const terminator = terminatorAt(words) orelse return null;
     // The string holds `terminator + 1` bytes and the last word is padded, so
     // the count rounds up.
     const byte_count = terminator + 1;
     return @divFloor(byte_count + @sizeOf(Word) - 1, @sizeOf(Word));
 }
 
-/// The literal string the words hold, borrowed from them.
-///
-/// A SPIR-V literal string is UTF-8 with an implicit NUL at its end. Bytes
-/// after that NUL are the padding that fills the last word, and words after
-/// that are the operands the instruction puts behind the string.
-pub fn decodeString(words: []const Word) Error![]const u8 {
-    const bytes = stringBytes(words);
-    const terminator = terminatorAt(bytes) orelse return error.SpirvMalformed;
+/// Check a packed name without allocating, including on big-endian hosts.
+pub fn validateString(words: []const Word) Error!void {
+    const len = terminatorAt(words) orelse return error.SpirvMalformed;
+    if (builtin.target.cpu.arch.endian() == .little) {
+        if (!std.unicode.utf8ValidateSlice(std.mem.sliceAsBytes(words)[0..len]))
+            return error.SpirvMalformed;
+        return;
+    }
+    var index: usize = 0;
+    while (index < len) {
+        var sequence: [4]u8 = undefined;
+        sequence[0] = stringByte(words, index);
+        const count = std.unicode.utf8ByteSequenceLength(sequence[0]) catch
+            return error.SpirvMalformed;
+        if (count > len - index) return error.SpirvMalformed;
+        for (1..count) |offset| sequence[offset] = stringByte(words, index + offset);
+        _ = std.unicode.utf8Decode(sequence[0..count]) catch return error.SpirvMalformed;
+        index += count;
+    }
+}
 
-    const text = bytes[0..terminator];
+/// Decode a NUL-terminated UTF-8 literal, excluding padding and later operands.
+/// Little-endian hosts borrow the words. Big-endian hosts allocate from `arena`;
+/// the returned text remains valid until that arena is released.
+pub fn decodeString(arena: std.mem.Allocator, words: []const Word) ErrorOrOutOfMemory![]const u8 {
+    const len = terminatorAt(words) orelse return error.SpirvMalformed;
+    const text = if (builtin.target.cpu.arch.endian() == .little)
+        std.mem.sliceAsBytes(words)[0..len]
+    else text: {
+        const bytes = try arena.alloc(u8, len);
+        for (bytes, 0..) |*byte, index| byte.* = stringByte(words, index);
+        break :text bytes;
+    };
+    errdefer if (builtin.target.cpu.arch.endian() == .big) arena.free(text);
     if (!std.unicode.utf8ValidateSlice(text)) return error.SpirvMalformed;
     return text;
 }
