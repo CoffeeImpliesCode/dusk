@@ -74,13 +74,15 @@ operations.
 
 ```sh
 zig build               # configure the graph; no default compile artifact
-zig build test          # compile and run library tests and acceptance shards
-zig build test-memory   # select the memory acceptance shard
+zig build test          # full suite; requires a working Vulkan driver
+zig build cross-test    # CPU-only Debug library tests
+zig build test-null-device # CPU-only null-backend tests
+zig build test-memory   # CPU-only memory acceptance shard
 ```
 
-Native GPU tests need a working Vulkan driver. Offscreen tests can use lavapipe
-without a display. These tests do not establish support for every surface,
-external-memory mechanism, or operating system.
+`zig build test` includes native GPU tests and needs a working Vulkan driver.
+Lavapipe supports these offscreen tests without a display. These tests do not
+establish support for every surface, external-memory mechanism, or operating system.
 On high-core-count hosts, use `LP_NUM_THREADS=2 zig build test` with lavapipe.
 The development shell sets this limit to keep the driver worker pool within the
 test process address-space limit.
