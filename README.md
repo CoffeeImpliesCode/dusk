@@ -105,6 +105,6 @@ shader tooling.
 
 ## License
 
-The project license is undecided. This repository does not currently provide a
-project-wide license grant. Dawn is an upstream design reference with a
-BSD-3-Clause license. Its license does not determine this project's license.
+Dawn-derived port code, generated API bindings, and shader sources and binaries retain Dawn’s BSD-3-Clause terms. The generated Vulkan bindings use Khronos’s MIT option.
+
+MIT, see [LICENSE](LICENSE). Third-party components keep their own licenses: see THIRD_PARTY_NOTICES.md
